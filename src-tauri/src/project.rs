@@ -509,10 +509,14 @@ impl Workspace {
     }
 
     fn set_baseline(&mut self, rel: &str, content: Option<&str>, baseline: Option<String>) {
+        let had = self.baseline.contains_key(rel);
         match baseline {
             Some(b) if Some(b.as_str()) != content => self.baseline.insert(rel.into(), b),
             _ => self.baseline.remove(rel),
         };
+        if had != self.baseline.contains_key(rel) {
+            send(self.state()); // the explorer's and the tab's "to review" marks
+        }
     }
 
     fn external(&mut self, rel: &str, new: String) {

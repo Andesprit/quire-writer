@@ -300,6 +300,12 @@ ta.addEventListener("input", (e) => {
 ta.addEventListener("scroll", () => {
   hl.scrollTop = ta.scrollTop
 })
+// macOS "smart quotes and dashes" rewrite the word before the caret after every insert, so
+// `"en")` became `“en")` and `-->` became `—>`: in typing, the format bar's markup and agent
+// changes alike. Markup needs the characters as written; Typst and LaTeX make curly ones.
+ta.addEventListener("beforeinput", (e) => {
+  if (e.inputType === "insertReplacementText" && /^[‘’“”–—]+$/.test(e.data ?? "")) e.preventDefault()
+})
 const onCaret = () => {
   if (ghost && (ta.selectionStart !== ghost.pos || ta.selectionEnd !== ghost.pos)) clearGhost()
   markActive()

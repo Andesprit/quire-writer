@@ -341,9 +341,13 @@ impl Bridge {
                 st.chosen.clear();
             }
             st.agent_id = Some(agent_id.into());
-            st.conn = Some(conn); // usable only now, once it knows its folder and has started
+            st.conn = Some(conn.clone()); // usable only now, once it knows its folder and has started
         }
-        self.session("chat").await.map(|_| true)
+        match self.session("chat").await {
+            // Another folder or agent replaced this one while its session started: not an error.
+            Err(_) if !self.st().conn.as_ref().is_some_and(|c| Arc::ptr_eq(c, &conn)) => Ok(false),
+            r => r.map(|_| true),
+        }
     }
 
     pub fn stop(&self) {
