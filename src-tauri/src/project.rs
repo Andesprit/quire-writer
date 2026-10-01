@@ -293,13 +293,16 @@ pub struct Workspace {
     control: Option<UnboundedSender<String>>, // tinymist's editor connection
     preview_shown: bool,
     preview_id: u64, // which preview is the current one
-    latex: Option<Latex>,
+    asked: u64,      // the newest preview the page asked for: an older request that finishes later must not replace it
+    built: Option<Built>,
 }
 
-/// The LaTeX preview: the file compiled, where the PDF goes, and whether a compile runs.
-struct Latex {
+/// A preview the app builds itself on every change: the document as the export makes it,
+/// as PDF, Word or a web page. The file built, where its output goes, and whether a build runs.
+struct Built {
     main: String,
     out: PathBuf,
+    to: &'static str, // "pdf", "docx" or "html"
     running: bool,
     again: bool, // something changed during the compile: run once more
     id: u64,
@@ -329,7 +332,7 @@ fn skipped(rel: &Path) -> bool {
 fn walk(root: &Path, dir: &Path, files: &mut Vec<String>, dirs: &mut Vec<String>) {
     for e in fs::read_dir(dir).into_iter().flatten().flatten() {
         let p = e.path();
-        if skipped(Path::new(&e.file_name())) {
+        if skipped(Path::new(&e.file_name())) || quarto_output(&p) {
             continue;
         }
         let rel = p.strip_prefix(root).unwrap_or(&p).to_string_lossy().into_owned();
@@ -548,12 +551,18 @@ impl Workspace {
         }
     }
 
-    /// Returns whether the LaTeX preview should compile again.
+    /// Returns whether the built preview (LaTeX's PDF, Word) should build again.
     fn changed_on_disk(&mut self, root: &Path, paths: BTreeSet<PathBuf>) -> bool {
         if self.root.as_deref() != Some(root) {
             return false; // the watcher of a folder that is no longer open
         }
-        let latex = self.latex.is_some() && paths.iter().any(|p| p.strip_prefix(root).is_ok_and(|rel| !skipped(rel)));
+        // A file the writer already has stays theirs, even with the name Quarto would use.
+        let known = |p: &Path| p.strip_prefix(root).is_ok_and(|rel| self.known.contains_key(&*rel.to_string_lossy()));
+        let paths: BTreeSet<PathBuf> = paths.into_iter().filter(|p| known(p) || !quarto_output(p)).collect();
+        if paths.is_empty() {
+            return false;
+        }
+        let build = self.built.is_some() && paths.iter().any(|p| p.strip_prefix(root).is_ok_and(|rel| !skipped(rel)));
         for p in paths {
             let Ok(rel) = p.strip_prefix(root) else { continue };
             if !p.exists() {
@@ -566,7 +575,13 @@ impl Workspace {
             }
         }
         send(self.state());
-        latex
+        build
+    }
+
+    /// Stop whatever preview runs for the one the page asked for as `asked`, unless it has asked
+    /// for another since. Returns the id the new preview gets.
+    fn start_preview(&mut self, asked: u64) -> Option<u64> {
+        (asked == self.asked).then(|| self.stop_preview())
     }
 
     /// Stop whatever preview runs. Returns the id the next preview gets.
@@ -576,9 +591,19 @@ impl Workspace {
                 unsafe { libc::killpg(pid as i32, libc::SIGTERM) }; // Quarto runs helpers of its own
             }
         }
-        (self.control, self.preview_shown, self.latex) = (None, false, None);
+        (self.control, self.preview_shown, self.built) = (None, false, None);
         self.preview_id += 1;
         self.preview_id
+    }
+
+    /// The whole document `rel` belongs to, as the preview and export show it: Typst's
+    /// main.typ, LaTeX's main file, or else the file itself.
+    fn main_of(&self, rel: &str) -> String {
+        match lang_of(rel) {
+            Lang::Typst if self.known.contains_key("main.typ") => "main.typ".into(),
+            Lang::Latex => self.latex_main(rel),
+            _ => rel.to_string(),
+        }
     }
 
     /// The file LaTeX compiles: the one a "% !TEX root = ..." line names, the file itself
@@ -719,25 +744,32 @@ fn our(page: &str) -> String {
     format!("quire://localhost/{page}")
 }
 
-async fn preview(rel: &str) -> Result<(), String> {
-    match lang_of(rel) {
-        Lang::Typst => typst_preview(rel).await,
-        Lang::Latex => latex_preview(rel),
-        Lang::Quarto => quarto_preview(rel).await,
-        Lang::Markdown => {
+/// The document as `to` shows it: "pdf", "docx" or "html". Typst's PDF, Quarto's and
+/// Markdown's HTML are live views; the rest are the export, built again on every change.
+/// `asked` numbers the page's requests (see `start`).
+async fn preview(rel: &str, to: &str, asked: u64) -> Result<(), String> {
+    match (lang_of(rel), to) {
+        (Lang::Text, _) => Ok(()),
+        (Lang::Typst, "pdf") => typst_preview(rel, asked).await,
+        (Lang::Quarto, "html") => quarto_preview(rel, asked).await,
+        (Lang::Markdown, "html") => {
             // Drawn by the page itself from the text in the editor: no program to run.
-            ws().stop_preview();
-            send(json!({"type": "preview", "path": rel, "kind": "markdown", "url": our("markdown.html")}));
+            if ws().start_preview(asked).is_some() {
+                send(json!({"type": "preview", "path": rel, "kind": "markdown", "url": our("markdown.html")}));
+            }
             Ok(())
         }
-        Lang::Text => Ok(()),
+        (_, "pdf") => built_preview(rel, "pdf", asked),
+        (_, "docx") => built_preview(rel, "docx", asked),
+        (_, "html") => built_preview(rel, "html", asked),
+        _ => Err(format!("Quire cannot preview as .{to}.")),
     }
 }
 
-async fn typst_preview(rel: &str) -> Result<(), String> {
+async fn typst_preview(rel: &str, asked: u64) -> Result<(), String> {
     let (file, root, id) = {
         let mut w = ws();
-        let id = w.stop_preview();
+        let Some(id) = w.start_preview(asked) else { return Ok(()) };
         (w.path(rel)?, w.root()?.to_path_buf(), id)
     };
     let (port, data, control) = (free_port()?, free_port()?, free_port()?);
@@ -800,7 +832,7 @@ async fn typst_preview(rel: &str) -> Result<(), String> {
         });
         tokio::spawn(follow(incoming, id));
     }
-    send(json!({"type": "preview", "path": rel, "kind": "html", "url": format!("http://127.0.0.1:{port}")}));
+    send(json!({"type": "preview", "path": rel, "kind": "live", "url": format!("http://127.0.0.1:{port}")}));
     Ok(())
 }
 
@@ -814,11 +846,15 @@ fn keep_preview(child: Child, id: u64) {
     }
 }
 
-fn latex_preview(rel: &str) -> Result<(), String> {
+/// The document exported as `to` ("pdf", "docx" or "html"), built again on every change.
+fn built_preview(rel: &str, to: &'static str, asked: u64) -> Result<(), String> {
     let mut w = ws();
-    let main = w.latex_main(rel);
-    let message = json!({"type": "preview", "path": main, "kind": "pdf", "url": our("pdf.html")});
-    if w.latex.as_ref().is_some_and(|l| l.main == main) {
+    if asked != w.asked {
+        return Ok(()); // the page asked for another preview since
+    }
+    let main = w.main_of(rel);
+    let message = json!({"type": "preview", "path": main, "kind": to, "url": our(&format!("{to}.html"))});
+    if w.built.as_ref().is_some_and(|b| b.main == main && b.to == to) {
         send(message); // a chapter of the document already shown
         return Ok(());
     }
@@ -826,8 +862,8 @@ fn latex_preview(rel: &str) -> Result<(), String> {
     // Build files go outside the folder: the writer's project stays clean, and the watcher
     // does not see them (they would start the next compile).
     let file = w.path(&main)?;
-    let out = std::env::temp_dir().join(format!("quire-latex-{:x}", hash(&file)));
-    w.latex = Some(Latex { main, out, running: false, again: false, id });
+    let out = std::env::temp_dir().join(format!("quire-{to}-{:x}", hash(&file)));
+    w.built = Some(Built { main, out, to, running: false, again: false, id });
     drop(w);
     send(message);
     compile();
@@ -841,29 +877,30 @@ fn hash(p: &Path) -> u64 {
     h.finish()
 }
 
-/// Compile the LaTeX preview now, or once more after the compile that is running.
+/// Build the preview now, or once more after the build that is running.
 fn compile() {
-    let (file, out, id) = {
+    let (file, root, bib, out, to, id) = {
         let mut w = ws();
-        let Some(l) = &mut w.latex else { return };
-        if l.running {
-            l.again = true;
+        let Some(b) = &mut w.built else { return };
+        if b.running {
+            b.again = true;
             return;
         }
-        l.running = true;
-        let (main, out, id) = (l.main.clone(), l.out.clone(), l.id);
-        let Ok(file) = w.path(&main) else { return };
-        (file, out, id)
+        b.running = true;
+        let (main, out, to, id) = (b.main.clone(), b.out.clone(), b.to, b.id);
+        let bib = w.bib_file(&main).ok().filter(|(_, linked)| *linked).and_then(|(b, _)| w.path(&b).ok());
+        let (Ok(file), Ok(root)) = (w.path(&main), w.root().map(Path::to_path_buf)) else { return };
+        (file, root, bib, out, to, id)
     };
     tokio::spawn(async move {
         loop {
-            send(json!({"type": "latex", "running": true}));
-            match run_latex(&file, &out).await {
-                Ok(()) => send(json!({"type": "latex", "ok": true})),
-                Err(log) => send(json!({"type": "latex", "ok": false, "log": log})),
+            send(json!({"type": "build", "running": true}));
+            match convert(&file, &root, to, bib.clone(), &out).await {
+                Ok(()) => send(json!({"type": "build", "ok": true})),
+                Err(log) => send(json!({"type": "build", "ok": false, "log": log})),
             }
             let mut w = ws();
-            match &mut w.latex {
+            match &mut w.built {
                 Some(l) if l.id == id && l.again => l.again = false,
                 Some(l) if l.id == id => {
                     l.running = false;
@@ -912,10 +949,10 @@ async fn run_latex(file: &Path, out: &Path) -> Result<(), String> {
 }
 
 /// Quarto renders the file, serves it, and renders it again on every save.
-async fn quarto_preview(rel: &str) -> Result<(), String> {
+async fn quarto_preview(rel: &str, asked: u64) -> Result<(), String> {
     let (file, id) = {
         let mut w = ws();
-        let id = w.stop_preview();
+        let Some(id) = w.start_preview(asked) else { return Ok(()) };
         (w.path(rel)?, id)
     };
     let port = free_port()?;
@@ -943,7 +980,7 @@ async fn quarto_preview(rel: &str) -> Result<(), String> {
             return Ok(()); // another preview replaced this one
         }
         if tokio::net::TcpStream::connect(("127.0.0.1", port)).await.is_ok() {
-            send(json!({"type": "preview", "path": rel, "kind": "html", "url": format!("http://127.0.0.1:{port}/")}));
+            send(json!({"type": "preview", "path": rel, "kind": "live", "url": format!("http://127.0.0.1:{port}/")}));
             return Ok(());
         }
         let exited = ws().preview_proc.as_mut().map(|c| c.try_wait().is_ok_and(|s| s.is_some()));
@@ -1019,12 +1056,7 @@ static EXPORTED: Mutex<Vec<PathBuf>> = Mutex::new(Vec::new()); // the files "rev
 async fn export(rel: &str, to: &str) -> Result<Option<PathBuf>, String> {
     let (root, file, bib) = {
         let w = ws();
-        // The whole document: Typst's main.typ and LaTeX's main file, as the preview shows.
-        let main = match lang_of(rel) {
-            Lang::Typst if w.known.contains_key("main.typ") => "main.typ".into(),
-            Lang::Latex => w.latex_main(rel),
-            _ => rel.to_string(),
-        };
+        let main = w.main_of(rel);
         let bib = w.bib_file(&main).ok().filter(|(_, linked)| *linked).and_then(|(b, _)| w.path(&b).ok());
         (w.root()?.to_path_buf(), w.path(&main)?, bib)
     };
@@ -1064,12 +1096,24 @@ async fn convert(file: &Path, root: &Path, to: &str, bib: Option<PathBuf>, tmp: 
     let name = file.file_name().unwrap();
     let out = tmp.join(file.with_extension(to).file_name().unwrap());
     let mut cmd = match (lang, to) {
-        (Lang::Typst, "pdf") => {
+        (Lang::Typst, "pdf" | "html") => {
             let mut cmd = Command::new("tinymist");
             cmd.arg("compile").arg(file).arg(&out).arg("--root").arg(root);
             cmd
         }
         (Lang::Latex, "pdf") => return run_latex(file, tmp).await,
+        (Lang::Typst, "docx") => {
+            // Pandoc reads Typst only in part: it fails on packages such as cetz. Typst
+            // writes the document as HTML, and Pandoc turns that into Word.
+            let html = out.with_extension("html");
+            let o = Command::new("tinymist").arg("compile").arg(file).arg(&html).arg("--root").arg(root).stdin(Stdio::null()).output().await.map_err(err)?;
+            if !o.status.success() {
+                return Err(why(&String::from_utf8_lossy(&o.stderr)));
+            }
+            let mut cmd = pandoc()?;
+            cmd.args(["-f", "html", "-t", "docx"]).arg(&html).arg("-o").arg(&out);
+            cmd
+        }
         // Not Typst source: Quarto writes that next to the document, over any file of that name.
         (Lang::Quarto | Lang::Markdown, _) if to != "typ" && on_path("quarto") => {
             let format = match quarto_format {
@@ -1104,18 +1148,64 @@ async fn convert(file: &Path, root: &Path, to: &str, bib: Option<PathBuf>, tmp: 
                         cmd.arg("--bibliography").arg(bib);
                     }
                     if to == "html" {
-                        cmd.args(["-s", "--embed-resources"]);
+                        cmd.args(["-s", "--embed-resources", "--mathml"]);
                     }
                 }
             }
             cmd
         }
     };
+    let _rendering = cmd.as_std().get_args().next().is_some_and(|a| a == "render").then(|| Rendering::start(file));
     let o = cmd.current_dir(file.parent().unwrap()).stdin(Stdio::null()).output().await.map_err(err)?;
     if o.status.success() {
         return Ok(());
     }
     Err(why(&(String::from_utf8_lossy(&o.stdout).into_owned() + &String::from_utf8_lossy(&o.stderr))))
+}
+
+/// Documents Quarto renders now (no end yet), or finished rendering under two seconds ago.
+/// What it writes next to one for that time (`report.typ`, `report_files/`) is its own work:
+/// not a change to review, not a file for the explorer, and no reason to build again.
+static RENDERING: Mutex<Vec<(PathBuf, Option<Instant>)>> = Mutex::new(Vec::new());
+
+/// `doc` renders until this is dropped.
+struct Rendering(PathBuf);
+
+impl Rendering {
+    fn start(doc: &Path) -> Self {
+        lock(&RENDERING).push((doc.into(), None));
+        Rendering(doc.into())
+    }
+}
+
+impl Drop for Rendering {
+    fn drop(&mut self) {
+        if let Some(r) = lock(&RENDERING).iter_mut().find(|(d, end)| *d == self.0 && end.is_none()) {
+            r.1 = Some(Instant::now());
+        }
+        // Then the explorer shows what Quarto left (an export into the project, say).
+        tauri::async_runtime::spawn(async {
+            tokio::time::sleep(Duration::from_millis(2100)).await;
+            let w = ws();
+            if w.root.is_some() {
+                send(w.state());
+            }
+        });
+    }
+}
+
+/// Whether `p` is a file Quarto writes next to a document it is rendering.
+fn quarto_output(p: &Path) -> bool {
+    const OUT: [&str; 9] = ["typ", "tex", "pdf", "docx", "odt", "epub", "html", "md", "quarto_ipynb"];
+    let mut r = lock(&RENDERING);
+    r.retain(|(_, end)| end.is_none_or(|t| t.elapsed() < Duration::from_secs(2)));
+    r.iter().any(|(doc, _)| {
+        let (Some(dir), Some(stem)) = (doc.parent(), doc.file_stem()) else { return false };
+        let Some(first) = p.strip_prefix(dir).ok().and_then(|rest| rest.components().next()) else { return false };
+        let (name, stem) = (first.as_os_str().to_string_lossy(), stem.to_string_lossy());
+        let out = Path::new(&*name).extension().and_then(|e| e.to_str()).is_some_and(|e| OUT.contains(&e));
+        p != doc && (name == format!("{stem}_files") || (name.starts_with(&format!("{stem}.")) && out))
+    })
 }
 
 /// Quarto's way to a PDF: through Typst, which Quarto carries, so no TeX is needed. A
@@ -1319,7 +1409,7 @@ async fn handle(msg: &Value) -> Result<(), String> {
         "create" => ws().create(f("path")?, msg["folder"].as_bool().unwrap_or(false))?,
         "rename" => ws().rename(f("from")?, f("to")?)?,
         "delete" => ws().delete(f("path")?)?,
-        "preview" => preview(f("path")?).await?,
+        "preview" => preview(f("path")?, f("to")?, msg["asked"].as_u64().unwrap_or(0)).await?,
         "scroll_preview" => ws().scroll_preview(f("path")?, &msg["line"], &msg["col"])?,
         "cite" => {
             let mut result = cite(f("id")?, opt("path").unwrap_or("")).await?;
@@ -1401,7 +1491,13 @@ pub fn start(app: AppHandle, folder: Option<String>) {
     let (tx, mut rx) = unbounded_channel::<Value>();
     let _ = INBOX.set(tx);
     tauri::async_runtime::spawn(async move {
-        while let Some(msg) = rx.recv().await {
+        while let Some(mut msg) = rx.recv().await {
+            if msg["type"] == "preview" {
+                // Numbered in the order the page asked, before they run side by side.
+                let mut w = ws();
+                w.asked += 1;
+                msg["asked"] = w.asked.into();
+            }
             if matches!(msg["type"].as_str(), Some("save" | "review")) {
                 safe(msg).await; // in order, so an older save never lands after a newer one
             } else {
@@ -1421,8 +1517,8 @@ pub fn protocol(app: &AppHandle, path: &str) -> Response<Vec<u8>> {
     let path = percent_encoding::percent_decode_str(path).decode_utf8_lossy();
     let file = if let Some(rel) = path.strip_prefix("/file/") {
         (!skipped(Path::new(rel))).then(|| ws().path(rel).ok()).flatten() // hidden files stay hidden
-    } else if path == "/pdf" {
-        ws().latex.as_ref().map(|l| l.out.join(Path::new(&l.main).with_extension("pdf").file_name().unwrap()))
+    } else if matches!(&*path, "/pdf" | "/docx" | "/html") {
+        ws().built.as_ref().filter(|b| path[1..] == *b.to).map(|b| b.out.join(Path::new(&b.main).with_extension(b.to).file_name().unwrap()))
     } else {
         return match app.asset_resolver().get(path.into_owned()) {
             Some(asset) => Response::builder().header("content-type", asset.mime_type).body(asset.bytes).unwrap(),
@@ -1462,6 +1558,21 @@ mod tests {
 
     fn map<V: Clone>(pairs: &[(&str, V)]) -> BTreeMap<String, V> {
         pairs.iter().map(|(k, v)| (k.to_string(), v.clone())).collect()
+    }
+
+    #[test]
+    fn quarto_output() {
+        let doc = Path::new("/q/report.qmd");
+        assert!(!super::quarto_output(Path::new("/q/report.typ"))); // nothing renders yet
+        let rendering = Rendering::start(doc);
+        for p in ["/q/report.typ", "/q/report.docx", "/q/report.knit.md", "/q/report_files/libs/a.js"] {
+            assert!(super::quarto_output(Path::new(p)), "{p}");
+        }
+        for p in ["/q/report.qmd", "/q/report.bib", "/q/other.typ", "/q/sub/report.typ", "/q/reports.typ"] {
+            assert!(!super::quarto_output(Path::new(p)), "{p}");
+        }
+        drop(rendering);
+        assert!(super::quarto_output(Path::new("/q/report.typ"))); // still, for a moment
     }
 
     #[test]

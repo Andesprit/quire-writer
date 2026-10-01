@@ -1,0 +1,27 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Word preview</title>
+  <!-- No script from the document: a javascript: link or other trick in it cannot run. -->
+  <meta http-equiv="Content-Security-Policy" content="script-src 'self'; object-src 'none'" />
+  <style>
+    body { margin: 0; background: #e8e8e8; font: 13px -apple-system, system-ui, sans-serif; }
+    #note { position: sticky; top: 0; z-index: 1; margin: 0; padding: 8px 16px; background: #fff8e1; color: #5c4400; white-space: pre-wrap; font: 12px ui-monospace, Menlo, monospace; }
+    #note:empty { display: none; }
+    #note.busy { background: #f3f3f3; color: #555; font-family: -apple-system, system-ui, sans-serif; }
+    /* As the PDF preview looks, over docx-preview's own grey wrapper */
+    #pages .docx-wrapper { background: none; padding: 16px; }
+    #pages .docx-wrapper > section.docx { margin-bottom: 12px; box-shadow: 0 1px 4px rgb(0 0 0 / 0.2); }
+    /* Pandoc's Word files name no page size: Word then uses Letter with 1 inch margins. A
+       size the file does name comes as an inline style and wins. */
+    #pages section.docx { width: 8.5in; padding: 1in; }
+  </style>
+</head>
+<body>
+  <p id="note" class="busy">Converting to Word…</p>
+  <div id="pages"></div>
+  <script type="module" src="./docx.ts"></script>
+</body>
+</html>

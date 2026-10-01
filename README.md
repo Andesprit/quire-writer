@@ -27,6 +27,10 @@ with Cmd+K, accept autocomplete with Tab, and keep Grammarly working in the edit
     TeX Live, or else Tectonic). Chapters with `% !TEX root = main.tex` show the main file.
   - Quarto: `quarto preview`, which renders again on every save.
   - Markdown: drawn as you type, with math. No install needed.
+  - PDF, Word or HTML (buttons at the top of the preview), for each kind of document. Typst
+    and LaTeX start as PDF, Quarto and Markdown as HTML; each kind remembers its choice. The
+    other views are the export, made again on every save. Quarto and Markdown as PDF need Quarto.
+  - The export button next to them saves the document in the format the preview shows.
 - Labels: a list under the explorer of every label in the project (Typst `<name>`, LaTeX
   `\label{name}`, Quarto `{#sec-name}`), how often it is used, and which ones nothing refers
   to. Click one to go to it.
@@ -142,7 +146,8 @@ The workflow needs these repository secrets:
   chat and `ui.ts` small shared helpers. The editor is a plain text field, so Grammarly and the
   spellchecker work in it; a colored copy of the text is drawn behind it (`web/highlight.ts`).
   Track changes use the diff from `@codemirror/merge`. `web/markdown.ts` draws the Markdown
-  preview (marked and KaTeX) and `web/pdf.ts` the LaTeX one (pdf.js).
+  preview (marked and KaTeX), `web/pdf.ts` the PDFs (pdf.js), `web/docx.ts` the Word files
+  (docx-preview) and `web/html.ts` the web pages.
 
 ## Contributing
 

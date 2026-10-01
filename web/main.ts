@@ -494,7 +494,7 @@ function openFile(path: string, content: string, base: string | null) {
   const target = lang === "text" ? null : lang === "typst" && files.includes("main.typ") ? "main.typ" : path
   if (target && target !== previewing) {
     previewing = target
-    send({ type: "preview", path: target })
+    requestPreview(target)
   }
   if (pendingJump?.path === path) goTo(path, pendingJump.line, pendingJump.col)
 }
@@ -1398,9 +1398,33 @@ function exported(path: string | null) {
   ])
 }
 
-// ---------- previews we draw ourselves: Markdown from the text as typed, PDF from LaTeX ----------
+// ---------- previews we draw ourselves: Markdown from the text as typed, and the built PDF, Word and web page ----------
 
-let previewKind = "" // html (tinymist, Quarto), markdown or pdf
+let previewKind = "" // live (tinymist, Quarto), markdown, pdf, docx or html
+
+// The preview shows the document as a PDF, as Word shows it or as a web page: what the export
+// of that format makes. Each language keeps its own choice; Typst and LaTeX start as PDF,
+// Quarto and Markdown as a web page.
+const PREVIEW_AS: Record<string, string> = { pdf: "PDF", docx: "Word (.docx)", html: "web page (.html)" }
+const previewAs = (l: Lang) => store.get(`preview.${l}`) ?? (l === "quarto" || l === "markdown" ? "html" : "pdf")
+const requestPreview = (path: string) => send({ type: "preview", path, to: previewAs(langOf(path)) })
+function renderPreviewAs() {
+  const as = previewAs(langOf(previewing ?? current ?? ""))
+  for (const b of document.querySelectorAll<HTMLElement>("[data-as]")) b.setAttribute("aria-pressed", String(b.dataset.as === as))
+  $("export-preview").title = `Export as ${PREVIEW_AS[as]}`
+}
+for (const b of document.querySelectorAll<HTMLElement>("[data-as]")) {
+  b.onclick = () => {
+    const l = langOf(previewing ?? current ?? "")
+    if (previewAs(l) === b.dataset.as) return
+    store.set(`preview.${l}`, b.dataset.as!)
+    renderPreviewAs()
+    if (previewing) requestPreview(previewing)
+  }
+}
+// The document in the format the preview shows, made again by the export.
+$("export-preview").onclick = () => exportAs(previewAs(langOf(previewing ?? current ?? "")))
+renderPreviewAs()
 function toPreview(msg: object) {
   const frame = $<HTMLIFrameElement>("preview")
   const url = frame.src && new URL(frame.src) // quire://localhost has no URL.origin, so build it
@@ -1582,14 +1606,15 @@ function onMessage(msg: any) {
       previewing = msg.path
       previewKind = msg.kind
       $("preview-name").textContent = `Preview ${baseName(msg.path)}`
+      renderPreviewAs()
       // The Markdown and PDF viewers stay loaded (and keep their scroll) from file to file.
       const url = new URL(msg.url).href
       if ($<HTMLIFrameElement>("preview").src !== url) $<HTMLIFrameElement>("preview").src = url
       if (previewKind === "markdown") sendMarkdown()
       break
     }
-    case "latex":
-      if (previewKind === "pdf") toPreview(msg) // the PDF viewer reloads, or shows the error
+    case "build":
+      if (["pdf", "docx", "html"].includes(previewKind)) toPreview(msg) // the viewer reloads, or shows the error
       break
     case "exporting":
       exporting = toast(`Exporting ${msg.name}…`, "info")
@@ -1623,7 +1648,7 @@ function onMessage(msg: any) {
       if (previewing && within(previewing, msg.from)) {
         previewing = move(previewing)
         $("preview-name").textContent = `Preview ${baseName(previewing)}`
-        send({ type: "preview", path: previewing })
+        requestPreview(previewing)
       }
       renderTree()
       break

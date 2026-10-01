@@ -1,0 +1,23 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Web page preview</title>
+  <!-- No script from the document: a javascript: link or other trick in it cannot run. -->
+  <meta http-equiv="Content-Security-Policy" content="script-src 'self'; object-src 'none'" />
+  <style>
+    html, body { height: 100%; }
+    body { margin: 0; display: flex; flex-direction: column; background: #fff; font: 13px -apple-system, system-ui, sans-serif; }
+    #note { margin: 0; padding: 8px 16px; background: #fff8e1; color: #5c4400; white-space: pre-wrap; font: 12px ui-monospace, Menlo, monospace; }
+    #note:empty { display: none; }
+    #note.busy { background: #f3f3f3; color: #555; font-family: -apple-system, system-ui, sans-serif; }
+    #page { flex: 1; width: 100%; border: 0; }
+  </style>
+</head>
+<body>
+  <p id="note" class="busy">Converting to a web page…</p>
+  <iframe id="page" title="The document as a web page" sandbox="allow-same-origin"></iframe>
+  <script type="module" src="./html.ts"></script>
+</body>
+</html>
