@@ -1,7 +1,10 @@
-# Quire
+# Quire Writer
 
-A writing app for Typst, LaTeX, Quarto and Markdown with an AI agent of your choice
+A macOS writing app for Typst, LaTeX, Quarto and Markdown with an AI agent of your choice
 (Claude, Codex, Gemini and any other agent in the ACP registry), using your own agent login.
+Every change the agent makes waits for your review. In the app it is called Quire.
+
+![Quire in its four own themes: Series, Galley, Coupon and Slate](docs/themes.webp)
 
 - New project: pick Typst, LaTeX, Quarto or Markdown, then a folder. It gets a starter file
   (`main.typ`, `main.tex`, `index.qmd` or `main.md`) that shows how that kind of document
@@ -39,8 +42,22 @@ A writing app for Typst, LaTeX, Quarto and Markdown with an AI agent of your cho
 
 ## Install
 
-Download the `.dmg` of the [latest release](https://github.com/Andesprit/quire/releases/latest),
+Download the `.dmg` of the [latest release](https://github.com/Andesprit/quire-writer/releases/latest),
 open it and drag Quire to Applications. Needs a Mac with Apple Silicon.
+
+## Privacy
+
+Quire has no account, no telemetry and no server of its own. Your files stay on your Mac.
+It goes online only for these:
+
+- Your agent: it runs on your Mac with your own login. For chat, Cmd+K and autocomplete it
+  sends your request and the parts of your project it reads to its provider. That
+  provider's terms apply.
+- Starting an agent the first time: `npx` or `uvx` download it from npm or PyPI.
+- Citations by DOI or arXiv ID: one request to doi.org.
+- Updates: a check on GitHub at start and once a day, then the download of a new version.
+
+Your own TeX, Quarto or Pandoc may go online on their own, for example to fetch packages.
 
 ## Run (macOS)
 
@@ -112,6 +129,12 @@ The workflow needs these repository secrets:
   spellchecker work in it; a colored copy of the text is drawn behind it (`web/highlight.ts`).
   Track changes use the diff from `@codemirror/merge`. `web/markdown.ts` draws the Markdown
   preview (marked and KaTeX) and `web/pdf.ts` the LaTeX one (pdf.js).
+
+## Contributing
+
+Bug reports, ideas and pull requests are welcome: see [CONTRIBUTING.md](CONTRIBUTING.md).
+Every commit needs a `Signed-off-by` line (the Developer Certificate of Origin):
+`git commit -s`. Security problems go to a private report: see [SECURITY.md](SECURITY.md).
 
 ## License
 

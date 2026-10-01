@@ -50,7 +50,8 @@ because nothing lands without their say.
 ## Brand Commitments
 
 - The name is Quire. It is set in one place in the editor (`APP_NAME`) and in the app's
-  build settings.
+  build settings. The open-source project and its repository are Quire Writer
+  (`Andesprit/quire-writer`), because other products are called Quire.
 - The user pinned VS Code and Cursor as the interface reference: activity bar, explorer,
   editor tabs, side panels, status bar, command-style controls, played straight.
 - Personality comes from color themes, as in VS Code: the layout stays the same and a theme

@@ -1,0 +1,30 @@
+# Developer Certificate of Origin: every commit in a pull request needs a
+# "Signed-off-by: Name <email>" line matching its author (git commit -s). See CONTRIBUTING.md.
+name: DCO
+
+on: pull_request
+
+jobs:
+  dco:
+    name: DCO
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          fetch-depth: 0
+
+      - name: Every commit is signed off by its author
+        env:
+          BASE: ${{ github.event.pull_request.base.sha }}
+          HEAD: ${{ github.event.pull_request.head.sha }}
+        run: |
+          missing=0
+          for c in $(git rev-list --no-merges "$BASE..$HEAD"); do
+            author=$(git log -1 --format='%an <%ae>' "$c")
+            case "$author" in *"[bot]"*) continue ;; esac # Dependabot and other bots cannot sign off
+            if ! git log -1 --format=%B "$c" | grep -qiF "Signed-off-by: $author"; then
+              echo "::error::Commit $(git log -1 --format='%h "%s"' "$c") needs the line 'Signed-off-by: $author'. Add it with: git rebase --signoff $BASE, then push again."
+              missing=1
+            fi
+          done
+          exit $missing

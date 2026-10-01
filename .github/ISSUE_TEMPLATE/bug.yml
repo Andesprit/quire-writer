@@ -1,0 +1,54 @@
+name: Bug report
+description: Something does not work as it should.
+labels: [bug]
+body:
+  - type: textarea
+    id: what
+    attributes:
+      label: What happened
+      description: What you did, what you expected, and what happened instead.
+    validations:
+      required: true
+  - type: textarea
+    id: steps
+    attributes:
+      label: Steps to reproduce
+      placeholder: |
+        1. Open a Typst project
+        2. Select a paragraph and press Cmd+K
+        3. ...
+    validations:
+      required: true
+  - type: input
+    id: version
+    attributes:
+      label: Quire version
+      description: Quire > About Quire.
+      placeholder: "0.1.0"
+    validations:
+      required: true
+  - type: input
+    id: macos
+    attributes:
+      label: macOS version
+      placeholder: "26.0"
+    validations:
+      required: true
+  - type: input
+    id: agent
+    attributes:
+      label: Agent and model
+      description: From the status bar, for example "Claude Agent, Opus". Write "none" if the bug has nothing to do with the agent.
+  - type: dropdown
+    id: kind
+    attributes:
+      label: Kind of document
+      options: [Typst, LaTeX, Quarto, Markdown, Other or not related]
+    validations:
+      required: true
+  - type: textarea
+    id: log
+    attributes:
+      label: Log
+      description: The last lines of ~/Library/Logs/com.andesprit.quire/agent.log. Remove anything private first.
+      render: text

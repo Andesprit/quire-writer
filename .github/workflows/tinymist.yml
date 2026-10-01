@@ -1,0 +1,34 @@
+# Quire bundles a pinned tinymist (TINYMIST in release.yml). Each week, open an issue when a
+# newer tinymist is out, so the pin does not fall behind. Dependabot cannot see this pin.
+name: tinymist update
+
+on:
+  schedule:
+    - cron: "0 8 * * 1"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  issues: write
+
+jobs:
+  check:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: Open an issue for a newer tinymist
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+        run: |
+          pinned=$(sed -n 's/^  TINYMIST: \(v[^ ]*\).*/\1/p' .github/workflows/release.yml)
+          latest=$(gh release view --repo Myriad-Dreamin/tinymist --json tagName --jq .tagName)
+          echo "pinned $pinned, latest $latest"
+          [ "$pinned" = "$latest" ] && exit 0
+          title="Update the bundled tinymist to $latest"
+          open=$(gh issue list --state open --search "in:title \"$title\"" --json number --jq length)
+          [ "$open" != 0 ] && exit 0
+          gh issue create --title "$title" --body "Quire ships tinymist $pinned, and $latest is out: https://github.com/Myriad-Dreamin/tinymist/releases/tag/$latest
+
+          Change TINYMIST in .github/workflows/release.yml, check the Typst preview, then release."

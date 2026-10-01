@@ -18,7 +18,7 @@
   "plugins": {
     "updater": {
       "pubkey": "dW50cnVzdGVkIGNvbW1lbnQ6IG1pbmlzaWduIHB1YmxpYyBrZXk6IDBENzA3NEJDNUUxOTU2OTQKUldTVVZobGV2SFJ3RFhrSTlGUCtCYjZhTFErNmMrSGJZblR4blpCeUlwekNQa2pRUlphQTgzaSsK",
-      "endpoints": ["https://github.com/Andesprit/quire/releases/latest/download/latest.json"]
+      "endpoints": ["https://github.com/Andesprit/quire-writer/releases/latest/download/latest.json"]
     }
   }
 }
