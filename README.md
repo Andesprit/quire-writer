@@ -4,7 +4,7 @@ A macOS writing app for Typst, LaTeX, Quarto and Markdown with an AI agent of yo
 (Claude, Codex, Gemini and any other agent in the ACP registry), using your own agent login.
 Every change the agent makes waits for your review. In the app it is called Quire.
 
-![Quire in its four own themes: Series, Galley, Coupon and Slate](docs/themes.webp)
+![Quire in its four own themes: Series, Galley, Coupon and Slate](site/themes.webp)
 
 - New project: pick Typst, LaTeX, Quarto or Markdown, then a folder. It gets a starter file
   (`main.typ`, `main.tex`, `index.qmd` or `main.md`) that shows how that kind of document

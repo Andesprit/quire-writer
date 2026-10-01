@@ -1,0 +1,622 @@
+<!doctype html>
+<html lang="en" data-lang="typ">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Quire Writer: write Typst, LaTeX, Quarto and Markdown with your own AI agent</title>
+<meta name="description" content="A free, open-source macOS writing app for Typst, LaTeX, Quarto and Markdown. Ask Claude, Codex, Gemini or any ACP agent for help, with your own login. Every change waits for your review.">
+<meta property="og:title" content="Quire Writer">
+<meta property="og:description" content="A free, open-source writing app for Typst, LaTeX, Quarto and Markdown, with the AI agent of your choice. Every change waits for your review.">
+<meta property="og:image" content="https://andesprit.github.io/quire-writer/themes.webp">
+<meta property="og:url" content="https://andesprit.github.io/quire-writer/">
+<meta name="theme-color" content="#23439b">
+<link rel="icon" href="icon.png">
+<style>
+/* Quire Series, the app's own theme, as a web page: white stock, black ink, and one series
+   colour in the bands at the top and bottom. The colour follows the open file, as in the app. */
+@property --series { syntax: "<color>"; inherits: true; initial-value: #23439b; }
+:root {
+  color-scheme: light;
+  --series: #23439b;
+  --series-deep: color-mix(in oklab, var(--series) 78%, black);
+  --series-tint: color-mix(in oklab, var(--series) 13%, white);
+  --series-wash: color-mix(in oklab, var(--series) 5%, white);
+  --ink: #141414;
+  --muted: color-mix(in oklab, var(--series) 62%, #141414);
+  --faint: color-mix(in oklab, var(--series) 42%, white);
+  --keyword: #a62b63;
+  --ui: "Gill Sans", "Gill Sans MT", Seravek, Calibri, sans-serif;
+  --text: Charter, "Bitstream Charter", "Iowan Old Style", Georgia, serif;
+  --mono: ui-monospace, "SF Mono", Menlo, Consolas, monospace;
+  --gutter: clamp(16px, 4vw, 40px);
+  --shadow: 0 2px 4px rgb(20 30 70 / 0.08), 0 18px 40px rgb(20 30 70 / 0.14);
+  --check: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 16 16'%3E%3Cpath d='M13.66 3.14a.5.5 0 0 1 .69.72l-8.5 8a.5.5 0 0 1-.7-.01l-3.5-3.5a.5.5 0 0 1 .71-.71l3.15 3.16z'/%3E%3C/svg%3E");
+  transition: --series 0.6s cubic-bezier(0.16, 1, 0.3, 1);
+  scrollbar-color: color-mix(in srgb, var(--series) 45%, transparent) transparent;
+  scroll-behavior: smooth;
+}
+:root[data-lang="tex"] { --series: #2d6a3e; }
+:root[data-lang="qmd"] { --series: #a62b63; }
+:root[data-lang="md"] { --series: #b5461a; }
+
+* { box-sizing: border-box; }
+body { margin: 0; background: #fff; color: var(--ink); font: 18px/1.55 var(--text); -webkit-font-smoothing: antialiased; -webkit-text-size-adjust: 100%; caret-color: var(--series); }
+::selection { background: color-mix(in srgb, var(--series) 24%, white); }
+:focus-visible { outline: 2px solid var(--series); outline-offset: 2px; }
+a { color: var(--series); text-underline-offset: 3px; text-decoration-thickness: 1px; }
+a:hover { text-decoration-thickness: 2px; }
+h1, h2, h3 { font-family: var(--ui); font-weight: 600; text-wrap: balance; margin: 0; }
+p { margin: 0; }
+button { font: inherit; color: inherit; }
+svg.i { width: 16px; height: 16px; flex: none; fill: currentColor; }
+kbd { font: 600 13px/1 var(--ui); padding: 3px 6px; background: var(--series-wash); border: 1px solid color-mix(in oklab, var(--series) 30%, white); color: var(--series-deep); white-space: nowrap; }
+.wrap { max-width: 1200px; margin: 0 auto; padding: 0 var(--gutter); }
+.sr { position: absolute; width: 1px; height: 1px; overflow: hidden; clip-path: inset(50%); white-space: nowrap; }
+
+.btn { display: inline-flex; align-items: center; gap: 9px; font: 600 16px/1 var(--ui); padding: 13px 18px; text-decoration: none; border: 1.5px solid var(--series); background: var(--series); color: #fff; cursor: pointer; transition: background-color 0.15s; }
+.btn:hover { background: var(--series-deep); border-color: var(--series-deep); }
+.btn.ghost { background: #fff; color: var(--series); }
+.btn.ghost:hover { background: var(--series-wash); }
+
+/* Title band */
+.band { background: var(--series); color: #fff; }
+.top { display: flex; align-items: center; gap: 20px; height: 64px; }
+.brand { display: flex; align-items: center; gap: 12px; color: #fff; text-decoration: none; font: 600 20px/1 var(--ui); letter-spacing: -0.01em; white-space: nowrap; }
+.brand img { width: 36px; height: 36px; border-radius: 8px; }
+.brand small { font-size: 12px; letter-spacing: 0.16em; text-transform: uppercase; opacity: 0.85; margin-left: 6px; }
+.top nav { margin-left: auto; display: flex; align-items: center; gap: 2px; font: 500 16px/1 var(--ui); }
+.top nav a { color: #fff; text-decoration: none; padding: 9px 10px; }
+.top nav a:hover { background: var(--series-deep); }
+.top nav .btn { background: #fff; color: var(--series); border-color: #fff; padding: 10px 14px; margin-left: 10px; }
+.top nav .btn:hover { background: var(--series-tint); }
+
+/* Hero */
+.hero { display: grid; grid-template-columns: minmax(0, 1.5fr) minmax(0, 1fr); gap: 32px 56px; align-items: end; padding-top: 56px; padding-bottom: 36px; }
+.hero h1 { font-size: clamp(38px, 4.8vw, 64px); line-height: 1.02; letter-spacing: -0.02em; }
+.hero h1 span { color: var(--series); display: block; }
+.lede { font-size: 19px; line-height: 1.5; max-width: 34em; }
+.actions { display: flex; flex-wrap: wrap; gap: 12px; margin-top: 24px; }
+.fine { font: 15px/1.4 var(--ui); color: var(--muted); margin-top: 14px; }
+
+/* The review demo: a small Quire window in the Series theme */
+.try { font: 16px/1.4 var(--ui); color: var(--muted); margin-bottom: 14px; display: flex; align-items: center; gap: 8px; }
+.try svg { color: var(--series); transform: rotate(90deg); }
+.demo { border: 1.5px solid var(--ink); background: #fff; box-shadow: var(--shadow); font: 15px/1.4 var(--ui); margin: 0; }
+.d-top { display: flex; align-items: center; flex-wrap: wrap; gap: 4px 20px; background: var(--series); color: #fff; padding: 8px 10px 8px 18px; min-height: 52px; }
+.d-title { font-size: 19px; font-weight: 600; letter-spacing: -0.01em; }
+.d-title small { display: block; font-size: 11px; letter-spacing: 0.16em; text-transform: uppercase; opacity: 0.85; margin-top: 3px; }
+.d-files { display: flex; gap: 2px; margin-left: auto; overflow-x: auto; }
+.d-files button { background: none; border: 0; color: rgb(255 255 255 / 0.72); font: 500 15px/1 var(--ui); padding: 9px 11px; cursor: pointer; white-space: nowrap; }
+.d-files button:hover { background: var(--series-deep); color: #fff; }
+.d-files button[aria-pressed="true"] { color: #fff; box-shadow: inset 0 -2px 0 #fff; }
+.d-body { display: grid; grid-template-columns: minmax(0, 1.35fr) minmax(0, 1fr) minmax(0, 0.85fr); }
+.pane { min-width: 0; }
+.pane + .pane { border-left: 1px solid var(--ink); }
+.p-head { font-size: 12px; font-weight: 600; letter-spacing: 0.14em; text-transform: uppercase; color: var(--series); padding: 14px 18px 10px; }
+.p-head b { color: var(--ink); font-weight: 600; }
+
+.code { padding: 4px 18px 22px 0; }
+.ln { display: grid; grid-template-columns: 50px minmax(0, 1fr); }
+.ln > i { font: normal 12px/27px var(--ui); color: var(--faint); text-align: right; padding-right: 16px; font-variant-numeric: tabular-nums; }
+.ln > p { font: 16px/27px var(--text); min-height: 27px; overflow-wrap: anywhere; white-space: pre-wrap; }
+.ln.cur > i { color: var(--series); font-weight: 600; }
+.ln.cur > p { background: var(--series-wash); box-shadow: -6px 0 0 var(--series-wash), 6px 0 0 var(--series-wash); }
+.m { color: color-mix(in oklab, var(--series) 55%, white); }
+.k { color: var(--keyword); }
+.l { color: var(--series); text-decoration: underline; text-underline-offset: 3px; }
+.chg { cursor: pointer; }
+.chg del { color: var(--muted); text-decoration: line-through 2px var(--series); }
+.chg ins { text-decoration: none; background: var(--series-tint); color: var(--series-deep); font-weight: 600; padding: 0 2px; }
+.chg.cur ins { box-shadow: 0 0 0 1.5px var(--series); }
+.chg:hover ins { background: color-mix(in oklab, var(--series) 22%, white); }
+.settle { animation: settle 1.1s cubic-bezier(0.16, 1, 0.3, 1); }
+@keyframes settle { from { background: var(--series-tint); box-shadow: 0 0 0 3px var(--series-tint); } to { background: transparent; box-shadow: 0 0 0 3px transparent; } }
+
+.review { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; padding: 8px 0 10px; font-size: 13px; font-weight: 600; letter-spacing: 0.06em; text-transform: uppercase; }
+.review .what { color: var(--muted); margin-right: 6px; }
+.rb { display: inline-flex; align-items: center; gap: 6px; border: 1.5px solid var(--series); background: #fff; color: var(--series); padding: 6px 11px; font: inherit; letter-spacing: inherit; text-transform: inherit; cursor: pointer; }
+.rb:hover { background: var(--series-wash); }
+.rb.yes { background: var(--series); color: #fff; }
+.rb.yes:hover { background: var(--series-deep); border-color: var(--series-deep); }
+.rb svg { width: 14px; height: 14px; }
+
+.preview { background: var(--series-wash); padding-bottom: 22px; }
+.page { margin: 4px 22px 0; background: #fff; box-shadow: 0 1px 2px rgb(20 30 70 / 0.18), 0 8px 22px rgb(20 30 70 / 0.12); padding: 26px 26px 30px; font: 13.5px/1.5 var(--text); color: #111; text-align: justify; hyphens: auto; }
+.page h4 { font-size: 15px; margin: 0 0 8px; text-align: left; }
+.page p + p { margin-top: 8px; }
+.page mark { background: var(--series-tint); color: inherit; }
+.page table { margin: 14px auto 4px; border-collapse: collapse; font-size: 12px; font-variant-numeric: tabular-nums; }
+.page td, .page th { padding: 2px 14px; border-top: 0.75px solid #111; text-align: left; }
+.page tr:last-child td { border-bottom: 0.75px solid #111; }
+.page .cap { text-align: center; font-size: 11.5px; }
+
+.chat { padding-bottom: 18px; }
+.msg { padding: 0 18px; }
+.msg + .msg { margin-top: 18px; }
+.msg > b { display: block; font-size: 12px; letter-spacing: 0.14em; text-transform: uppercase; color: var(--muted); margin-bottom: 4px; }
+.msg.me > p { background: var(--series-wash); border: 1px solid var(--series-tint); padding: 8px 10px; }
+.msg p { font-size: 15px; line-height: 1.45; }
+.plan { list-style: none; margin: 4px 0 10px; padding: 0; font-size: 14px; }
+.plan li { display: flex; align-items: center; gap: 8px; padding: 2px 0; }
+.plan li::before { content: ""; width: 9px; height: 9px; border: 1.5px solid var(--series); border-radius: 50%; margin: 0 3px; flex: none; }
+.plan li.done { color: var(--muted); text-decoration: line-through var(--series); }
+.plan li.done::before { width: 15px; height: 15px; margin: 0; border: 0; border-radius: 0; background: var(--series); mask: var(--check) center / contain no-repeat; }
+.tool { display: flex; align-items: center; gap: 8px; border: 1px solid var(--series-tint); padding: 7px 10px; font-size: 14px; margin-bottom: 10px; }
+.tool b { color: var(--series); font-weight: 600; }
+.tool span { margin-left: auto; font-size: 11px; font-weight: 600; letter-spacing: 0.1em; text-transform: uppercase; color: var(--series); white-space: nowrap; }
+
+.d-status { display: flex; flex-wrap: wrap; align-items: center; gap: 6px 14px; background: var(--series); color: #fff; padding: 7px 12px; font-size: 14px; }
+.d-status .nav { display: inline-flex; align-items: center; gap: 2px; font-weight: 600; }
+.sb { display: inline-flex; align-items: center; gap: 6px; background: none; border: 0; color: #fff; padding: 5px 8px; cursor: pointer; }
+.sb:hover:not(:disabled) { background: var(--series-deep); }
+.sb:disabled { opacity: 0.45; cursor: default; }
+.sb.all { background: #fff; color: var(--series); font-weight: 600; padding: 5px 12px; }
+.sb.all:hover:not(:disabled) { background: var(--series-tint); }
+.sb.none { border: 1.5px solid rgb(255 255 255 / 0.7); padding: 4px 10px; }
+.d-status .grow { flex: 1; }
+.d-status .dim { color: rgb(255 255 255 / 0.82); }
+
+/* Sections */
+section { padding: 96px 0; }
+.intro h2, section h2 { font-size: clamp(30px, 3.4vw, 44px); line-height: 1.08; letter-spacing: -0.015em; }
+.sub { font-size: 19px; color: var(--muted); max-width: 38em; margin-top: 14px; }
+
+.ways { margin-top: 44px; border-bottom: 1px solid var(--ink); }
+.way { display: grid; grid-template-columns: 220px minmax(0, 1fr) minmax(0, 440px); gap: 20px 40px; align-items: start; padding: 30px 0; border-top: 1px solid var(--ink); }
+.way h3 { font-size: 24px; letter-spacing: -0.01em; }
+.way .keys { margin-top: 10px; display: flex; gap: 4px; }
+.way > p { max-width: 30em; }
+.sample { border: 1.5px solid var(--ink); background: #fff; font: 15px/1.6 var(--text); }
+.sample .chips { display: flex; gap: 6px; padding: 10px 12px 0; }
+.chip { font: 500 13px/1 var(--ui); padding: 4px 7px; background: var(--series-tint); color: var(--series-deep); }
+.sample .ask { padding: 8px 12px 0; }
+.sample .send { display: flex; align-items: center; gap: 12px; padding: 4px 6px 6px 12px; font: 500 13px var(--ui); color: var(--muted); }
+.sample .send span:last-of-type { flex: 1; }
+.sample .send b { width: 30px; height: 30px; display: grid; place-items: center; background: var(--series); color: #fff; }
+.sample .send svg { transform: rotate(-90deg); }
+.sample.ms { padding: 14px 16px; }
+.sel { background: color-mix(in srgb, var(--series) 24%, white); }
+.inline { margin-top: 10px; border: 1.5px solid var(--series); padding: 8px 10px; font: 15px/1.3 var(--ui); display: flex; align-items: center; gap: 10px; box-shadow: 0 6px 20px rgb(20 30 70 / 0.12); }
+.inline span { flex: 1; }
+.ghost-text { color: var(--faint); font-style: italic; }
+.caret { display: inline-block; width: 2px; height: 1.1em; background: var(--series); vertical-align: -0.16em; margin: 0 1px; animation: blink 1.1s steps(1) infinite; }
+@keyframes blink { 50% { opacity: 0; } }
+.sample .hint { display: flex; justify-content: flex-end; align-items: center; gap: 8px; margin-top: 10px; font: 13px var(--ui); color: var(--muted); }
+
+.agents { display: grid; grid-template-columns: minmax(0, 1fr) minmax(0, 1fr); gap: 40px 72px; align-items: center; }
+.agents .sub { color: var(--ink); }
+.agents .sub + .sub { margin-top: 16px; }
+.names { list-style: none; margin: 0; padding: 22px; display: flex; flex-wrap: wrap; gap: 8px; border: 1.5px solid var(--ink); box-shadow: var(--shadow); }
+.names li { font: 500 16px/1 var(--ui); padding: 8px 10px; background: var(--series-tint); color: var(--series-deep); }
+.names li.more { background: none; color: var(--muted); padding-left: 2px; }
+
+.kinds { margin-top: 44px; border-collapse: collapse; width: 100%; font-size: 17px; }
+.kinds th, .kinds td { text-align: left; vertical-align: top; padding: 18px 0; border-top: 1px solid var(--ink); }
+.kinds tr:last-child > * { border-bottom: 1px solid var(--ink); }
+.kinds th { width: 220px; font: 600 20px/1.3 var(--ui); }
+.kinds th::before { content: ""; display: inline-block; width: 12px; height: 12px; background: var(--c); margin-right: 12px; }
+.kinds td + td { width: 34%; padding-left: 32px; font: 15px/1.5 var(--ui); color: var(--muted); }
+.export { margin-top: 28px; max-width: 46em; }
+
+.themes figure { margin: 44px 0 0; }
+.themes img { display: block; width: 100%; height: auto; border: 1.5px solid var(--ink); box-shadow: var(--shadow); }
+.themes figcaption { margin-top: 12px; font: 15px/1.4 var(--ui); color: var(--muted); }
+
+.desk { margin-top: 44px; display: grid; grid-template-columns: 1fr 1fr; column-gap: 56px; }
+.desk div { padding: 18px 0; border-top: 1px solid var(--series-tint); }
+.desk div:nth-child(-n+2) { border-top-color: var(--ink); }
+.desk h3 { font-size: 19px; }
+.desk p { font-size: 16px; color: var(--muted); margin-top: 4px; }
+
+.privacy { background: var(--series-wash); border-block: 1px solid var(--ink); }
+.privacy .cols { display: grid; grid-template-columns: minmax(0, 1fr) minmax(0, 1fr); gap: 32px 72px; align-items: start; }
+.online { list-style: none; margin: 0; padding: 0; }
+.online li { padding: 14px 0; border-top: 1px solid color-mix(in oklab, var(--series) 30%, white); font-size: 17px; }
+.online li:last-child { border-bottom: 1px solid color-mix(in oklab, var(--series) 30%, white); }
+.online b { font: 600 17px var(--ui); display: block; }
+.privacy .note { font-size: 16px; color: var(--muted); margin-top: 18px; }
+
+.get { display: grid; grid-template-columns: minmax(0, 1fr) minmax(0, 1fr); gap: 48px 72px; margin-top: 44px; }
+.get h3 { font-size: 22px; }
+.get p { margin-top: 10px; }
+.get .btn { margin-top: 20px; }
+.get .need { margin-top: 28px; padding-top: 18px; border-top: 1px solid var(--ink); }
+pre { margin: 14px 0 0; padding: 14px 16px; background: var(--series-wash); border: 1px solid var(--series-tint); font: 13.5px/1.6 var(--mono); overflow-x: auto; color: var(--ink); }
+code { font: 0.86em var(--mono); }
+
+.foot { padding: 22px 0; font: 15px/1.5 var(--ui); }
+.foot .wrap { display: flex; flex-wrap: wrap; align-items: center; gap: 10px 28px; }
+.foot nav { margin-left: auto; display: flex; flex-wrap: wrap; gap: 4px 20px; }
+.foot a { color: #fff; }
+
+@media (max-width: 1060px) {
+  .brand small { display: none; }
+  .hero { grid-template-columns: minmax(0, 1fr); }
+  .d-body { grid-template-columns: minmax(0, 1.2fr) minmax(0, 1fr); }
+  .chat { grid-column: 1 / -1; order: -1; border-bottom: 1px solid var(--ink); display: grid; grid-template-columns: auto minmax(0, 1fr) minmax(0, 1.4fr); align-items: start; padding-top: 14px; }
+  .chat .p-head { padding-top: 2px; }
+  .chat .msg + .msg { margin-top: 0; }
+  .chat .plan { display: none; }
+  .pane.chat + .pane { border-left: 0; }
+  .way { grid-template-columns: 180px minmax(0, 1fr); }
+  .way .sample { grid-column: 2; }
+}
+@media (max-width: 860px) {
+  .top nav a:not(.btn) { display: none; }
+  .agents, .privacy .cols, .get, .desk { grid-template-columns: minmax(0, 1fr); }
+  .hero { padding-top: 40px; }
+  .d-body { grid-template-columns: minmax(0, 1fr); }
+  .chat { grid-template-columns: minmax(0, 1fr); gap: 10px; }
+  .chat .msg + .msg { margin-top: 4px; }
+  .pane + .pane { border-left: 0; border-top: 1px solid var(--ink); }
+  .pane.chat + .pane { border-top: 0; }
+  .d-files { margin-left: -11px; width: calc(100% + 11px); }
+  .d-status .dim { display: none; }
+  section { padding: 72px 0; }
+  .way { grid-template-columns: minmax(0, 1fr); }
+  .way .sample { grid-column: auto; }
+  .way .keys { margin-top: 8px; }
+  .kinds th { display: block; width: auto; padding-bottom: 4px; }
+  .kinds td { display: block; padding: 0 0 10px; border-top: 0; }
+  .kinds td + td { width: auto; padding: 0 0 18px; }
+  .kinds tr:last-child > * { border-bottom: 0; }
+  .kinds tr:last-child > :last-child { border-bottom: 1px solid var(--ink); }
+  .desk div:nth-child(2) { border-top-color: var(--series-tint); }
+  .foot nav { margin-left: 0; }
+}
+@media (max-width: 480px) {
+  .review .what { flex-basis: 100%; }
+  .d-status { gap: 6px; padding: 7px 8px; }
+  .sb.all { padding: 5px 9px; }
+  .code { padding-right: 12px; }
+  .ln { grid-template-columns: 36px minmax(0, 1fr); }
+  .ln > i { padding-right: 10px; }
+  .page { margin: 4px 12px 0; padding: 20px 18px 22px; }
+}
+@media (prefers-reduced-motion: reduce) {
+  :root { transition: none; scroll-behavior: auto; }
+  .settle, .caret { animation: none; }
+}
+</style>
+</head>
+<body>
+<!--
+THESIS: The page proves the app's one promise by letting the visitor review an agent's edits; it refuses the screenshot hero over a grid of feature cards.
+OWN-WORLD: Quire Series as shipped in the app: white stock, black ink, a series-colour band top and bottom that follows the open file (Typst blue, LaTeX green, Quarto magenta, Markdown orange), Gill Sans letter-spaced capitals, Charter manuscript, square corners, ink rules, no greys.
+STORY: The visitor sees three agent edits waiting, accepts or rejects them, and watches only what they accept land in the preview; then learns it works with any ACP agent, four kinds of document and no account; then downloads.
+FIRST VIEWPORT: Series band with mark, nav and Download; headline left at about 64px, lede and Download / GitHub buttons right; the demo window (editor, preview, chat) full width beneath, its top half visible.
+FORM: Review demo, candidate 2 of 7 (the user locked it over the dealt lead); seed d3d91999.
+FINISH: unreviewed and undocumented is unfinished; this build ends with the finish review, the verdict, DESIGN.md, and every shipping raster carrying its provenance
+-->
+<svg width="0" height="0" style="position:absolute" aria-hidden="true">
+  <symbol id="i-check" viewBox="0 0 16 16"><path d="M13.6572 3.13573C13.8583 2.9465 14.175 2.95614 14.3643 3.15722C14.5535 3.35831 14.5438 3.675 14.3428 3.86425L5.84277 11.8642C5.64597 12.0494 5.33756 12.0446 5.14648 11.8535L1.64648 8.35351C1.45121 8.15824 1.45121 7.84174 1.64648 7.64647C1.84174 7.45121 2.15825 7.45121 2.35351 7.64647L5.50976 10.8027L13.6572 3.13573Z"/></symbol>
+  <symbol id="i-discard" viewBox="0 0 16 16"><path d="M3.00098 2.5C3.00098 2.22386 3.22483 2 3.50098 2C3.77712 2 4.00098 2.22386 4.00098 2.5V6.34262L7.17202 3.17157C8.73412 1.60948 11.2668 1.60948 12.8289 3.17157C14.391 4.73367 14.391 7.26633 12.8289 8.82843L7.80375 13.8536C7.60849 14.0488 7.2919 14.0488 7.09664 13.8536C6.90138 13.6583 6.90138 13.3417 7.09664 13.1464L12.1218 8.12132C13.2933 6.94975 13.2933 5.05025 12.1218 3.87868C10.9502 2.70711 9.0507 2.70711 7.87913 3.87868L4.75781 7H8.50098C8.77712 7 9.00098 7.22386 9.00098 7.5C9.00098 7.77614 8.77712 8 8.50098 8H3.60098C3.26961 8 3.00098 7.73137 3.00098 7.4V2.5Z"/></symbol>
+  <symbol id="i-up" viewBox="0 0 16 16"><path d="M3.14603 9.85423C3.34103 10.0492 3.65803 10.0492 3.85303 9.85423L7.99903 5.70823L12.145 9.85423C12.34 10.0492 12.657 10.0492 12.852 9.85423C13.047 9.65923 13.047 9.34223 12.852 9.14723L8.35203 4.64723C8.15703 4.45223 7.84003 4.45223 7.64503 4.64723L3.14503 9.14723C2.95003 9.34223 2.95103 9.65923 3.14603 9.85423Z"/></symbol>
+  <symbol id="i-down" viewBox="0 0 16 16"><path d="M3.14598 5.85423L7.64598 10.3542C7.84098 10.5492 8.15798 10.5492 8.35298 10.3542L12.853 5.85423C13.048 5.65923 13.048 5.34223 12.853 5.14723C12.658 4.95223 12.341 4.95223 12.146 5.14723L7.99998 9.29323L3.85398 5.14723C3.65898 4.95223 3.34198 4.95223 3.14698 5.14723C2.95198 5.34223 2.95098 5.65923 3.14598 5.85423Z"/></symbol>
+  <symbol id="i-arrow" viewBox="0 0 16 16"><path d="M13.854 8.14576L8.854 3.14576C8.659 2.95076 8.342 2.95076 8.147 3.14576C7.952 3.34076 7.952 3.65776 8.147 3.85276L12.293 7.99876H2.5C2.224 7.99876 2 8.22276 2 8.49876C2 8.77476 2.224 8.99876 2.5 8.99876H12.293L8.147 13.1448C7.952 13.3398 7.952 13.6568 8.147 13.8518C8.245 13.9498 8.373 13.9978 8.501 13.9978C8.629 13.9978 8.757 13.9488 8.855 13.8518L13.855 8.85176C14.05 8.65676 14.05 8.33976 13.855 8.14476L13.854 8.14576Z"/></symbol>
+  <symbol id="i-download" viewBox="0 0 16 16"><path d="M16 13.5C16 13.565 15.987 13.63 15.961 13.69C15.935 13.751 15.897 13.805 15.85 13.85L13.85 15.85C13.804 15.897 13.75 15.935 13.69 15.961C13.63 15.987 13.565 16 13.5 16C13.435 16 13.371 15.987 13.31 15.961C13.249 15.935 13.195 15.897 13.15 15.85L11.15 13.85C11.103 13.804 11.065 13.75 11.039 13.69C11.013 13.63 11 13.565 11 13.5C11 13.435 11.013 13.37 11.039 13.31C11.065 13.249 11.103 13.195 11.15 13.15C11.196 13.103 11.25 13.065 11.31 13.039C11.37 13.013 11.435 13 11.5 13C11.565 13 11.629 13.013 11.69 13.039C11.751 13.065 11.805 13.103 11.85 13.15L13 14.29V9.5C13 9.367 13.052 9.24 13.146 9.146C13.24 9.053 13.367 9 13.5 9C13.633 9 13.76 9.052 13.854 9.146C13.947 9.24 14 9.367 14 9.5V14.29L15.15 13.15C15.196 13.103 15.25 13.065 15.31 13.039C15.37 13.013 15.435 13 15.5 13C15.565 13 15.629 13.013 15.69 13.039C15.751 13.065 15.805 13.103 15.85 13.15C15.897 13.196 15.935 13.25 15.961 13.31C15.987 13.37 16 13.435 16 13.5ZM11 12H12V11H3C2.448 11 2 10.552 2 10V3C2 2.448 2.448 2 3 2H13C13.552 2 14 2.448 14 3V8H15V3C15 1.895 14.105 1 13 1H3C1.895 1 1 1.895 1 3V10C1 11.105 1.895 12 3 12H5V14H3.5C3.224 14 3 14.224 3 14.5C3 14.776 3.224 15 3.5 15H10V14H6V12H10V13.5C10 13.295 10.041 13.097 10.122 12.91C10.203 12.723 10.319 12.559 10.466 12.421C10.565 12.317 10.725 12.204 10.905 12.125C10.936 12.111 10.968 12.106 11 12.095V12Z"/></symbol>
+  <symbol id="i-github" viewBox="0 0 24 25"><path d="M12 0.567749C9.62663 0.567749 7.30656 1.27154 5.33316 2.59011C3.35977 3.90869 1.8217 5.78284 0.913451 7.97555C0.00519944 10.1683 -0.232441 12.5811 0.230582 14.9088C0.693605 17.2366 1.83649 19.3748 3.51473 21.053C5.19296 22.7313 7.33115 23.8742 9.65893 24.3372C11.9867 24.8002 14.3995 24.5626 16.5922 23.6543C18.7849 22.7461 20.6591 21.208 21.9776 19.2346C23.2962 17.2612 24 14.9411 24 12.5678C24 9.38516 22.7357 6.33291 20.4853 4.08247C18.2349 1.83203 15.1826 0.567749 12 0.567749ZM15.1629 22.3512H15.0703C15.0004 22.355 14.9304 22.3445 14.8646 22.3204C14.7989 22.2962 14.7388 22.2588 14.688 22.2106C14.6411 22.161 14.6044 22.1026 14.5803 22.0388C14.5562 21.9749 14.545 21.9069 14.5474 21.8386V20.4329C14.5543 19.9655 14.5577 19.4935 14.5577 19.0169C14.5562 18.6686 14.5055 18.3223 14.4069 17.9883C14.3135 17.6511 14.1256 17.3477 13.8652 17.114C14.5623 17.0467 15.2475 16.8882 15.9034 16.6426C16.4565 16.4323 16.9568 16.1035 17.3692 15.6792C17.7759 15.2516 18.0786 14.7359 18.2537 14.1723C18.4668 13.4832 18.5681 12.7644 18.5537 12.0432C18.5574 11.5394 18.4691 11.0392 18.2932 10.5672C18.1149 10.0915 17.8452 9.6553 17.4994 9.28318C17.5737 9.09515 17.6277 8.89977 17.6606 8.70032C17.6942 8.50094 17.7108 8.29908 17.7103 8.0969C17.7106 7.8366 17.6807 7.57715 17.6212 7.32375C17.5666 7.06431 17.4927 6.80931 17.4 6.56089C17.3646 6.54686 17.3267 6.53987 17.2886 6.54032H17.1789C16.9499 6.54299 16.7228 6.58056 16.5052 6.65175C16.2649 6.72144 16.0299 6.80852 15.8023 6.91232C15.5754 7.01389 15.3544 7.12836 15.1406 7.25518C14.9263 7.38204 14.736 7.50375 14.568 7.6169C12.8858 7.14804 11.1074 7.14804 9.42515 7.6169C9.25372 7.50375 9.06687 7.38204 8.85258 7.25518C8.63597 7.12696 8.41153 7.01245 8.18058 6.91232C7.95337 6.80605 7.7177 6.71889 7.47601 6.65175C7.26242 6.58104 7.03926 6.54346 6.81429 6.54032H6.70458C6.66702 6.54 6.62976 6.54699 6.59486 6.56089C6.50045 6.80962 6.42313 7.0645 6.36344 7.32375C6.31009 7.57802 6.28309 7.8371 6.28287 8.0969C6.28296 8.29913 6.30016 8.50099 6.33429 8.70032C6.36662 8.89971 6.42007 9.0951 6.49372 9.28318C6.14842 9.65537 5.87936 10.0916 5.70172 10.5672C5.52524 11.0391 5.43635 11.5393 5.43944 12.0432C5.42538 12.7604 5.52371 13.4753 5.73086 14.162C5.91225 14.7259 6.21408 15.2436 6.61544 15.6792C7.03026 16.1005 7.52986 16.4289 8.08115 16.6426C8.73413 16.8929 9.41811 17.0532 10.1143 17.1192C9.91979 17.2951 9.76544 17.5109 9.66172 17.7518C9.56305 17.9901 9.49564 18.2401 9.46115 18.4958C9.09453 18.6717 8.69349 18.7642 8.28687 18.7666C7.90903 18.7811 7.53632 18.6755 7.22229 18.4649C6.92064 18.2418 6.66507 17.9624 6.46972 17.642C6.38262 17.5073 6.28519 17.3794 6.17829 17.2598C6.06536 17.134 5.94081 17.0192 5.80629 16.9169C5.67374 16.8178 5.52843 16.7371 5.37429 16.6769C5.22244 16.6103 5.05841 16.5758 4.89258 16.5758C4.85241 16.5768 4.81234 16.5802 4.77258 16.586C4.71822 16.5861 4.66408 16.593 4.61144 16.6066C4.56482 16.6188 4.52071 16.6391 4.48115 16.6666C4.46333 16.6765 4.44842 16.6909 4.43789 16.7083C4.42736 16.7258 4.42159 16.7457 4.42115 16.766C4.42551 16.8142 4.44036 16.8607 4.46465 16.9025C4.48893 16.9442 4.52207 16.9802 4.56172 17.0078C4.65429 17.082 4.73144 17.1392 4.79315 17.1792L4.82229 17.1998C4.95641 17.3027 5.08408 17.4137 5.20458 17.5323C5.31733 17.6303 5.41804 17.7414 5.50458 17.8632C5.5951 17.9814 5.67269 18.109 5.73601 18.2438C5.80915 18.3775 5.88629 18.5318 5.96744 18.7066C6.15489 19.1802 6.48887 19.5815 6.92058 19.8518C7.37379 20.0949 7.88243 20.216 8.39658 20.2032C8.57132 20.2032 8.74591 20.1929 8.91944 20.1723C9.09087 20.1449 9.26229 20.1158 9.43372 20.0815V21.8249C9.43682 21.8954 9.42498 21.9657 9.39898 22.0313C9.37298 22.0969 9.33341 22.1563 9.28287 22.2055C9.23208 22.2537 9.17197 22.291 9.10623 22.3152C9.0405 22.3394 8.97052 22.3499 8.90058 22.346H8.83887C6.50699 21.5927 4.52068 20.0316 3.23764 17.9437C1.95459 15.8559 1.45912 13.3786 1.84043 10.9579C2.22175 8.53721 3.4548 6.33219 5.31754 4.7399C7.18028 3.14761 9.55032 2.27269 12.0009 2.27269C14.4514 2.27269 16.8215 3.14761 18.6842 4.7399C20.5469 6.33219 21.78 8.53721 22.1613 10.9579C22.5426 13.3786 22.0471 15.8559 20.7641 17.9437C19.4811 20.0316 17.4948 21.5927 15.1629 22.346V22.3512Z"/></symbol>
+</svg>
+
+<div class="band">
+  <div class="wrap top">
+    <a class="brand" href="./"><img src="icon.png" alt="" width="36" height="36">Quire Writer<small>Typst · LaTeX · Quarto · Markdown</small></a>
+    <nav aria-label="Main">
+      <a href="#ask">Features</a>
+      <a href="#privacy">Privacy</a>
+      <a href="#install">Install</a>
+      <a href="https://github.com/Andesprit/quire-writer" aria-label="Source on GitHub"><svg class="i" style="width:20px;height:20px"><use href="#i-github"/></svg></a>
+      <a class="btn" href="https://github.com/Andesprit/quire-writer/releases/latest"><svg class="i"><use href="#i-download"/></svg>Download</a>
+    </nav>
+  </div>
+</div>
+
+<main>
+  <header class="wrap hero">
+    <h1>Your agent writes. <span>Nothing lands without your say.</span></h1>
+    <div>
+      <p class="lede">Quire Writer is a free, open-source writing app for Typst, LaTeX, Quarto and Markdown. Ask the AI agent you already use to draft, fix or rewrite your text. Every change waits for your review.</p>
+      <div class="actions">
+        <a class="btn" href="https://github.com/Andesprit/quire-writer/releases/latest"><svg class="i"><use href="#i-download"/></svg>Download for Mac</a>
+        <a class="btn ghost" href="https://github.com/Andesprit/quire-writer"><svg class="i" style="width:18px;height:18px"><use href="#i-github"/></svg>Source on GitHub</a>
+      </div>
+      <p class="fine">For Macs with Apple Silicon. Linux builds are experimental.</p>
+    </div>
+  </header>
+
+  <div class="wrap" id="demo">
+    <p class="try"><svg class="i"><use href="#i-arrow"/></svg>Try it: accept or reject the agent's edits, and switch the file to see LaTeX, Quarto or Markdown.</p>
+    <figure class="demo" aria-label="A small copy of Quire: review the agent's edits">
+      <div class="d-top">
+        <div class="d-title">The Quiet Science of Bread<small id="d-series">Typst series · main.typ</small></div>
+        <div class="d-files" role="group" aria-label="Kind of document">
+          <button type="button" data-lang="typ" aria-pressed="true">main.typ</button>
+          <button type="button" data-lang="tex" aria-pressed="false">main.tex</button>
+          <button type="button" data-lang="qmd" aria-pressed="false">index.qmd</button>
+          <button type="button" data-lang="md" aria-pressed="false">main.md</button>
+        </div>
+      </div>
+      <div class="d-body">
+        <div class="pane editor">
+          <div class="p-head"><span id="d-file">main.typ</span> › <b>Baking</b></div>
+          <div class="code" id="code"></div>
+        </div>
+        <div class="pane preview" aria-label="Preview">
+          <div class="p-head">Preview</div>
+          <div class="page">
+            <h4>2&nbsp;&nbsp;Baking</h4>
+            <p id="pv"></p>
+            <table><tr><th>Stage</th><th>Time</th></tr><tr><td>Mixing</td><td>10 min</td></tr><tr><td>Rising</td><td>2 hours</td></tr><tr><td>Baking</td><td>40 min</td></tr></table>
+            <p class="cap">Table 1: A simple timeline for a country loaf.</p>
+            <p>As Table 1 shows, most of the work is waiting.</p>
+          </div>
+        </div>
+        <div class="pane chat">
+          <div class="p-head">Chat</div>
+          <div class="msg me"><b>You</b><p>Fix the grammar in the Baking section. Keep my wording.</p></div>
+          <div class="msg">
+            <b>Agent</b>
+            <ul class="plan">
+              <li class="done">Read the Baking section</li>
+              <li class="done">Fix subject and verb agreement</li>
+              <li id="plan-wait">Wait for your review</li>
+            </ul>
+            <div class="tool">Edited <b id="d-tool">main.typ</b><span>3 changes</span></div>
+            <p>Three verbs did not agree with their subject: <i>turn</i>, <i>brown</i> and <i>matter</i>. I changed only those words.</p>
+          </div>
+        </div>
+      </div>
+      <div class="d-status">
+        <span class="nav">
+          <button class="sb" type="button" data-act="prev" aria-label="Previous change"><svg class="i"><use href="#i-up"/></svg></button>
+          <span id="sb-count">1 of 3</span>
+          <button class="sb" type="button" data-act="next" aria-label="Next change"><svg class="i"><use href="#i-down"/></svg></button>
+        </span>
+        <button class="sb all" type="button" data-act="accept-all"><svg class="i"><use href="#i-check"/></svg>Accept all</button>
+        <button class="sb none" type="button" data-act="reject-all"><svg class="i"><use href="#i-discard"/></svg>Reject all</button>
+        <span class="grow"></span>
+        <span class="dim">Ln 13, Col 41</span><span class="dim" id="sb-kind">Typst</span><span class="dim">Auto save</span>
+      </div>
+    </figure>
+    <p class="sr" aria-live="polite" id="live"></p>
+  </div>
+
+  <section id="ask">
+    <div class="wrap">
+      <h2>Ask the way that fits the moment</h2>
+      <p class="sub">Three ways to ask, and all three end the same way: as changes you can accept, reject, or edit before you accept.</p>
+      <div class="ways">
+        <div class="way">
+          <div><h3>Chat</h3><div class="keys"><kbd>Chat bar</kbd></div></div>
+          <p>Ask the agent to write or change things anywhere in your folder: a new section, a fix across chapters, a table from your notes. If a turn goes wrong, "Restore files to before this message" undoes all of it.</p>
+          <div class="sample" aria-hidden="true">
+            <div class="chips"><span class="chip">chapters/</span><span class="chip">refs.bib</span></div>
+            <p class="ask">Draft a short conclusion from chapters 2 and 3. Cite the papers I already use.</p>
+            <div class="send"><span>Mode: Auto</span><span>Effort: High</span><b><svg class="i"><use href="#i-arrow"/></svg></b></div>
+          </div>
+        </div>
+        <div class="way">
+          <div><h3>Edit a selection</h3><div class="keys"><kbd>⌘</kbd><kbd>K</kbd></div></div>
+          <p>Select some text, press Cmd+K and say what you want. The agent changes only that part.</p>
+          <div class="sample ms" aria-hidden="true">
+            <p>Bread is one of the oldest foods humans have made. <span class="sel">Every single loaf of bread that anyone has ever baked starts out with the very same four basic ingredients.</span></p>
+            <div class="inline"><span>Shorter, keep the meaning</span><kbd>↵</kbd></div>
+          </div>
+        </div>
+        <div class="way">
+          <div><h3>Autocomplete</h3><div class="keys"><kbd>Tab</kbd></div></div>
+          <p>Pause while you type and grey text suggests how the sentence goes on. Tab accepts it. Turn it off in the top bar when you want quiet.</p>
+          <div class="sample ms" aria-hidden="true">
+            <p>A baker who waits longer is rewarded<span class="caret"></span><span class="ghost-text"> with more flavour, because slow fermentation gives the bacteria time to make acids.</span></p>
+            <p class="hint">Accept with <kbd>Tab</kbd></p>
+          </div>
+        </div>
+      </div>
+    </div>
+  </section>
+
+  <section class="agents-sec">
+    <div class="wrap agents">
+      <div>
+        <h2>Use the agent you already have</h2>
+        <p class="sub">Quire talks to agents through the Agent Client Protocol. Pick Claude, Codex, Gemini or any other agent in the ACP registry, and switch agent or model whenever you like.</p>
+        <p class="sub">The agent runs on your Mac with your own login and your own subscription. Quire has no account and no key of its own.</p>
+      </div>
+      <ul class="names" aria-label="Some of the agents in the ACP registry">
+        <li>Amp</li><li>Auggie CLI</li><li>Claude Agent</li><li>Cline</li><li>Codex</li><li>Cursor</li><li>Devin</li><li>Factory Droid</li><li>Gemini CLI</li><li>GitHub Copilot</li><li>goose</li><li>Junie</li><li>Kimi CLI</li><li>Mistral Vibe</li><li>OpenCode</li><li>Qwen Code</li><li class="more">and the rest of the registry</li>
+      </ul>
+    </div>
+  </section>
+
+  <section class="kinds-sec">
+    <div class="wrap">
+      <h2>See the page while you write</h2>
+      <p class="sub">A live preview sits next to the editor, made by the tool each kind of document already uses.</p>
+      <table class="kinds">
+        <tr style="--c:#23439b"><th scope="row">Typst</th><td>The preview comes from tinymist. Click text in the preview to jump to it in the editor; the preview follows the caret.</td><td>Ships inside the app. Nothing to install.</td></tr>
+        <tr style="--c:#2d6a3e"><th scope="row">LaTeX</th><td>The PDF, compiled on every save. Chapters with <code>% !TEX root = main.tex</code> show the main file.</td><td>Uses your own TeX: latexmk from MacTeX or TeX Live, or Tectonic.</td></tr>
+        <tr style="--c:#a62b63"><th scope="row">Quarto</th><td><code>quarto preview</code>, which renders again on every save.</td><td>Uses your own Quarto.</td></tr>
+        <tr style="--c:#b5461a"><th scope="row">Markdown</th><td>Drawn as you type, with math.</td><td>Nothing to install.</td></tr>
+      </table>
+      <p class="export">Export the whole document as PDF or Word, or as OpenDocument, web page, e-book, Markdown, LaTeX or Typst. Citations become formatted references, and build files stay out of your project.</p>
+    </div>
+  </section>
+
+  <section class="themes">
+    <div class="wrap">
+      <h2>One layout, six looks</h2>
+      <p class="sub">VS Code Dark Modern and Light Modern, and Quire's own Series, Galley, Coupon and Slate. A theme changes the look; every panel stays where your hands expect it.</p>
+      <figure>
+        <img src="themes.webp" width="2000" height="1250" loading="lazy" alt="The same Quire window in four themes: Series with blue bands, Galley like a printer's proof, Coupon in navy with ticket-style labels, and Slate like a chalkboard.">
+        <figcaption>Series, Galley, Coupon and Slate, with the same document and the same change waiting for review.</figcaption>
+      </figure>
+    </div>
+  </section>
+
+  <section class="desk-sec">
+    <div class="wrap">
+      <h2>Made for long documents</h2>
+      <div class="desk">
+        <div><h3>Grammarly and spellcheck work</h3><p>The editor is a plain text field, so the macOS spellchecker and the Grammarly for Mac app work in it.</p></div>
+        <div><h3>Labels</h3><p>Every label in the project, how often it is used, and which ones nothing refers to. Click one to go to it.</p></div>
+        <div><h3>Cite by DOI or arXiv ID</h3><p>Adds the paper to your <code>.bib</code> file and the citation at the cursor.</p></div>
+        <div><h3>Formatting bar</h3><p>Headings, math, lists, links, citations, footnotes, figures and tables, in the markup of the open file.</p></div>
+        <div><h3>A start for every kind</h3><p>A new project gets a starter file that shows how that kind of document looks. A file already there is never replaced.</p></div>
+        <div><h3>Your files, your way</h3><p>New file, new folder, rename, and delete to the Trash. Auto save, or save yourself with Cmd+S.</p></div>
+      </div>
+    </div>
+  </section>
+
+  <section class="privacy" id="privacy">
+    <div class="wrap cols">
+      <div>
+        <h2>No account. No telemetry. No server of its own.</h2>
+        <p class="sub">Your files stay on your Mac. Quire goes online only for these, and nothing else.</p>
+      </div>
+      <div>
+        <ul class="online">
+          <li><b>Your agent</b>It runs on your Mac with your own login. For chat, Cmd+K and autocomplete it sends your request, and the parts of your project it reads, to its provider. That provider's terms apply.</li>
+          <li><b>Starting an agent the first time</b><code>npx</code> or <code>uvx</code> download it from npm or PyPI.</li>
+          <li><b>Citations by DOI or arXiv ID</b>One request to doi.org.</li>
+          <li><b>Updates</b>A check on GitHub at start and once a day, then the download of a new version.</li>
+        </ul>
+        <p class="note">Your own TeX, Quarto or Pandoc may go online on their own, for example to fetch packages.</p>
+      </div>
+    </div>
+  </section>
+
+  <section id="install">
+    <div class="wrap">
+      <h2>Get Quire</h2>
+      <div class="get">
+        <div>
+          <h3>Mac</h3>
+          <p>Download the <code>.dmg</code>, open it and drag Quire to Applications. Needs a Mac with Apple Silicon. New versions install in the background and open at the next start.</p>
+          <a class="btn" href="https://github.com/Andesprit/quire-writer/releases/latest"><svg class="i"><use href="#i-download"/></svg>Download for Mac</a>
+          <div class="need">
+            <h3>What else you need</h3>
+            <p>An agent you are logged in to, for example Claude Code. Most agents need Node. For the LaTeX preview: MacTeX or Tectonic. For Quarto: Quarto. For Word and the other export formats: Pandoc, or Quarto, which carries its own.</p>
+          </div>
+        </div>
+        <div>
+          <h3>Linux, experimental</h3>
+          <p>Take the <code>.AppImage</code> (most systems) or the <code>.deb</code> (Debian, Ubuntu) from the <a href="https://github.com/Andesprit/quire-writer/releases/latest">same release</a>. It is built and started on every change, but used far less than the Mac app: please <a href="https://github.com/Andesprit/quire-writer/issues">report</a> what does not work.</p>
+          <div class="need">
+            <h3>Build it yourself</h3>
+            <p>Needs Rust, Node and tinymist. The <a href="https://github.com/Andesprit/quire-writer#run-macos">README</a> has the details.</p>
+<pre>cd web &amp;&amp; npm install &amp;&amp; npm run build &amp;&amp; cd ..
+mkdir -p build/bin
+cp "$(which tinymist)" build/bin/tinymist-aarch64-apple-darwin
+cargo run --manifest-path src-tauri/Cargo.toml -- sample</pre>
+          </div>
+        </div>
+      </div>
+    </div>
+  </section>
+</main>
+
+<footer class="band foot">
+  <div class="wrap">
+    <span>Quire Writer is free software, under the GPL-3.0-or-later.</span>
+    <nav aria-label="Project">
+      <a href="https://github.com/Andesprit/quire-writer">Source</a>
+      <a href="https://github.com/Andesprit/quire-writer/releases">Releases</a>
+      <a href="https://github.com/Andesprit/quire-writer/blob/main/CONTRIBUTING.md">Contributing</a>
+      <a href="https://github.com/Andesprit/quire-writer/blob/main/SECURITY.md">Security</a>
+      <a href="https://github.com/Andesprit/quire-writer#credits">Credits</a>
+    </nav>
+  </div>
+</footer>
+
+<script>
+// The demo: three agent edits wait for review. Only what the visitor accepts reaches the preview.
+const LANGS = {
+  typ: { file: "main.typ", kind: "Typst", head: '<span class="m">==</span> Baking', b: ['<span class="m">*</span>', '<span class="m">*</span>'], i: ['<span class="m">_</span>', '<span class="m">_</span>'],
+    tail: ['<span class="k">#figure</span>(table(columns: 2, [Stage], [Time], [Rising], [2 hours]),', '  caption: [A simple timeline for a country loaf.]) <span class="l">&lt;timeline&gt;</span>', "", 'As <span class="l">@timeline</span> shows, most of the work is waiting.'] },
+  tex: { file: "main.tex", kind: "LaTeX", head: '<span class="k">\\section</span>{Baking}', b: ['<span class="k">\\textbf</span>{', "}"], i: ['<span class="k">\\emph</span>{', "}"],
+    tail: ["  Rising &amp; 2 hours \\\\", '<span class="k">\\end</span>{tabular}<span class="k">\\caption</span>{A simple timeline for a country loaf.}<span class="k">\\label</span>{<span class="l">tab:timeline</span>}', "", 'As Table~<span class="k">\\ref</span>{<span class="l">tab:timeline</span>} shows, most of the work is waiting.'] },
+  qmd: { file: "index.qmd", kind: "Quarto", head: '<span class="m">##</span> Baking', b: ['<span class="m">**</span>', '<span class="m">**</span>'], i: ['<span class="m">*</span>', '<span class="m">*</span>'],
+    tail: ["| Rising | 2 hours |", ': A simple timeline for a country loaf. <span class="l">{#tbl-timeline}</span>', "", 'As <span class="l">@tbl-timeline</span> shows, most of the work is waiting.'] },
+  md: { file: "main.md", kind: "Markdown", head: '<span class="m">##</span> Baking', b: ['<span class="m">**</span>', '<span class="m">**</span>'], i: ['<span class="m">*</span>', '<span class="m">*</span>'],
+    tail: ["| Rising | 2 hours |", "| Baking | 40 min  |", "", "As the table shows, most of the work is waiting."] },
+};
+const CHANGES = [["turn", "turns"], ["brown", "browns"], ["matter", "matters"]];
+let state = CHANGES.map(() => "pending"), cur = 0, lang = "typ", fresh = new Set();
+
+const $ = (id) => document.getElementById(id);
+const pending = () => state.flatMap((s, i) => (s === "pending" ? [i] : []));
+
+function word(i, inEditor) {
+  const [from, to] = CHANGES[i], s = state[i], anim = fresh.has(i) ? " settle" : "";
+  if (s === "pending") return inEditor ? `<span class="chg${i === cur ? " cur" : ""}" data-i="${i}"><del>${from}</del> <ins>${to}</ins></span>` : `<mark>${to}</mark>`;
+  return `<span class="${anim}">${s === "accepted" ? to : from}</span>`;
+}
+
+function render() {
+  const L = LANGS[lang], left = pending();
+  const line13 = `In the oven, the water inside the loaf ${word(0, true)} to steam and the crust ${word(1, true)} through the Maillard reaction. ${L.b[0]}Timing ${word(2, true)} more than temperature${L.b[1]}, and ${L.i[0]}patience${L.i[1]} is the most important ingredient of all.`;
+  let review;
+  if (left.length) {
+    review = `<span class="what">Change ${left.indexOf(cur) + 1} of ${left.length}</span>
+      <button class="rb" type="button" data-act="reject"><svg class="i"><use href="#i-discard"/></svg>Reject</button>
+      <button class="rb yes" type="button" data-act="accept"><svg class="i"><use href="#i-check"/></svg>Accept</button>`;
+  } else {
+    const a = state.filter((s) => s === "accepted").length;
+    review = `<span class="what">Reviewed: ${a} accepted, ${3 - a} rejected</span>
+      <button class="rb" type="button" data-act="reset">Ask again</button>`;
+  }
+  const lines = [[12, L.head], [13, line13, "cur"], [null, `<div class="review">${review}</div>`], [14, ""], [15, L.tail[0]], [16, L.tail[1]], [17, L.tail[2]], [18, L.tail[3]]];
+  $("code").innerHTML = lines.map(([n, html, cls]) => `<div class="ln ${cls || ""}"><i>${n ?? ""}</i>${n === null ? html : `<p>${html}</p>`}</div>`).join("");
+  $("pv").innerHTML = `In the oven, the water inside the loaf ${word(0)} to steam and the crust ${word(1)} through the Maillard reaction. <b>Timing ${word(2)} more than temperature</b>, and <i>patience</i> is the most important ingredient of all.`;
+
+  $("d-file").textContent = $("d-tool").textContent = L.file;
+  $("d-series").textContent = `${L.kind} series · ${L.file}`;
+  $("sb-kind").textContent = L.kind;
+  $("sb-count").textContent = left.length ? `${left.indexOf(cur) + 1} of ${left.length}` : "No changes";
+  $("plan-wait").classList.toggle("done", !left.length);
+  document.querySelectorAll(".d-status button").forEach((b) => (b.disabled = !left.length || (left.length < 2 && /prev|next/.test(b.dataset.act))));
+  fresh = new Set();
+}
+
+function step(dir) {
+  const left = pending();
+  if (!left.length) return;
+  const at = left.indexOf(cur);
+  cur = left[(at + dir + left.length) % left.length];
+}
+
+function decide(i, verdict) {
+  state[i] = verdict;
+  fresh.add(i);
+  $("live").textContent = `${verdict === "accepted" ? "Accepted" : "Rejected"}: ${CHANGES[i][verdict === "accepted" ? 1 : 0]}.`;
+}
+
+document.querySelector(".demo").addEventListener("click", (e) => {
+  const chg = e.target.closest(".chg");
+  if (chg) { cur = +chg.dataset.i; return render(); }
+  const file = e.target.closest(".d-files button");
+  if (file) {
+    lang = file.dataset.lang;
+    document.documentElement.dataset.lang = lang;
+    document.querySelectorAll(".d-files button").forEach((b) => b.setAttribute("aria-pressed", b === file));
+    return render();
+  }
+  const act = e.target.closest("[data-act]")?.dataset.act;
+  if (!act) return;
+  if (act === "accept" || act === "reject") { decide(cur, act + "ed"); const left = pending(); cur = left.find((i) => i > cur) ?? left[0] ?? 0; }
+  if (act === "accept-all" || act === "reject-all") {
+    pending().forEach((i) => decide(i, act === "accept-all" ? "accepted" : "rejected"));
+    $("live").textContent = act === "accept-all" ? "Accepted all changes." : "Rejected all changes.";
+  }
+  if (act === "prev") step(-1);
+  if (act === "next") step(1);
+  if (act === "reset") { state = CHANGES.map(() => "pending"); cur = 0; $("live").textContent = "The agent made the same three changes again."; }
+  render();
+  // Keep keyboard focus in the review bar, which is drawn again on every change.
+  if (!/^(prev|next)$/.test(act)) document.querySelector(".review button:last-child")?.focus({ preventScroll: true });
+});
+
+render();
+</script>
+</body>
+</html>
