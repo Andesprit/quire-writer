@@ -4,9 +4,9 @@ A macOS writing app for Typst, LaTeX, Quarto and Markdown with an AI agent of yo
 (Claude, Codex, Gemini and any other agent in the ACP registry), using your own agent login.
 Every change the agent makes waits for your review. In the app it is called Quire.
 
-[![Watch the 80-second demo: chat, track changes, Cmd+K, autocomplete and Grammarly in Quire](site/demo.webp)](site/demo.mp4)
+[![Watch the 80-second demo: chat, track changes, Cmd+K, autocomplete and Grammarly in Quire](site/demo.webp)](https://andesprit.com/quire-writer/demo.mp4)
 
-Watch the [80-second demo](site/demo.mp4): ask the agent, review each change, edit a selection
+Watch the [80-second demo](https://andesprit.com/quire-writer/demo.mp4): ask the agent, review each change, edit a selection
 with Cmd+K, accept autocomplete with Tab, and keep Grammarly working in the editor.
 
 ![Quire in its four own themes: Series, Galley, Coupon and Slate](site/themes.webp)
