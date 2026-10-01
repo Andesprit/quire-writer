@@ -919,6 +919,32 @@ details.thought div { white-space: pre-wrap; margin-top: 4px; padding-left: 18px
 .kinds { display: grid; grid-template-columns: 1fr 1fr; gap: 8px; margin-bottom: 16px; }
 .kinds .btn { justify-content: space-between; }
 
+/* Check Setup: one row per thing the app uses, with the command that installs it */
+.setup { width: min(560px, calc(100vw - 32px)); }
+.setup-rows { display: grid; gap: 12px; margin: 0 0 16px; padding: 0; list-style: none; }
+.setup-row { display: flex; gap: 10px; line-height: 1.45; }
+.setup-row > .codicon { margin-top: 1px; }
+.setup-row > div { flex: 1; min-width: 0; }
+.setup-row b { font-weight: 600; color: var(--fg-strong); }
+.setup-row span { color: var(--muted); }
+.setup-row.ok > .codicon { color: var(--ok); }
+.setup-row.warn > .codicon { color: var(--warn); }
+.setup-row.error > .codicon { color: var(--danger); }
+.setup-row.off > .codicon { color: var(--icon-inactive); }
+.setup-row [data-start] { margin-top: 6px; }
+.setup-fix { display: flex; gap: 8px; align-items: center; margin-top: 6px; }
+.setup-fix code, .setup-said {
+  border-radius: 4px;
+  background: var(--editor);
+  border: 1px solid var(--widget-border);
+  font: 12px/1.4 "SF Mono", Menlo, monospace;
+  user-select: text;
+}
+.setup-fix code { flex: 1; padding: 3px 6px; }
+.setup-said { margin: 6px 0 0; padding: 6px 8px; max-height: 140px; overflow: auto; white-space: pre-wrap; overflow-wrap: anywhere; }
+.setup-help { margin: 0 0 16px; line-height: 1.5; overflow-wrap: anywhere; }
+.setup-help a { color: var(--focus); }
+
 /* ---------- highlighted HTML (the colored layer, review view, suggestions) ---------- */
 
 .tk-keyword { color: var(--syn-keyword); }

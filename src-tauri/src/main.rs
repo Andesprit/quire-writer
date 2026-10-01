@@ -106,6 +106,7 @@ fn main() {
                 if let Some(MenuItemKind::Submenu(m)) = menu.items()?.first() {
                     m.remove_at(m.items()?.len() - 1)?;
                     m.append(&MenuItem::with_id(app, "quit", format!("Quit {name}"), true, Some("CmdOrCtrl+Q"))?)?;
+                    m.insert(&MenuItem::with_id(app, "setup", "Check Setup…", true, None::<&str>)?, 1)?;
                     #[cfg(not(debug_assertions))] // a dev build has no app bundle to replace
                     m.insert(&MenuItem::with_id(app, "update", "Check for Updates…", true, None::<&str>)?, 1)?; // under About
                 }
@@ -119,6 +120,7 @@ fn main() {
                     let _ = w.close();
                 }
             }
+            "setup" => project::receive(serde_json::json!({"type": "check_setup"})),
             "update" => {
                 let app = app.clone();
                 tauri::async_runtime::spawn(async move { update(&app, true).await });

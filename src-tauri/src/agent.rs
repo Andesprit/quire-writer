@@ -63,6 +63,13 @@ pub struct Agent {
     env: Vec<(String, String)>,
 }
 
+impl Agent {
+    /// What starts it: npx, uvx or its own program.
+    pub fn program(&self) -> &str {
+        &self.argv[0]
+    }
+}
+
 /// The registry's name for this machine, e.g. darwin-aarch64.
 fn platform() -> String {
     let os = if cfg!(target_os = "macos") { "darwin" } else { std::env::consts::OS };
@@ -93,6 +100,14 @@ fn launch(entry: &Value) -> Option<Agent> {
         argv,
         env: env.filter_map(|(k, v)| Some((k.clone(), v.as_str()?.to_string()))).collect(),
     })
+}
+
+/// `npx --prefer-offline` trusts npm's saved list of an agent's versions. A list saved before
+/// the pinned version came out says that version does not exist (ETARGET): then start it
+/// once more, and npm fetches a fresh list.
+fn ask_npm_afresh(argv: &[String], error: &str) -> Option<Vec<String>> {
+    (error.contains("ETARGET") && argv.iter().any(|a| a == "--prefer-offline"))
+        .then(|| argv.iter().filter(|a| *a != "--prefer-offline").cloned().collect())
 }
 
 pub fn registry() -> Vec<Agent> {
@@ -239,6 +254,7 @@ struct State {
     conn: Option<Arc<Conn>>,
     starting: Option<Arc<Conn>>, // started, not answered "initialize" yet
     agent_id: Option<String>,
+    error: Option<String>, // why it last failed to start, for a page that loads later
     root: Option<PathBuf>,
     sessions: HashMap<String, String>,           // kind -> session id
     options: BTreeMap<String, Value>,            // kind -> config options
@@ -315,6 +331,16 @@ impl Bridge {
         self.st().starting.is_some()
     }
 
+    pub fn error(&self) -> Option<String> {
+        self.st().error.clone()
+    }
+
+    /// It could not start: the page shows why in Check Setup.
+    pub fn failed(&self, id: &str, error: String) {
+        self.st().error = Some(error.clone());
+        send(json!({"type": "agent", "id": id, "ready": false, "error": error}));
+    }
+
     pub fn all_options(&self) -> Vec<(String, Value)> {
         self.st().options.iter().map(|(k, v)| (k.clone(), v.clone())).collect()
     }
@@ -329,33 +355,35 @@ impl Bridge {
         let spec = find_agent(agent_id)?;
         self.stop();
         self.st().root = Some(root.into()); // set first: nothing may start a session in the previous folder
-        let mut child = Command::new(&spec.argv[0])
-            .args(&spec.argv[1..])
-            .envs(spec.env)
-            .current_dir(root)
-            .stdin(Stdio::piped())
-            .stdout(Stdio::piped())
-            .stderr(Stdio::piped())
-            .process_group(0)
-            .kill_on_drop(true)
-            .spawn()
-            .map_err(|e| format!("Could not start {}: {e}", spec.argv[0]))?;
-        let (stdin, stdout, stderr) = (child.stdin.take().unwrap(), child.stdout.take().unwrap(), child.stderr.take().unwrap());
-        let said = Arc::new(Mutex::new(Vec::new()));
-        let stderr = tokio::spawn(keep_stderr(stderr, said.clone()));
-        let conn = Arc::new(Conn {
-            stdin: stdin.into(),
-            next: AtomicU64::new(0),
-            waiting: Mutex::default(),
-            group: child.id().unwrap_or(0) as i32,
-            started: Instant::now(),
-            said,
-            _child: Mutex::new(child),
-        });
-        tokio::spawn(read(conn.clone(), stdout, stderr));
-        self.st().starting = Some(conn.clone()); // so a stop meanwhile stops it too
-        let started = conn.request("initialize", json!({"protocolVersion": 1, "clientCapabilities": {}})).await;
-        {
+        self.st().error = None;
+        let mut argv = spec.argv;
+        let conn = loop {
+            let mut child = Command::new(&argv[0])
+                .args(&argv[1..])
+                .envs(spec.env.clone())
+                .current_dir(root)
+                .stdin(Stdio::piped())
+                .stdout(Stdio::piped())
+                .stderr(Stdio::piped())
+                .process_group(0)
+                .kill_on_drop(true)
+                .spawn()
+                .map_err(|e| format!("Could not start {}: {e}", argv[0]))?;
+            let (stdin, stdout, stderr) = (child.stdin.take().unwrap(), child.stdout.take().unwrap(), child.stderr.take().unwrap());
+            let said = Arc::new(Mutex::new(Vec::new()));
+            let stderr = tokio::spawn(keep_stderr(stderr, said.clone()));
+            let conn = Arc::new(Conn {
+                stdin: stdin.into(),
+                next: AtomicU64::new(0),
+                waiting: Mutex::default(),
+                group: child.id().unwrap_or(0) as i32,
+                started: Instant::now(),
+                said,
+                _child: Mutex::new(child),
+            });
+            tokio::spawn(read(conn.clone(), stdout, stderr));
+            self.st().starting = Some(conn.clone()); // so a stop meanwhile stops it too
+            let started = conn.request("initialize", json!({"protocolVersion": 1, "clientCapabilities": {}})).await;
             let mut st = self.st();
             if !st.starting.as_ref().is_some_and(|c| Arc::ptr_eq(c, &conn)) {
                 return Ok(false);
@@ -363,14 +391,16 @@ impl Bridge {
             st.starting = None;
             if let Err(e) = started {
                 conn.kill();
-                return Err(e);
+                argv = ask_npm_afresh(&argv, &e).ok_or(e)?;
+                continue;
             }
             if st.agent_id.as_deref() != Some(agent_id) {
                 st.chosen.clear();
             }
             st.agent_id = Some(agent_id.into());
             st.conn = Some(conn.clone()); // usable only now, once it knows its folder and has started
-        }
+            break conn;
+        };
         match self.session("chat").await {
             // Another folder or agent replaced this one while its session started: not an error.
             Err(_) if !self.st().conn.as_ref().is_some_and(|c| Arc::ptr_eq(c, &conn)) => Ok(false),
@@ -539,9 +569,8 @@ impl Bridge {
         let name = find_agent(&id).map_or(id.clone(), |a| a.name);
         if conn.started.elapsed() < RESTART_AFTER {
             self.stop();
-            send(json!({"type": "agent", "id": id, "ready": false}));
             let said = if said.is_empty() { String::new() } else { format!(" It said:\n{said}") };
-            send(json!({"type": "error", "message": format!("{name} stopped right after it started. Click it in the status bar to try again.{said}")}));
+            self.failed(&id, format!("{name} stopped right after it started.{said}"));
         } else {
             send(json!({"type": "error", "message": format!("{name} stopped. Quire is starting it again, with a new conversation.")}));
             restart_agent(&id);
@@ -609,6 +638,10 @@ mod tests {
         let bin = json!({"id": "b", "distribution": {"binary": {platform(): {"cmd": "./dist/b", "args": ["acp"]}}}});
         assert_eq!(launch(&bin).unwrap().argv, ["b", "acp"]);
         assert!(launch(&json!({"id": "c", "distribution": {"binary": {"plan9-mips": {"cmd": "c"}}}})).is_none());
+        let npx = launch(&both).unwrap().argv;
+        assert_eq!(ask_npm_afresh(&npx, "npm error code ETARGET").unwrap(), ["npx", "-y", "a@1", "--acp"]);
+        assert!(ask_npm_afresh(&npx, "npm error code E404").is_none());
+        assert!(ask_npm_afresh(&["npx".into(), "-y".into(), "a@1".into()], "npm error code ETARGET").is_none());
         let bundled: Value = serde_json::from_str(AGENTS).unwrap();
         assert!(list(Some(&bundled["agents"])).filter_map(launch).any(|a| a.id == "claude-acp"));
         assert_eq!(strip_fences("```typst\nhello\n```\n"), "hello");

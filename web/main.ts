@@ -1095,6 +1095,44 @@ function renderAgentStatus(text?: string) {
   $("sb-agent").innerHTML = `${icon(busy ? "loading" : "hubot", busy ? "codicon-modifier-spin" : "")} <span>${esc(label)}</span>`
   $("sb-agent").title = root && agentState === "none" ? "Start the agent" : "Open chat"
   setAgentReady(agentState === "ready" || agentState === "working")
+  if ($<HTMLDialogElement>("setup").open) renderSetup()
+}
+
+// ---------- Check Setup: what the agent, the previews and the exports need ----------
+
+let agentError = "" // why the agent last failed to start
+let setupRows: { label: string; status: string; detail: string; fix: string }[] = []
+const SETUP_ICONS: Record<string, string> = { ok: "pass", warn: "warning", error: "error", off: "circle-slash", busy: "loading codicon-modifier-spin" }
+
+function renderSetup() {
+  const name = agents.find((a) => a.id === agentId)?.name ?? "Agent"
+  const agent =
+    agentState === "ready" || agentState === "working"
+      ? { status: "ok", detail: "Running." }
+      : agentState === "starting"
+        ? { status: "busy", detail: "Starting…" }
+        : !root
+          ? { status: "off", detail: "It starts when you open a project." }
+          : { status: agentError ? "error" : "off", detail: agentError || "Not running.", start: true }
+  const rows = [{ label: name, fix: "", ...agent }, ...setupRows]
+  $("setup-rows").innerHTML = rows
+    .map((r: any) => {
+      const detail = r.detail.includes("\n") ? `<pre class="setup-said">${esc(r.detail)}</pre>` : `<span>${esc(r.detail)}</span>`
+      const fix = r.fix ? `<div class="setup-fix"><code>${esc(r.fix)}</code><button type="button" class="btn secondary sm" data-copy="${esc(r.fix)}">Copy</button></div>` : ""
+      const start = r.start ? `<button type="button" class="btn secondary sm" data-start>${agentError ? "Try Again" : "Start"}</button>` : ""
+      return `<li class="setup-row ${r.status}">${icon(SETUP_ICONS[r.status])}<div><b>${esc(r.label)}</b> ${detail}${fix}${start}</div></li>`
+    })
+    .join("")
+}
+$("setup-rows").onclick = (e) => {
+  const b = (e.target as HTMLElement).closest("button")
+  if (b?.dataset.copy) navigator.clipboard.writeText(b.dataset.copy).then(() => (b.textContent = "Copied"))
+  else if (b?.hasAttribute("data-start")) send({ type: "set_agent", id: agentId })
+}
+$("setup-again").onclick = () => send({ type: "check_setup" })
+$("setup-troubleshooting").onclick = (e) => {
+  e.preventDefault()
+  send({ type: "troubleshooting" })
 }
 
 const isModel = (o: any) => o.category === "model" || o.id === "model"
@@ -1668,9 +1706,19 @@ function onMessage(msg: any) {
       agentId = msg.id
       $<HTMLSelectElement>("agent").value = msg.id
       agentState = msg.ready ? "ready" : "none"
-      renderAgentStatus()
+      agentError = msg.error ?? ""
+      renderAgentStatus(msg.error && "Agent failed to start")
       if (msg.ready && acToggle.checked) send({ type: "warm", kind: "complete" })
+      if (msg.error) send({ type: "check_setup" }) // show why, next to what the agent needs
       break
+    case "setup": {
+      setupRows = msg.rows
+      $("setup-log").textContent = msg.log ? `The full log is in ${msg.log}.` : ""
+      renderSetup()
+      const d = $<HTMLDialogElement>("setup")
+      if (!d.open) d.showModal()
+      break
+    }
     case "options":
       if (msg.kind === "chat") {
         renderOptions($("chat-options"), "chat", msg.options)

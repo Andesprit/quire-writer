@@ -1,0 +1,127 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Troubleshooting: Quire Writer</title>
+<meta name="description" content="What to do when the agent in Quire Writer does not start, or a preview or export says a tool is missing: the messages you may see and how to fix each one.">
+<meta name="theme-color" content="#23439b">
+<link rel="icon" href="icon.png">
+<link rel="stylesheet" href="style.css">
+<style>
+.help { padding-top: 56px; padding-bottom: 96px; }
+.help h1 { font-size: clamp(38px, 4.8vw, 64px); line-height: 1.02; letter-spacing: -0.02em; }
+.issues { margin-top: 44px; max-width: 52em; border-bottom: 1px solid var(--ink); }
+.issue { padding: 28px 0; border-top: 1px solid var(--ink); scroll-margin-top: 16px; }
+.issue h2 { font-size: 24px; line-height: 1.25; letter-spacing: -0.01em; }
+.issue p, .issue ul { margin: 12px 0 0; }
+.issue ul { padding-left: 20px; }
+.issue li + li { margin-top: 10px; }
+.said { font: 15px/1.5 var(--ui); color: var(--muted); }
+.issue code { overflow-wrap: anywhere; }
+.said code { color: var(--series-deep); }
+</style>
+</head>
+<body>
+
+<div class="band">
+  <div class="wrap top">
+    <a class="brand" href="./"><img src="icon.png" alt="" width="36" height="36">Quire Writer<small>Typst · LaTeX · Quarto · Markdown</small></a>
+    <nav aria-label="Main">
+      <a href="./#ask">Features</a>
+      <a href="./#install">Install</a>
+      <a class="btn" href="https://github.com/Andesprit/quire-writer/releases/latest">Download</a>
+    </nav>
+  </div>
+</div>
+
+<main class="wrap help">
+  <h1>Troubleshooting</h1>
+  <p class="sub">Most problems come from a tool that Quire uses and that is missing or too old. Start with Check Setup in the app. Then find the message you see below.</p>
+
+  <div class="issues">
+    <article class="issue" id="check-setup">
+      <h2>Start with Check Setup</h2>
+      <p>In Quire, choose <b>Check Setup…</b> in the Quire menu. It shows whether your agent runs, what the agent needs to start, and the tool each preview and export uses. When something is missing, it shows the command that installs it. It also opens by itself when your agent cannot start. On Linux there is no menu bar, so it opens only then.</p>
+      <p>The full log is in <code>~/Library/Logs/com.andesprit.quire/agent.log</code> on a Mac. On Linux, Check Setup shows where it is.</p>
+      <p>The commands on this page use <a href="https://brew.sh">Homebrew</a>. On Linux, use Homebrew or your system's package manager.</p>
+    </article>
+
+    <article class="issue" id="etarget">
+      <h2>The agent stops with "No matching version found"</h2>
+      <p class="said">You see: <code>npm error code ETARGET</code> and <code>npm error notarget No matching version found for @agentclientprotocol/claude-agent-acp@…</code></p>
+      <p>npm keeps a saved list of each agent's versions. To start fast, Quire asks npm to use what it saved. If npm saved that list before the version Quire asks for came out, npm says that version does not exist. Quire versions after 0.2.2 then ask npm for a fresh list and start the agent again by themselves. On Quire 0.2.2 or older, clear npm's saved lists once, then start the agent again:</p>
+      <pre>npm cache clean --force</pre>
+    </article>
+
+    <article class="issue" id="no-node">
+      <h2>"Could not start npx"</h2>
+      <p class="said">You see: <code>Could not start npx: No such file or directory</code></p>
+      <p>Most agents start with npx, which comes with Node.js. Either Node.js is not installed, or Quire cannot find it. Quire looks for programs where a new Terminal window finds them.</p>
+      <pre>brew install node</pre>
+      <p>If you use nvm, fnm or another version manager, open a new Terminal window and check that <code>node --version</code> works there. With nvm, choose a default version with <code>nvm alias default 22</code>. Then quit Quire and open it again.</p>
+    </article>
+
+    <article class="issue" id="old-node">
+      <h2>Node.js is too old</h2>
+      <p class="said">You see: <code>npm warn EBADENGINE Unsupported engine</code>, or the agent stops right after it starts.</p>
+      <p>Each agent needs a minimum Node.js version. Claude Agent needs Node.js 22 or newer. Check Setup warns when yours is older than 22.</p>
+      <pre>brew upgrade node</pre>
+    </article>
+
+    <article class="issue" id="no-uv">
+      <h2>"Could not start uvx"</h2>
+      <p>Some agents come from PyPI and start with uvx, which comes with uv.</p>
+      <pre>brew install uv</pre>
+    </article>
+
+    <article class="issue" id="broken-download">
+      <h2>npm says ENOENT for a file in _npx</h2>
+      <p class="said">You see: <code>npm error enoent Could not read package.json</code> with a path that has <code>/_npx/</code> in it.</p>
+      <p>The first start of an agent downloads it. If that download stopped half way, for example because Quire was closed during it, npm keeps a broken copy. Remove the agents npm downloaded. The next start downloads the agent again.</p>
+      <pre>rm -rf ~/.npm/_npx</pre>
+    </article>
+
+    <article class="issue" id="login">
+      <h2>The agent says you are not logged in</h2>
+      <p>The agent runs with your own login, the same one it uses in a terminal. Open Terminal, start the agent's own program and log in there. For example: <code>claude</code> for Claude Code, <code>codex login</code> for Codex, or <code>gemini</code> for Gemini CLI. Then choose <b>Try Again</b> in Check Setup.</p>
+    </article>
+
+    <article class="issue" id="stopped">
+      <h2>"… stopped right after it started"</h2>
+      <p>The agent quit in its first 30 seconds. Check Setup shows the last lines it printed, and the log has the rest. The messages above cover the usual reasons. If yours is not here, <a href="https://github.com/Andesprit/quire-writer/issues">open an issue on GitHub</a> with those lines.</p>
+    </article>
+
+    <article class="issue" id="tools">
+      <h2>A preview or an export says a tool is missing</h2>
+      <ul>
+        <li><code>Live preview needs tinymist</code>: this happens only in a build from source. The Mac app carries its own tinymist. Install it with <code>brew install tinymist</code>.</li>
+        <li><code>LaTeX preview needs TeX</code>: install <a href="https://tug.org/mactex/">MacTeX</a>, or the smaller Tectonic with <code>brew install tectonic</code>.</li>
+        <li><code>Quarto preview needs Quarto</code> or <code>PDF from Markdown needs Quarto</code>: install Quarto from <a href="https://quarto.org/docs/get-started/">quarto.org</a>, or with <code>brew install --cask quarto</code>.</li>
+        <li><code>Export to Word and other formats needs Pandoc</code>: install it with <code>brew install pandoc</code>. Quarto carries its own Pandoc, so Quarto works too.</li>
+      </ul>
+    </article>
+
+    <article class="issue" id="report">
+      <h2>Still stuck?</h2>
+      <p><a href="https://github.com/Andesprit/quire-writer/issues">Open an issue on GitHub</a>. Add what Check Setup shows and the last lines of the log.</p>
+    </article>
+  </div>
+</main>
+
+<footer class="band foot">
+  <div class="wrap">
+    <span>Quire Writer is free software, under the GPL-3.0-or-later.</span>
+    <nav aria-label="Project">
+      <a href="https://github.com/Andesprit/quire-writer">Source</a>
+      <a href="https://github.com/Andesprit/quire-writer/releases">Releases</a>
+      <a href="troubleshooting.html">Troubleshooting</a>
+      <a href="https://github.com/Andesprit/quire-writer/blob/main/CONTRIBUTING.md">Contributing</a>
+      <a href="https://github.com/Andesprit/quire-writer/blob/main/SECURITY.md">Security</a>
+      <a href="https://github.com/Andesprit/quire-writer#credits">Credits</a>
+    </nav>
+  </div>
+</footer>
+
+</body>
+</html>

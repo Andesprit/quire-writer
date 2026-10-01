@@ -17,7 +17,7 @@ use serde_json::{json, Value};
 use tokio::process::{Child, Command};
 use tokio::sync::mpsc::{unbounded_channel, UnboundedSender};
 use tauri::http::Response;
-use tauri::{AppHandle, Emitter};
+use tauri::{AppHandle, Emitter, Manager};
 use tokio::task::JoinHandle;
 use tokio_tungstenite::tungstenite::{self, protocol::WebSocketConfig};
 use unicode_normalization::UnicodeNormalization;
@@ -28,6 +28,7 @@ use crate::lock;
 const TEXT_EXT: [&str; 14] = ["typ", "tex", "qmd", "md", "bib", "sty", "cls", "yml", "yaml", "toml", "txt", "csv", "json", "xml"];
 const MAX_FILE: u64 = 2_000_000;
 const DEFAULT_AGENT: &str = "claude-acp";
+const TROUBLESHOOTING: &str = "https://andesprit.com/quire-writer/troubleshooting.html";
 
 static APP: OnceLock<AppHandle> = OnceLock::new();
 static INBOX: OnceLock<UnboundedSender<Value>> = OnceLock::new();
@@ -916,6 +917,49 @@ fn on_path(program: &str) -> bool {
     std::env::var_os("PATH").is_some_and(|p| std::env::split_paths(&p).any(|dir| dir.join(program).is_file()))
 }
 
+/// One line of Check Setup. Status: ok, warn, error, or off (an optional tool that is not
+/// installed). Fix: a command that installs what is missing.
+fn row(label: &str, status: &str, detail: String, fix: &str) -> Value {
+    json!({"label": label, "status": status, "detail": detail, "fix": fix})
+}
+
+/// Check Setup: what the chosen agent needs to start, then the tools each preview and export
+/// needs. The page adds whether the agent itself runs.
+async fn setup() -> Result<Value, String> {
+    let agent = find_agent(&BRIDGE.agent_id().unwrap_or(DEFAULT_AGENT.into()))?;
+    let mut rows = vec![match agent.program() {
+        "npx" => {
+            let out = Command::new("node").arg("--version").output().await.ok().filter(|o| o.status.success());
+            let version = out.map(|o| String::from_utf8_lossy(&o.stdout).trim().to_string());
+            let major = version.as_deref().and_then(|v| v.trim_start_matches('v').split('.').next()?.parse::<u32>().ok());
+            match (version, major) {
+                (Some(v), Some(m)) if m >= 22 => row("Node.js", "ok", v, ""),
+                // Agents ask for different versions (Claude 22, Codex 20): 22 serves them all.
+                (Some(v), _) => row("Node.js", "warn", format!("{v} is old. Some agents need Node.js 22 or newer."), "brew upgrade node"),
+                (None, _) => row("Node.js", "error", format!("Not found. {} starts with npx, which comes with Node.js.", agent.name), "brew install node"),
+            }
+        }
+        "uvx" if on_path("uvx") => row("uv", "ok", "Found uvx".into(), ""),
+        "uvx" => row("uv", "error", format!("Not found. {} starts with uvx, which comes with uv.", agent.name), "brew install uv"),
+        program if on_path(program) => row(&agent.name, "ok", format!("Found {program}"), ""),
+        program => row(&agent.name, "error", format!("Not found. Install {} so that {program} is on your PATH.", agent.name), ""),
+    }];
+    let tools: [(&str, &[&str], &str, &str); 4] = [
+        ("Typst preview", &["tinymist"], "Not installed.", "brew install tinymist"),
+        ("LaTeX preview", &["latexmk", "tectonic"], "Not installed. MacTeX (tug.org/mactex) works too.", "brew install tectonic"),
+        ("Quarto preview", &["quarto"], "Not installed.", "brew install --cask quarto"),
+        ("Word and other exports", &["pandoc", "quarto"], "Not installed. Quarto carries its own.", "brew install pandoc"),
+    ];
+    for (label, programs, missing, fix) in tools {
+        rows.push(match programs.iter().find(|p| on_path(p)) {
+            Some(p) => row(label, "ok", format!("Found {p}"), ""),
+            None => row(label, "off", missing.into(), fix),
+        });
+    }
+    let log = APP.get().and_then(|a| a.path().app_log_dir().ok()).map(|d| d.join("agent.log"));
+    Ok(json!({"type": "setup", "rows": rows, "log": log}))
+}
+
 /// Compile with the writer's own TeX: latexmk (MacTeX, TeX Live) or else Tectonic. On failure,
 /// returns the lines of the log that say what went wrong.
 async fn run_latex(file: &Path, out: &Path) -> Result<(), String> {
@@ -1312,8 +1356,10 @@ async fn start_agent(agent_id: &str) -> Result<(), String> {
         return Ok(());
     };
     send(json!({"type": "status", "text": format!("Starting {}...", find_agent(agent_id)?.name)}));
-    if BRIDGE.start(agent_id, &root).await? {
-        send(json!({"type": "agent", "id": agent_id, "ready": true}));
+    match BRIDGE.start(agent_id, &root).await {
+        Ok(true) => send(json!({"type": "agent", "id": agent_id, "ready": true})),
+        Ok(false) => {}
+        Err(e) => BRIDGE.failed(agent_id, e),
     }
     Ok(())
 }
@@ -1445,6 +1491,10 @@ async fn handle(msg: &Value) -> Result<(), String> {
         "cancel" => BRIDGE.cancel("chat").await,
         "permission" => BRIDGE.answer_permission(f("id")?, opt("option").map(String::from)),
         "set_agent" => start_agent(f("id")?).await?,
+        "check_setup" => send(setup().await?),
+        "troubleshooting" => {
+            Command::new(if cfg!(target_os = "macos") { "open" } else { "xdg-open" }).arg(TROUBLESHOOTING).spawn().map_err(err)?;
+        }
         "set_option" => BRIDGE.set_option(f("kind")?, f("id")?, msg["value"].clone()).await?,
         "inline" => {
             let text = BRIDGE.inline(f("path")?, f("instruction")?, f("selected")?, f("before")?, f("after")?).await?;
@@ -1495,12 +1545,13 @@ fn hello() {
     let agent = BRIDGE.agent_id().unwrap_or(DEFAULT_AGENT.into());
     send(json!({"type": "hello", "agents": agents, "agent": agent}));
     send(ws().state());
-    // Whether the agent runs: an agent that failed before the page listened stays not running.
+    // Whether the agent runs: an agent that failed before the page listened stays not running,
+    // and the page still hears why.
     if BRIDGE.starting() {
         let name = find_agent(&agent).map_or(agent.clone(), |a| a.name);
         send(json!({"type": "status", "text": format!("Starting {name}...")}));
     } else {
-        send(json!({"type": "agent", "id": agent, "ready": BRIDGE.running()}));
+        send(json!({"type": "agent", "id": agent, "ready": BRIDGE.running(), "error": BRIDGE.error()}));
     }
     for (kind, options) in BRIDGE.all_options() {
         send(json!({"type": "options", "kind": kind, "options": options}));

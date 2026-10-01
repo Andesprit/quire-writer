@@ -193,6 +193,18 @@
       </div>
     </form>
   </dialog>
+  <dialog id="setup" class="ask setup" aria-labelledby="setup-title">
+    <form method="dialog">
+      <p class="ask-title" id="setup-title">Check Setup</p>
+      <p class="ask-body">What Quire uses on this computer. The previews and exports need their tool only when you use them.</p>
+      <ul class="setup-rows" id="setup-rows"></ul>
+      <p class="muted setup-help">Still stuck? See <a href="#" id="setup-troubleshooting">Troubleshooting</a>. <span id="setup-log"></span></p>
+      <div class="ask-actions">
+        <button type="button" class="btn secondary" id="setup-again">Check Again</button>
+        <button value="done" class="btn primary">Done</button>
+      </div>
+    </form>
+  </dialog>
   <div id="ctx-menu" class="ctx-menu" role="menu" hidden></div>
   <div id="toasts" aria-live="assertive"></div>
   <script type="module" src="./main.ts"></script>
