@@ -982,7 +982,7 @@ function renderTab() {
   $("tab").hidden = !has
   $("welcome").hidden = has
   $("breadcrumbs").hidden = !has
-  buildFormatBar(lang, mode === "review", showMenu)
+  buildFormatBar(lang, mode === "review")
   $("format-bar").hidden = !has || !syntax()
   $("export").hidden = !has || !syntax()
   if (current) {

@@ -408,17 +408,15 @@ body.resizing iframe { pointer-events: none; }
 /* Formatting bar: Typst markup at one click */
 .format-bar {
   display: flex;
+  flex-wrap: wrap;
   align-items: center;
   gap: 1px;
-  height: 32px;
+  min-height: 32px;
   flex: none;
-  padding: 0 8px 0 10px;
+  padding: 3px 8px 3px 10px;
   border-bottom: 1px solid var(--border);
   background: var(--editor);
-  overflow-x: auto;
-  scrollbar-width: none;
 }
-.format-bar::-webkit-scrollbar { display: none; }
 .format-bar .icon-btn { flex: none; width: 28px; height: 24px; }
 .format-bar .ghost-select { flex: none; height: 24px; padding: 0 6px; color: var(--fg); font-size: 12px; }
 .format-bar .sep { flex: none; width: 1px; height: 16px; margin: 0 6px; background: var(--border); }
