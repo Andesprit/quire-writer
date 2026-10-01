@@ -37,8 +37,10 @@ async function load() {
 window.addEventListener("message", (e) => {
   if (e.source !== parent) return
   const m = e.data
-  if (m?.running) say("Converting to Word…", true)
-  else if (m?.ok) {
+  // A new build replaces the shown version without a word; only a first one says so.
+  if (m?.running) {
+    if (!pages.children.length) say("Converting to Word…", true)
+  } else if (m?.ok) {
     say("")
     load()
   } else if (m?.log) say(m.log)
