@@ -292,8 +292,9 @@ body.resizing iframe { pointer-events: none; }
 }
 .section-head .codicon[class] { font-size: 16px; }
 .section-head span { flex: 1; overflow: hidden; white-space: nowrap; text-overflow: ellipsis; }
-.section-head .icon-btn { visibility: hidden; }
-#sidebar:hover .section-head .icon-btn, .section-head .icon-btn:focus-visible { visibility: visible; }
+/* Out of the layout until wanted, so the folder name gets the whole row, as in VS Code. */
+.section-head .icon-btn { display: none; }
+#sidebar:hover .section-head .icon-btn, #sidebar:focus-within .section-head .icon-btn { display: inline-grid; }
 
 #tree { flex: 1; overflow: auto; padding-bottom: 12px; }
 .row {

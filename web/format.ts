@@ -269,9 +269,12 @@ export const FORMAT_KEYS: Record<string, (sx: Syntax) => void> = {
 }
 
 // Rebuilt when the open file's language changes. Plain text files get no bar. In review mode
-// the buttons are off: the text field they edit is hidden.
+// the buttons are off: the text field they edit is hidden. What does not fit goes in a menu
+// under the arrow at the end (`menu` shows it).
 let barLang: Lang | null = null
-export function buildFormatBar(lang: Lang, review: boolean) {
+let barItems: Fmt[] = [] // the bar's buttons and separators, in order, after the heading
+type Menu = (x: number, y: number, items: ({ label: string; keys?: string; run: () => void } | "-")[]) => void
+export function buildFormatBar(lang: Lang, review: boolean, menu: Menu) {
   if (barLang === lang) return
   barLang = lang
   const bar = $("format-bar")
@@ -286,7 +289,8 @@ export function buildFormatBar(lang: Lang, review: boolean) {
   heading.onchange = () => setHeading(sx, Number(heading.value))
   heading.disabled = review
   bar.append(heading, Object.assign(document.createElement("span"), { className: "sep" }))
-  for (const f of formats(sx)) {
+  barItems = formats(sx)
+  for (const f of barItems) {
     if (f === "|") {
       bar.append(Object.assign(document.createElement("span"), { className: "sep" }))
       continue
@@ -301,4 +305,36 @@ export function buildFormatBar(lang: Lang, review: boolean) {
     b.disabled = review
     bar.append(b)
   }
+  const more = document.createElement("button")
+  more.className = "icon-btn"
+  more.title = "More formatting"
+  more.setAttribute("aria-haspopup", "menu")
+  more.innerHTML = icon("chevron-down")
+  more.onmousedown = (e) => e.preventDefault()
+  more.onclick = () => {
+    const r = more.getBoundingClientRect()
+    const hidden = [...bar.children].slice(2, -1).flatMap((el, i) => ((el as HTMLElement).hidden ? [barItems[i]] : []))
+    const items = hidden.map((f) => (f === "|" ? "-" : f))
+    menu(r.left, r.bottom + 4, items[0] === "-" ? items.slice(1) : items)
+  }
+  more.disabled = review
+  bar.append(more)
+  fitBar()
 }
+
+// Hide buttons from the end until the bar fits, the arrow included. The heading stays.
+function fitBar() {
+  const bar = $("format-bar")
+  const items = [...bar.children] as HTMLElement[]
+  const more = items.pop()
+  if (!more) return
+  for (const el of items) el.hidden = false
+  more.hidden = true
+  if (bar.scrollWidth <= bar.clientWidth) return
+  more.hidden = false
+  let i = items.length - 1
+  for (; i > 0 && bar.scrollWidth > bar.clientWidth; i--) items[i].hidden = true
+  while (i > 0 && items[i].hidden) i--
+  if (items[i].classList.contains("sep")) items[i].hidden = true // no line just before the arrow
+}
+new ResizeObserver(fitBar).observe($("format-bar"))

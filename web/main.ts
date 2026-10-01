@@ -90,6 +90,16 @@ $("toggle-chat").onclick = $("act-chat").onclick = $("close-chat").onclick = () 
 // When the agent is not running in an open folder, a click starts it.
 $("sb-agent").onclick = () => (root && agentState === "none" ? send({ type: "set_agent", id: agentId }) : openChat())
 
+// Cmd+= and Cmd+- make the whole window larger or smaller, previews too, as in VS Code.
+// Cmd+0 goes back to normal size.
+let zoom = Number(store.get("zoom")) || 1
+function setZoom(z: number) {
+  zoom = Math.min(2, Math.max(0.5, Math.round(z * 10) / 10))
+  store.set("zoom", String(zoom))
+  tauri.webview.getCurrentWebview().setZoom(zoom)
+}
+if (zoom !== 1) setZoom(zoom)
+
 document.addEventListener(
   "keydown",
   (e) => {
@@ -104,7 +114,10 @@ document.addEventListener(
         setPanel("chat", false)
         ta.focus()
       } else openChat()
-    } else return
+    } else if (key === "=" || key === "+") setZoom(zoom + 0.1)
+    else if (key === "-") setZoom(zoom - 0.1)
+    else if (key === "0") setZoom(1)
+    else return
     e.preventDefault()
     e.stopPropagation()
   },
@@ -675,7 +688,7 @@ function buildTree(): TreeNode[] {
 
 function renderTree() {
   const tree = $("tree")
-  $("folder-name").textContent = root ? baseName(root.replace(/\/$/, "")) : "No folder opened"
+  $("folder-name").textContent = $("folder-name").title = root ? baseName(root.replace(/\/$/, "")) : "No folder opened"
   $("no-folder").hidden = !!root
   tree.hidden = !root
   // Keep what the writer is typing in a name box when the tree redraws.
@@ -969,7 +982,7 @@ function renderTab() {
   $("tab").hidden = !has
   $("welcome").hidden = has
   $("breadcrumbs").hidden = !has
-  buildFormatBar(lang, mode === "review")
+  buildFormatBar(lang, mode === "review", showMenu)
   $("format-bar").hidden = !has || !syntax()
   $("export").hidden = !has || !syntax()
   if (current) {

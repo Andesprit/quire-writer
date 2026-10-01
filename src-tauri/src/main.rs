@@ -22,6 +22,15 @@ fn lock<T>(m: &Mutex<T>) -> MutexGuard<'_, T> {
     m.lock().unwrap_or_else(|e| e.into_inner())
 }
 
+/// Scroll bars that stay in view in the previews (tinymist, Quarto, the PDF and Markdown
+/// pages), as in the editor: macOS hides them until one scrolls. It runs in every frame, at
+/// the start, because WebKit styles a scroll bar only when its box is made.
+const PREVIEW_SCROLLBARS: &str = r#"if (window !== top) document.documentElement.append(Object.assign(document.createElement("style"), { textContent: `
+::-webkit-scrollbar { width: 12px; height: 12px; }
+::-webkit-scrollbar-thumb { background: rgb(140 140 140 / 0.7); border: 3px solid transparent; border-radius: 6px; background-clip: content-box; }
+::-webkit-scrollbar-thumb:hover { background-color: rgb(140 140 140 / 0.95); }
+::-webkit-scrollbar-track, ::-webkit-scrollbar-corner { background: transparent; }` }))"#;
+
 /// Every message from the page comes through here.
 #[tauri::command]
 fn message(app: tauri::AppHandle, msg: Value) {
@@ -76,6 +85,7 @@ fn main() {
             WebviewWindowBuilder::new(app, "main", WebviewUrl::App("index.html".into()))
                 .title(&name)
                 .inner_size(1400.0, 900.0)
+                .initialization_script_for_all_frames(PREVIEW_SCROLLBARS)
                 .build()?;
 
             // The built-in Quit ends the app without asking the page about unsaved changes.

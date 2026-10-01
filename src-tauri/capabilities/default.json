@@ -1,6 +1,6 @@
 {
   "identifier": "default",
-  "description": "The page may listen for the app's messages and the close request, and close the window.",
+  "description": "The page may listen for the app's messages and the close request, close the window, and zoom it.",
   "windows": ["main"],
-  "permissions": ["core:event:default", "core:window:allow-destroy"]
+  "permissions": ["core:event:default", "core:window:allow-destroy", "core:webview:allow-set-webview-zoom"]
 }

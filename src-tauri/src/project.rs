@@ -750,8 +750,9 @@ async fn typst_preview(rel: &str) -> Result<(), String> {
         .arg("--root")
         .arg(&root)
         .args(hosts.iter().flat_map(|(flag, port)| [flag.to_string(), format!("127.0.0.1:{port}")]))
-        // Redraw only the pages in view: long theses update far faster.
-        .args(["--no-open", "--partial-rendering", "true"])
+        // No --partial-rendering: in the app's WebKit it drew the last page at the top and
+        // left the first pages blank.
+        .arg("--no-open")
         .stdout(Stdio::null())
         .stderr(Stdio::null())
         .process_group(0)
