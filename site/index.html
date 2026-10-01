@@ -71,12 +71,19 @@ kbd { font: 600 13px/1 var(--ui); padding: 3px 6px; background: var(--series-was
 .top nav .btn:hover { background: var(--series-tint); }
 
 /* Hero */
-.hero { display: grid; grid-template-columns: minmax(0, 1.5fr) minmax(0, 1fr); gap: 32px 56px; align-items: end; padding-top: 56px; padding-bottom: 36px; }
-.hero h1 { font-size: clamp(38px, 4.8vw, 64px); line-height: 1.02; letter-spacing: -0.02em; }
+.hero { display: grid; grid-template-columns: minmax(0, 1fr) minmax(0, 1.6fr); gap: 32px 56px; align-items: start; padding-top: 56px; padding-bottom: 56px; }
+.hero h1 { grid-column: 1 / -1; font-size: clamp(38px, 4.8vw, 64px); line-height: 1.02; letter-spacing: -0.02em; }
 .hero h1 span { color: var(--series); display: block; }
 .lede { font-size: 19px; line-height: 1.5; max-width: 34em; }
 .actions { display: flex; flex-wrap: wrap; gap: 12px; margin-top: 24px; }
 .fine { font: 15px/1.4 var(--ui); color: var(--muted); margin-top: 14px; }
+.film { margin: 0; }
+.film-frame { position: relative; border: 1.5px solid var(--ink); background: var(--ink); box-shadow: var(--shadow); }
+.film video { display: block; width: 100%; height: auto; }
+.film-play { position: absolute; inset: 0; width: 100%; border: 0; background: none; cursor: pointer; }
+.film-play:hover { background: rgb(20 20 20 / 0.04); }
+.film-play:focus-visible { outline: 3px solid var(--series); outline-offset: -3px; }
+.film figcaption { margin-top: 10px; font: 15px/1.4 var(--ui); color: var(--muted); }
 
 /* The review demo: a small Quire window in the Series theme */
 .try { font: 16px/1.4 var(--ui); color: var(--muted); margin-bottom: 14px; display: flex; align-items: center; gap: 8px; }
@@ -322,6 +329,15 @@ FINISH: unreviewed and undocumented is unfinished; this build ends with the fini
       </div>
       <p class="fine">For Macs with Apple Silicon. Linux builds are experimental.</p>
     </div>
+    <figure class="film">
+      <div class="film-frame">
+        <video id="film" controls playsinline preload="none" poster="demo.webp" width="1280" height="720">
+          <source src="demo.mp4" type="video/mp4">
+        </video>
+        <button class="film-play" type="button" hidden aria-label="Play the 80-second demo"></button>
+      </div>
+      <figcaption>80 seconds: ask the agent, review each change, edit a selection with Cmd+K, accept autocomplete with Tab, and keep Grammarly working in the editor.</figcaption>
+    </figure>
   </header>
 
   <div class="wrap" id="demo">
@@ -617,6 +633,12 @@ document.querySelector(".demo").addEventListener("click", (e) => {
 });
 
 render();
+
+// The poster draws its own play button, so the native controls wait until the video starts.
+const film = $("film"), play = document.querySelector(".film-play");
+film.controls = false;
+play.hidden = false;
+play.addEventListener("click", () => { play.remove(); film.controls = true; film.play(); film.focus(); });
 </script>
 </body>
 </html>
