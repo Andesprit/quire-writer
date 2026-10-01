@@ -1,7 +1,6 @@
 {
   "identifier": "default",
-  "description": "The helper's page may only listen for the close request and then close the window.",
+  "description": "The page may listen for the app's messages and the close request, and close the window.",
   "windows": ["main"],
-  "remote": { "urls": ["http://127.0.0.1:*"] },
   "permissions": ["core:event:default", "core:window:allow-destroy"]
 }

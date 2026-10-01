@@ -1,0 +1,20 @@
+---
+title: "Proofing Times"
+format: html
+number-sections: true
+---
+
+## Method {#sec-method}
+
+We timed the rise of twelve loaves. The rate follows $r = r_0 \cdot 2^{\Delta T/10}$.
+
+| Temperature | Hours |
+|-------------|-------|
+| 20 °C       | 6     |
+| 30 °C       | 3     |
+
+: Proofing time by temperature {#tbl-times}
+
+## Results
+
+@tbl-times shows that warmer dough rises faster, as @sec-method predicts.

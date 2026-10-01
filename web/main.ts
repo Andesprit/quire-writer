@@ -5,30 +5,42 @@ import "@fontsource/ia-writer-quattro/700.css"
 import "@fontsource/ia-writer-quattro/700-italic.css"
 import { Text } from "@codemirror/state"
 import { Chunk } from "@codemirror/merge"
-import { highlightHTML, highlightLine, startState, sameState, type State } from "./typst"
+import { highlightHTML, highlightLine, langOf, startState, sameState, type Lang, type State } from "./highlight"
 import { minimalChange, rebase } from "./merge"
+import { $, ask, esc, fileIcon, icon, toast } from "./ui"
+import { FORMAT_KEYS, buildFormatBar, connectEditor, insertAt, select, setHeading, syntaxOf } from "./format"
+import { add, connectChat, onFolderOpened, onPermission, onTurnEnd, onTurnStart, onUpdate, renderChips, running, setAgentReady } from "./chat"
 
-// The product name is not decided yet: change it here only.
-const APP_NAME = "Typst Writer"
+// The product name: change it here only.
+const APP_NAME = "Quire"
 
-const $ = <T extends HTMLElement = HTMLElement>(id: string) => document.getElementById(id) as T
 const app = $("app")
 const store = {
   get: (k: string) => { try { return localStorage.getItem(k) } catch { return null } },
   set: (k: string, v: string) => { try { localStorage.setItem(k, v) } catch {} },
+  del: (k: string) => { try { localStorage.removeItem(k) } catch {} },
 }
-const esc = (s: string) => s.replace(/[&<>"]/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;" })[c]!)
-const icon = (name: string, extra = "") => `<i class="codicon codicon-${name} ${extra}"></i>`
 
-// ---------- socket ----------
+// ---------- messages to the app (Tauri's own; replies come as "message" events) ----------
 
-const ws = new WebSocket(`ws://${location.host}/ws`)
-// Every message names the folder this page shows; the helper refuses file changes for any other.
-const send = (msg: object) => ws.readyState === WebSocket.OPEN && ws.send(JSON.stringify({ ...msg, root }))
-ws.onclose = () => toast("Lost the connection to the local helper. Start it again, then reload this page.")
+const tauri = (window as any).__TAURI__
+// Every message names the folder this page shows; the app refuses file changes for any other.
+const send = (msg: object) => {
+  tauri.core.invoke("message", { msg: { ...msg, root } }).catch((e: unknown) => toast(String(e)))
+}
 
 // ---------- theme ----------
 
+// VS Code's two themes (style.css) and Quire's own (themes.css). With no choice stored, follow the system.
+const THEMES = [
+  ["dark", "VS Code Dark Modern"],
+  ["light", "VS Code Light Modern"],
+  "-",
+  ["quire-series", "Quire Series"],
+  ["quire-galley", "Quire Galley"],
+  ["quire-coupon", "Quire Coupon"],
+  ["quire-slate", "Quire Slate"],
+] as const
 const systemLight = matchMedia("(prefers-color-scheme: light)")
 const applyTheme = () => {
   document.documentElement.dataset.theme = store.get("theme") ?? (systemLight.matches ? "light" : "dark")
@@ -36,8 +48,18 @@ const applyTheme = () => {
 applyTheme()
 systemLight.addEventListener("change", applyTheme)
 $("theme").onclick = () => {
-  store.set("theme", document.documentElement.dataset.theme === "light" ? "dark" : "light")
-  applyTheme()
+  const chosen = store.get("theme")
+  const pick = (id: string | null) => {
+    if (id) store.set("theme", id)
+    else store.del("theme")
+    applyTheme()
+  }
+  const r = $("theme").getBoundingClientRect()
+  showMenu(r.right + 4, r.top, [
+    { label: "Follow system", keys: chosen ? "" : "Current", run: () => pick(null) },
+    "-",
+    ...THEMES.map((t) => (t === "-" ? t : { label: t[1], keys: chosen === t[0] ? "Current" : "", run: () => pick(t[0]) })),
+  ])
 }
 
 // ---------- layout: panels, sashes, shortcuts ----------
@@ -65,7 +87,8 @@ $("toggle-sidebar").onclick = $("act-explorer").onclick = () => togglePanel("sid
 $("toggle-preview").onclick = $("open-preview-side").onclick = () => togglePanel("preview")
 $("close-preview").onclick = () => setPanel("preview", false)
 $("toggle-chat").onclick = $("act-chat").onclick = $("close-chat").onclick = () => togglePanel("chat")
-$("sb-agent").onclick = openChat
+// When the agent is not running in an open folder, a click starts it.
+$("sb-agent").onclick = () => (root && agentState === "none" ? send({ type: "set_agent", id: agentId }) : openChat())
 
 document.addEventListener(
   "keydown",
@@ -73,7 +96,7 @@ document.addEventListener(
     if (!(e.metaKey || e.ctrlKey) || e.altKey) return
     const key = e.key.toLowerCase()
     // Cmd+B and Cmd+I are bold and italic in the text; Chrome keeps Cmd+L for itself.
-    if (key === "s" && !e.shiftKey) flushSave()
+    if (key === "s" && !e.shiftKey) flushSave(true)
     else if (key === "e" && e.shiftKey) togglePanel("sidebar")
     else if (key === "\\") togglePanel("preview")
     else if (key === "j" && !e.shiftKey) {
@@ -129,6 +152,8 @@ const ta = $<HTMLTextAreaElement>("text")
 const hl = $("hl")
 const rv = $("review-view")
 let current: string | null = null // open file path
+let lang: Lang = "text" // the language of the open file
+const syntax = () => syntaxOf(lang) // its markup; none for plain text
 let baseline: string | null = null // the text before unreviewed changes
 let chunks: readonly Chunk[] = []
 let mode: "edit" | "review" = "edit"
@@ -140,7 +165,7 @@ let fromDisk = false // an edit that came from the agent or another program
 let lastTyped = 0
 let saveTimer = 0
 let saved = "" // the text as it is on disk
-let pendingSave: string | null = null // sent, waiting for the helper to confirm
+let pendingSave: string | null = null // sent, waiting for the app to confirm
 let holdSave = false // a disk conflict is waiting for the writer's choice
 let autosave = store.get("autosave") !== "off"
 
@@ -191,7 +216,7 @@ function paintLines(next: string[]) {
   for (; i < next.length; i++) {
     if (i >= next.length - q && sameState(states[i - delta], st)) break
     fresh.push({ ...st })
-    html.push(`<div class="ln">${highlightLine(next[i], st) || "<br>"}</div>`)
+    html.push(`<div class="ln">${highlightLine(next[i], st, lang) || "<br>"}</div>`)
   }
   const keepFrom = i - delta // first old line that stays as it is
   for (let k = keepFrom - 1; k >= p; k--) hl.children[k].remove()
@@ -226,6 +251,7 @@ function render() {
   markActive()
   hl.scrollTop = ta.scrollTop
   placeGhost()
+  if (previewKind === "markdown") sendMarkdown()
   if (mode === "review") renderReview()
   updateReviewUI()
   updateInfo()
@@ -237,7 +263,7 @@ function markActive() {
   hl.children[active]?.classList.add("active")
 }
 
-// Replace a range the way typing would, so the browser's undo still works.
+// Replace a range the way typing would, so the text field's own undo still works.
 function edit(from: number, to: number, text: string, disk = false) {
   const keep = { start: ta.selectionStart, end: ta.selectionEnd, scroll: ta.scrollTop, focus: document.activeElement }
   programmatic = true
@@ -288,12 +314,13 @@ ta.addEventListener("keydown", (e) => {
   const mod = e.metaKey || e.ctrlKey
   const key = e.key.toLowerCase()
   const heading = /^Digit[0-4]$/.test(e.code) ? Number(e.code.slice(5)) : -1
-  if (mod && !e.shiftKey && !e.altKey && FORMAT_KEYS[key]) {
+  const sx = syntax()
+  if (mod && !e.shiftKey && !e.altKey && sx && FORMAT_KEYS[key]) {
     e.preventDefault()
-    FORMAT_KEYS[key]()
-  } else if (mod && e.altKey && heading >= 0) {
+    FORMAT_KEYS[key](sx)
+  } else if (mod && e.altKey && heading >= 0 && sx) {
     e.preventDefault()
-    setHeading(heading)
+    setHeading(sx, heading)
   } else if (mod && key === "k") {
     e.preventDefault()
     openInline()
@@ -320,8 +347,10 @@ function scheduleSave() {
   saveTimer = window.setTimeout(() => (autosave ? flushSave() : sendReview()), 400)
 }
 
-function flushSave() {
+// While a disk conflict waits for the writer, only Cmd+S and "Keep mine" (force) save.
+function flushSave(force = false) {
   clearTimeout(saveTimer)
+  if (holdSave && !force) return
   holdSave = false
   if (!current) return
   pendingSave = ta.value
@@ -341,12 +370,12 @@ function updateDirty() {
 // Before another file replaces the open one. False means the writer cancelled.
 async function leaveCurrent(): Promise<boolean> {
   if (!current || !isDirty()) return true
-  if (autosave) {
+  if (autosave && !holdSave) {
     flushSave()
     return true
   }
   const answer = await ask(`Save changes to ${baseName(current)}?`, "If you don't save, your changes since the last save are lost.")
-  if (answer === "save") flushSave()
+  if (answer === "save") flushSave(true)
   else if (answer === "discard") {
     clearTimeout(saveTimer)
     ta.value = saved
@@ -356,19 +385,7 @@ async function leaveCurrent(): Promise<boolean> {
   return answer === "save" || answer === "discard"
 }
 
-// With `ok`, a yes/no question whose yes button says `ok` (answer "save").
-function ask(title: string, body: string, ok?: string): Promise<string> {
-  const d = $<HTMLDialogElement>("ask")
-  d.querySelector(".ask-title")!.textContent = title
-  d.querySelector(".ask-body")!.textContent = body
-  d.querySelector<HTMLElement>('button[value="discard"]')!.hidden = !!ok
-  const primary = d.querySelector<HTMLElement>('button[value="save"]')!
-  primary.textContent = ok ?? "Save"
-  d.returnValue = ""
-  d.showModal()
-  primary.focus()
-  return new Promise((done) => d.addEventListener("close", () => done(d.returnValue), { once: true }))
-}
+let conflict: HTMLElement | null = null // the question about a disk change where the writer typed
 
 // The open file changed on disk (the agent, another program, a restore).
 function onDiskChange(content: string, base: string | null) {
@@ -380,19 +397,16 @@ function onDiskChange(content: string, base: string | null) {
   // Unsaved typing and a change on disk: keep both when they touch different places.
   const change = rebase(saved, ta.value, content)
   if (change) {
-    if (base == null) baseline = null
-    else if (baseline == null) baseline = base
-    edit(change.from, change.to, change.insert, true)
+    applyContent(content, base, change)
     saved = content
-    if (baseline != null && Date.now() - lastTyped > 2000) setMode("review")
-    scheduleRender()
     return scheduleSave()
   }
   // Same place: the writer decides. Nothing is saved until then.
   clearTimeout(saveTimer)
   holdSave = true
   const name = baseName(current!)
-  toast(`${name} changed on disk where you have unsaved changes.`, "error", [
+  conflict?.remove()
+  conflict = toast(`${name} changed on disk where you have unsaved changes.`, "error", [
     {
       label: "Use the disk version",
       run: () => {
@@ -407,53 +421,67 @@ function onDiskChange(content: string, base: string | null) {
       run: () => {
         saved = content
         holdSave = false
-        if (autosave) flushSave()
+        if (autosave) flushSave(true)
         updateDirty()
       },
     },
   ])
 }
 
-// New content from disk. With a baseline, the difference becomes changes to review.
-function applyContent(content: string, base: string | null) {
+// New content from disk (`c` is how the text changes). With a baseline, the difference
+// becomes changes to review.
+function applyContent(content: string, base: string | null, c = minimalChange(ta.value, content)) {
   if (base == null) baseline = null
   else if (baseline == null) baseline = base
-  const c = minimalChange(ta.value, content)
   if (c.from !== c.to || c.insert) edit(c.from, c.to, c.insert, true)
   // Open the review view, unless the writer is typing right now.
   if (baseline != null && Date.now() - lastTyped > 2000) setMode("review")
   scheduleRender()
 }
 
+// The open file changes: nothing meant for the old one (a suggestion, an edit or a citation
+// on its way, a disk conflict) may land in the new one.
+function dropFileState() {
+  clearGhost()
+  holdSave = false
+  pendingSave = null
+  conflict?.remove()
+  inlineWant = acWant = null
+  box.hidden = true
+  acBusy = false
+  renderAcStatus()
+}
+
 function openFile(path: string, content: string, base: string | null) {
   if (autosave) flushSave()
+  dropFileState()
   current = path
+  lang = langOf(path)
   baseline = base
-  ghost = null
-  holdSave = false
   ta.value = content // a new file starts a fresh undo history
   resetLayer()
   saved = content
-  pendingSave = null
   ta.setSelectionRange(0, 0)
   ta.scrollTop = 0
   setMode(base != null ? "review" : "edit")
   render()
   renderTree()
   renderTab()
+  renderLabels() // its hint is for this file's language
   // Take the keyboard only if the writer is not typing somewhere else (a name box, the chat).
   const busy = document.activeElement?.matches("input, textarea, select") && document.activeElement !== ta
   if (mode === "edit" && !busy) ta.focus({ preventScroll: true })
-  const main = files.includes("main.typ") ? "main.typ" : path.endsWith(".typ") ? path : null
-  if (main && main !== previewing) {
-    previewing = main
-    $("preview-name").textContent = `Preview ${main.split("/").pop()}`
-    send({ type: "preview", path: main })
+  // Typst previews main.typ when there is one, and LaTeX its main file (the app finds it).
+  const target = lang === "text" ? null : lang === "typst" && files.includes("main.typ") ? "main.typ" : path
+  if (target && target !== previewing) {
+    previewing = target
+    send({ type: "preview", path: target })
   }
   if (pendingJump?.path === path) goTo(path, pendingJump.line, pendingJump.col)
 }
 
 function closeFile(message?: string) {
+  dropFileState()
   current = null
   baseline = null
   ta.value = ""
@@ -482,7 +510,7 @@ function renderReview() {
   const doc = ta.value
   const base = baseline ?? ""
   const scroll = rv.scrollTop
-  const plain = (s: string) => highlightHTML(s.replace(/\n$/, ""))
+  const plain = (s: string) => highlightHTML(s.replace(/\n$/, ""), lang)
   let out = ""
   let pos = 0
   chunks.forEach((c, i) => {
@@ -503,7 +531,7 @@ function renderReview() {
       `<div class="chunk-bar"><span>Change ${i + 1} of ${chunks.length}</span>` +
       `<button class="btn secondary sm" data-act="reject" data-i="${i}">${icon("discard")}Reject</button>` +
       `<button class="btn primary sm" data-act="accept" data-i="${i}">${icon("check")}Accept</button></div>` +
-      `<div class="chunk-text">${inner.replace(/\n$/, "")}</div></div>`
+      `<div>${inner.replace(/\n$/, "")}</div></div>`
     pos = Math.min(doc.length, c.toB)
   })
   out += plain(doc.slice(pos))
@@ -519,7 +547,7 @@ function acceptChunk(i: number) {
   let insert = doc.slice(c.fromB, Math.max(c.fromB, c.toB - 1))
   if (c.fromB !== c.toB && c.toA <= base.length) insert += "\n"
   baseline = base.slice(0, c.fromA) + insert + base.slice(Math.min(base.length, c.toA))
-  focusChunk = Math.min(i, chunks.length - 2)
+  focusChunk = Math.max(0, Math.min(i, chunks.length - 2))
   render()
   scheduleSave()
 }
@@ -531,7 +559,7 @@ function rejectChunk(i: number) {
   const doc = ta.value
   let insert = base.slice(c.fromA, Math.max(c.fromA, c.toA - 1))
   if (c.fromA !== c.toA && c.toB <= doc.length) insert += "\n"
-  focusChunk = Math.min(i, chunks.length - 2)
+  focusChunk = Math.max(0, Math.min(i, chunks.length - 2))
   edit(c.fromB, Math.min(doc.length, c.toB), insert)
   render()
 }
@@ -598,173 +626,6 @@ $("reject-all").onclick = () => {
 $("next-change").onclick = () => goToChunk(1)
 $("prev-change").onclick = () => goToChunk(-1)
 
-// ---------- formatting (Typst markup) ----------
-
-const WORD = /[\p{L}\p{N}'’-]/u
-
-// The selection, or the word under the caret when nothing is selected.
-function target(): [number, number] {
-  let from = ta.selectionStart
-  let to = ta.selectionEnd
-  if (from === to) {
-    const t = ta.value
-    while (from > 0 && WORD.test(t[from - 1])) from--
-    while (to < t.length && WORD.test(t[to])) to++
-  }
-  return [from, to]
-}
-
-const hasSelection = () => ta.selectionEnd > ta.selectionStart
-
-function select(from: number, to: number) {
-  ta.setSelectionRange(from, to)
-  ta.focus()
-}
-
-// Wrap the target in markup, or unwrap it when it is already wrapped.
-function wrap(open: string, close: string, placeholder: string) {
-  const t = ta.value
-  const [from, to] = target()
-  const inner = t.slice(from, to)
-  if (inner.length >= open.length + close.length && inner.startsWith(open) && inner.endsWith(close)) {
-    const bare = inner.slice(open.length, inner.length - close.length)
-    edit(from, to, bare)
-    return select(from, from + bare.length)
-  }
-  if (t.slice(from - open.length, from) === open && t.slice(to, to + close.length) === close) {
-    edit(from - open.length, to + close.length, inner)
-    return select(from - open.length, to - open.length)
-  }
-  const text = inner || placeholder
-  edit(from, to, open + text + close)
-  select(from + open.length, from + open.length + text.length)
-}
-
-// The whole lines the selection touches.
-function lines(): [number, number] {
-  const t = ta.value
-  const end = ta.selectionEnd > ta.selectionStart && t[ta.selectionEnd - 1] === "\n" ? ta.selectionEnd - 1 : ta.selectionEnd
-  const from = t.lastIndexOf("\n", ta.selectionStart - 1) + 1
-  const nl = t.indexOf("\n", end)
-  return [from, nl < 0 ? t.length : nl]
-}
-
-function mapLines(fn: (ls: string[]) => string[]) {
-  const [from, to] = lines()
-  const out = fn(ta.value.slice(from, to).split("\n")).join("\n")
-  edit(from, to, out)
-  select(from + out.length, from + out.length)
-}
-
-function setHeading(level: number) {
-  mapLines((ls) => {
-    const same = ls.every((l) => new RegExp(`^={${level}}\\s`).test(l))
-    const lvl = same ? 0 : level
-    return ls.map((l) => (lvl ? "=".repeat(lvl) + " " : "") + l.replace(/^=+\s*/, ""))
-  })
-}
-
-function toggleLinePrefix(prefix: string, others: RegExp) {
-  mapLines((ls) => {
-    const filled = ls.filter((l) => l.trim())
-    const on = filled.length > 0 && filled.every((l) => l.trimStart().startsWith(prefix))
-    return ls.map((l) => {
-      if (!l.trim()) return l
-      const indent = l.match(/^\s*/)![0]
-      const body = l.slice(indent.length)
-      return on ? indent + body.slice(prefix.length) : indent + prefix + body.replace(others, "")
-    })
-  })
-}
-
-// Insert markup after the word at the caret and select the part the writer should replace.
-function insertAt(text: string, pick: string, spaced = true) {
-  const t = ta.value
-  let pos = ta.selectionEnd
-  while (pos < t.length && WORD.test(t[pos])) pos++
-  const space = spaced && pos > 0 && !/\s/.test(t[pos - 1]) ? " " : ""
-  edit(pos, pos, space + text)
-  const i = pos + space.length + text.indexOf(pick)
-  select(i, i + pick.length)
-}
-
-// Insert a block on its own lines, after the current line.
-function insertBlock(block: string, pick: string) {
-  const t = ta.value
-  const nl = t.indexOf("\n", ta.selectionEnd)
-  const end = nl < 0 ? t.length : nl
-  const lineStart = t.lastIndexOf("\n", end - 1) + 1
-  const text = (t.slice(lineStart, end).trim() ? "\n\n" : "") + block
-  edit(end, end, text)
-  const i = end + text.indexOf(pick)
-  select(i, i + pick.length)
-}
-
-function link() {
-  const [from, to] = target()
-  const label = ta.value.slice(from, to) || "link text"
-  const text = `#link("https://")[${label}]`
-  edit(from, to, text)
-  select(from + 7, from + 15)
-}
-
-const FIGURE = '#figure(\n  image("image.png", width: 80%),\n  caption: [Caption],\n) <fig:name>'
-const TABLE = "#figure(\n  table(\n    columns: 2,\n    [*Header*], [*Header*],\n    [Cell], [Cell],\n  ),\n  caption: [Caption],\n) <tab:name>"
-
-type Fmt = { icon: string; label: string; keys?: string; run: () => void } | "|"
-const FORMATS: Fmt[] = [
-  { icon: "bold", label: "Bold", keys: "Cmd+B", run: () => wrap("*", "*", "bold text") },
-  { icon: "italic", label: "Italic", keys: "Cmd+I", run: () => wrap("_", "_", "italic text") },
-  { icon: "code", label: "Code", run: () => wrap("`", "`", "code") },
-  "|",
-  { icon: "symbol-operator", label: "Inline math", run: () => wrap("$", "$", "x") },
-  { icon: "symbol-numeric", label: "Math block", run: () => insertBlock("$ x $", "x") },
-  "|",
-  { icon: "list-unordered", label: "Bullet list", run: () => toggleLinePrefix("- ", /^[-+]\s/) },
-  { icon: "list-ordered", label: "Numbered list", run: () => toggleLinePrefix("+ ", /^[-+]\s/) },
-  { icon: "quote", label: "Quote", run: () => (hasSelection() ? wrap("#quote(block: true)[", "]", "") : insertBlock("#quote(block: true)[\n  Quote\n]", "Quote")) },
-  "|",
-  { icon: "link", label: "Link", run: link },
-  { icon: "mention", label: "Citation or reference (@key)", run: () => insertAt("@key", "key") },
-  { icon: "library", label: "Cite by DOI or arXiv ID", run: () => openInline("cite") },
-  { icon: "tag", label: "Label (<name>)", run: () => insertAt("<name>", "name") },
-  { icon: "note", label: "Footnote", run: () => (hasSelection() ? wrap("#footnote[", "]", "") : insertAt("#footnote[Footnote text]", "Footnote text", false)) },
-  "|",
-  { icon: "file-media", label: "Figure", run: () => insertBlock(FIGURE, "image.png") },
-  { icon: "table", label: "Table", run: () => insertBlock(TABLE, "Header") },
-  { icon: "comment", label: "Comment out", keys: "Cmd+/", run: () => toggleLinePrefix("// ", /^$/) },
-]
-const FORMAT_KEYS: Record<string, () => void> = {
-  b: () => wrap("*", "*", "bold text"),
-  i: () => wrap("_", "_", "italic text"),
-  "/": () => toggleLinePrefix("// ", /^$/),
-}
-
-function buildFormatBar() {
-  const bar = $("format-bar")
-  const heading = document.createElement("select")
-  heading.id = "fmt-heading"
-  heading.className = "ghost-select"
-  heading.title = "Text style (Cmd+Option+0 to 4)"
-  heading.append(new Option("Text", "0"), ...[1, 2, 3, 4].map((n) => new Option(`Heading ${n}`, String(n))))
-  heading.onchange = () => setHeading(Number(heading.value))
-  bar.append(heading, Object.assign(document.createElement("span"), { className: "sep" }))
-  for (const f of FORMATS) {
-    if (f === "|") {
-      bar.append(Object.assign(document.createElement("span"), { className: "sep" }))
-      continue
-    }
-    const b = document.createElement("button")
-    b.className = "icon-btn"
-    b.title = f.keys ? `${f.label} (${f.keys})` : f.label
-    b.setAttribute("aria-label", f.label)
-    b.innerHTML = icon(f.icon)
-    b.onmousedown = (e) => e.preventDefault() // keep the text selection
-    b.onclick = f.run
-    bar.append(b)
-  }
-}
-
 // ---------- explorer, tab, breadcrumbs, window title ----------
 
 let root: string | null = null
@@ -784,18 +645,6 @@ const joinPath = (dir: string, name: string) => (dir ? `${dir}/${name}` : name)
 const within = (p: string, dir: string) => p === dir || p.startsWith(dir + "/")
 const isDir = (p: string) => dirs.includes(p)
 
-function fileIcon(path: string) {
-  const ext = path.split(".").pop()!.toLowerCase()
-  if (ext === "typ") return icon("file-text", "ft-typ")
-  if (ext === "bib") return icon("book", "ft-bib")
-  if (["yml", "yaml", "toml", "json"].includes(ext)) return icon("json", "ft-data")
-  if (ext === "md") return icon("markdown", "ft-other")
-  if (ext === "csv") return icon("table", "ft-data")
-  if (ext === "tex") return icon("file-code", "ft-other")
-  if (["png", "jpg", "jpeg", "gif", "svg", "webp"].includes(ext)) return icon("file-media", "ft-data")
-  if (ext === "pdf") return icon("file-pdf", "ft-other")
-  return icon("file", "ft-other")
-}
 
 type TreeNode = { name: string; path: string; dir: boolean; kids: TreeNode[] }
 
@@ -843,8 +692,8 @@ function renderTree() {
       else {
         const dirty = n.dir ? [...changed].some((c) => c.startsWith(n.path + "/")) : changed.has(n.path)
         rows.push(
-          `<button class="row${n.dir ? " folder" : ""}${n.path === current ? " active" : ""}${n.path === selected ? " selected" : ""}${dirty ? " changed" : ""}" ` +
-            `role="treeitem" data-path="${esc(n.path)}"${n.dir ? ` data-dir="1" aria-expanded="${open}"` : ""} style="--depth:${depth}" ` +
+          `<button class="row${n.path === current ? " active" : ""}${n.path === selected ? " selected" : ""}${dirty ? " changed" : ""}" ` +
+            `data-path="${esc(n.path)}"${n.dir ? ` data-dir="1" aria-expanded="${open}"` : ""} style="--depth:${depth}" ` +
             `title="${dirty ? "Has changes to review" : esc(n.path)}">${lead}<span class="name">${esc(n.name)}</span>${dirty ? icon("diff", "review-mark") : ""}</button>`,
         )
       }
@@ -927,6 +776,7 @@ $("tree").onclick = (e) => {
     renderTree()
   } else {
     renderTree()
+    if (path === current) return
     leaveCurrent().then((ok) => {
       if (!ok) return
       send({ type: "open_file", path })
@@ -1042,6 +892,13 @@ $("collapse-all").onclick = () => {
 // ---------- labels: every <label> in the project, and which ones nothing refers to ----------
 
 let labels: { name: string; path: string; line: number; col: number; refs: number }[] = []
+const LABEL_HINT: Record<Lang, string> = {
+  typst: "Put <name> after a heading, figure or equation, then refer to it with @name.",
+  latex: "Put \\label{name} in a section, figure or equation, then refer to it with \\ref{name}.",
+  quarto: "Put {#sec-name} after a heading or {#fig-name} after a figure, then refer to it with @sec-name.",
+  markdown: "Markdown has no labels. Quarto (.qmd) adds them.",
+  text: "",
+}
 
 function renderLabels() {
   const open = store.get("labels") !== "closed"
@@ -1055,13 +912,13 @@ function renderLabels() {
     ? labels
         .map(
           (l, i) =>
-            `<button class="row label${l.refs ? "" : " unused"}" role="listitem" data-i="${i}" ` +
+            `<button class="row label${l.refs ? "" : " unused"}" data-i="${i}" ` +
             `title="${esc(`${l.path}, line ${l.line + 1}${l.refs ? "" : ". Nothing refers to this label."}`)}">` +
             `${icon("tag")}<span class="name">${esc(l.name)}</span>` +
             `<span class="refs">${l.refs ? `${l.refs} use${l.refs > 1 ? "s" : ""}` : "unused"}</span></button>`,
         )
         .join("")
-    : `<p class="muted labels-empty">No labels yet. Put &lt;name&gt; after a heading, figure or equation, then refer to it with @name.</p>`
+    : `<p class="muted labels-empty">No labels yet. ${esc(LABEL_HINT[lang])}</p>`
 }
 
 $("labels-head").onclick = () => {
@@ -1078,24 +935,27 @@ $("open-folder").onclick = $("open-folder-2").onclick = async () => {
   if (await leaveCurrent()) send({ type: "open_folder" })
 }
 
+// New project: the kind here, then the app asks for the folder and puts a starter file in it.
+$("new-project").onclick = $("new-project-2").onclick = async () => {
+  const d = $<HTMLDialogElement>("new-project-ask")
+  d.returnValue = ""
+  d.showModal()
+  const kind = await new Promise<string>((done) => d.addEventListener("close", () => done(d.returnValue), { once: true }))
+  if (kind && (await leaveCurrent())) send({ type: "new_project", kind })
+}
+
 // Another folder was opened: nothing from the previous one may stay on screen.
 function resetForFolder(newRoot: string) {
   clearTimeout(saveTimer)
-  current = null
-  baseline = null
-  ghost = null
-  ta.value = ""
-  saved = ""
-  setMode("edit")
-  render()
-  renderTab()
+  closeFile()
   previewing = null
+  previewKind = ""
   $("preview").removeAttribute("src")
   selected = null
   naming = null
   collapsed.clear()
   changed.clear()
-  add("chat-note", `Opened ${baseName(newRoot.replace(/\/$/, ""))}. The agent now works in this folder.`)
+  onFolderOpened(baseName(newRoot.replace(/\/$/, "")))
 }
 
 function renderTab() {
@@ -1103,13 +963,14 @@ function renderTab() {
   $("tab").hidden = !has
   $("welcome").hidden = has
   $("breadcrumbs").hidden = !has
-  $("format-bar").hidden = !has
+  buildFormatBar(lang, mode === "review")
+  $("format-bar").hidden = !has || !syntax()
+  $("export").hidden = !has || !syntax()
   if (current) {
     $("tab-name").textContent = current.split("/").pop()!
     $("tab").title = current
     $("tab-icon").outerHTML = fileIcon(current).replace("<i ", '<i id="tab-icon" ')
   }
-  $("tab").classList.toggle("changed", !!current && changed.has(current))
   const folder = root?.split("/").filter(Boolean).pop()
   const title = [current?.split("/").pop(), folder].filter(Boolean).join(" — ")
   $("window-title").textContent = title
@@ -1129,20 +990,30 @@ function scheduleInfo() {
   })
 }
 
+// Markup that is not words: comments, math, code and commands.
+const NOT_WORDS: Record<Lang, RegExp[]> = {
+  typst: [/\/\/.*$/gm, /\$[^$]*\$/g, /#[a-zA-Z_][\w.-]*/g],
+  latex: [/(?<!\\)%.*$/gm, /\$[^$]*\$/g, /\\[a-zA-Z@]+\*?/g],
+  quarto: [/<!--[\s\S]*?-->/g, /```[\s\S]*?```/g, /\$[^$]*\$/g, /\{[^}]*\}/g],
+  markdown: [/<!--[\s\S]*?-->/g, /```[\s\S]*?```/g, /\$[^$]*\$/g],
+  text: [],
+}
 const countWords = (s: string) =>
-  (s.replace(/\/\/.*$/gm, "").replace(/\$[^$]*\$/g, " ").replace(/#[a-zA-Z_][\w.-]*/g, " ").match(/[\p{L}\p{N}][\p{L}\p{N}'’-]*/gu) ?? []).length
+  (NOT_WORDS[lang].reduce((t, r) => t.replace(r, " "), s).match(/[\p{L}\p{N}][\p{L}\p{N}'’-]*/gu) ?? []).length
+
+const lineText = (n: number) => ta.value.slice(lineStarts[n], (lineStarts[n + 1] ?? ta.value.length + 1) - 1)
 
 function currentHeading(): string | null {
-  const text = ta.value
   for (let n = lineOf(ta.selectionStart); n >= 0; n--) {
-    const m = /^(=+)\s+(.+)/.exec(text.slice(lineStarts[n], (lineStarts[n + 1] ?? text.length + 1) - 1))
-    if (m) return m[2]
+    const h = syntax()?.headingOf(lineText(n))
+    if (h) return h[1]
   }
   return null
 }
 
 let wordsTimer = 0
 function updateInfo() {
+  document.documentElement.dataset.lang = current ? lang : "" // Quire Series colours by kind of file
   if (!current) {
     $("sb-pos").textContent = ""
     $("sb-words").textContent = ""
@@ -1151,11 +1022,13 @@ function updateInfo() {
     return
   }
   $("sb-lang").hidden = false
+  $("sb-lang").textContent = { typst: "Typst", latex: "LaTeX", quarto: "Quarto", markdown: "Markdown", text: "Plain Text" }[lang]
   const head = ta.selectionStart
   const line = lineOf(head)
   $("sb-pos").textContent = `Ln ${line + 1}, Col ${head - lineStarts[line] + 1}`
-  const level = /^(=+)\s/.exec(ta.value.slice(lineStarts[line], lineStarts[line] + 8))?.[1].length ?? 0
-  $<HTMLSelectElement>("fmt-heading").value = String(Math.min(level, 4))
+  const level = syntax()?.headingOf(lineText(line))?.[0] ?? 0
+  const style = document.getElementById("fmt-heading") as HTMLSelectElement | null
+  if (style) style.value = String(Math.min(level, 4))
   clearTimeout(wordsTimer)
   wordsTimer = window.setTimeout(() => {
     const total = countWords(ta.value)
@@ -1199,14 +1072,15 @@ function renderAgentStatus(text?: string) {
   const busy = agentState === "starting" || agentState === "working"
   const label =
     text ??
-    { none: "Open a folder to start the agent", starting: `Starting ${name}…`, ready: name, working: `${name} is working…` }[agentState]
+    { none: root ? `${name} is not running. Click to start it.` : "Open a folder to start the agent", starting: `Starting ${name}…`, ready: name, working: `${name} is working…` }[agentState]
   $("sb-agent").innerHTML = `${icon(busy ? "loading" : "hubot", busy ? "codicon-modifier-spin" : "")} <span>${esc(label)}</span>`
-  updateSendState()
+  $("sb-agent").title = root && agentState === "none" ? "Start the agent" : "Open chat"
+  setAgentReady(agentState === "ready" || agentState === "working")
 }
 
 const isModel = (o: any) => o.category === "model" || o.id === "model"
 const isModelOrEffort = (o: any) =>
-  isModel(o) || o.category === "thought_level" || ["effort", "reasoning_effort"].includes(o.id)
+  isModel(o) || o.category === "thought_level" || ["effort", "reasoning_effort", "thought_level"].includes(o.id)
 
 function renderOptions(target: HTMLElement, kind: string, options: any[], only?: (o: any) => boolean) {
   const stacked = target.classList.contains("stacked")
@@ -1264,14 +1138,14 @@ function placeGhost() {
   const line = lineOf(ghost.pos)
   const div = hl.children[line] as HTMLElement | undefined
   if (!div) return
-  const text = ta.value.slice(lineStarts[line], (lineStarts[line + 1] ?? ta.value.length + 1) - 1)
+  const text = lineText(line)
   const col = ghost.pos - lineStarts[line]
   const el = document.createElement("div")
   el.className = "ghost-line"
   el.style.top = `${div.offsetTop}px`
   el.style.left = `${div.offsetLeft}px`
   el.style.width = `${div.clientWidth}px`
-  el.innerHTML = highlightHTML(text.slice(0, col)) + `<span class="ghost-text">${esc(ghost.text)}</span>` + highlightHTML(text.slice(col))
+  el.innerHTML = highlightHTML(text.slice(0, col), lang) + `<span class="ghost-text">${esc(ghost.text)}</span>` + highlightHTML(text.slice(col), lang)
   hl.append(el)
 }
 
@@ -1309,7 +1183,7 @@ function scheduleComplete() {
     const pos = ta.selectionStart
     const doc = ta.value
     acWant = { req: ++reqSeq, pos, version: docVersion }
-    send({ type: "complete", req: acWant.req, before: doc.slice(Math.max(0, pos - 2000), pos), after: doc.slice(pos, pos + 500) })
+    send({ type: "complete", req: acWant.req, path: current, before: doc.slice(Math.max(0, pos - 2000), pos), after: doc.slice(pos, pos + 500) })
     acBusy = true
     renderAcStatus()
   }, 600)
@@ -1377,7 +1251,7 @@ function openInline(kind: "edit" | "cite" = "edit") {
   $("inline-icon").className = `codicon codicon-${kind === "cite" ? "library" : "sparkle"}`
   if (kind === "cite") {
     inlineInput.placeholder = "DOI or arXiv ID"
-    inlineStatus("The paper goes into your .bib file, and @key into the text.")
+    inlineStatus(`The paper goes into your .bib file, and ${syntax()?.cite ?? "@key"} into the text.`)
   } else {
     inlineInput.placeholder = empty ? "Write at the cursor" : "Edit selection"
     inlineStatus(empty ? "Nothing selected: the text goes in at the cursor." : "")
@@ -1405,7 +1279,7 @@ inlineInput.onkeydown = (e) => {
   const doc = ta.value
   inlineWant = { req: ++reqSeq, from, to, selected: doc.slice(from, to) }
   if (inlineKind === "cite") {
-    send({ type: "cite", req: inlineWant.req, id: inlineInput.value.trim() })
+    send({ type: "cite", req: inlineWant.req, id: inlineInput.value.trim(), path: current })
     return inlineStatus("Looking it up…", "busy")
   }
   send({
@@ -1446,15 +1320,84 @@ function applyCite(msg: { req: number; key: string; bib: string; linked: boolean
   if (inlineWant?.req !== msg.req) return
   box.hidden = true
   inlineWant = null
-  insertAt(`@${msg.key}`, msg.key)
+  insertAt((syntax()?.cite ?? "@key").replace("key", msg.key), msg.key)
   select(ta.selectionEnd, ta.selectionEnd)
   const bib = current?.includes("/") ? `/${msg.bib}` : msg.bib // relative to the file; "/" is the project folder
-  toast(
-    (msg.added ? `Added ${msg.key} to ${msg.bib}.` : `${msg.key} is already in ${msg.bib}.`) +
-      (msg.linked ? "" : ` Add #bibliography("${bib}") where the reference list should go.`),
-    "info",
-  )
+  const link = {
+    typst: `Add #bibliography("${bib}") where the reference list should go.`,
+    latex: `Add \\bibliography{${msg.bib.replace(/\.bib$/, "")}} where the reference list should go.`,
+    quarto: `Add "bibliography: ${msg.bib}" to the YAML header.`,
+    markdown: `Add "bibliography: ${msg.bib}" to the YAML header.`,
+    text: "",
+  }[lang]
+  toast((msg.added ? `Added ${msg.key} to ${msg.bib}.` : `${msg.key} is already in ${msg.bib}.`) + (msg.linked ? "" : ` ${link}`), "info")
 }
+
+// ---------- export: the whole document as PDF, Word or another format ----------
+
+const EXPORTS: [string, string][] = [
+  ["pdf", "PDF"],
+  ["docx", "Word (.docx)"],
+  ["-", ""],
+  ["odt", "OpenDocument (.odt)"],
+  ["html", "Web page (.html)"],
+  ["epub", "E-book (.epub)"],
+  ["-", ""],
+  ["md", "Markdown"],
+  ["tex", "LaTeX"],
+  ["typ", "Typst"],
+]
+const OWN_FORMAT: Partial<Record<Lang, string>> = { typst: "typ", latex: "tex", markdown: "md" }
+
+$("export").onclick = () => {
+  const r = $("export").getBoundingClientRect()
+  const items: MenuItem[] = EXPORTS.filter(([to]) => to !== OWN_FORMAT[lang]).map(([to, label]) =>
+    to === "-" ? "-" : { label, run: () => exportAs(to) },
+  )
+  showMenu(r.right - 200, r.bottom + 4, items)
+}
+
+async function exportAs(to: string) {
+  if (!current) return
+  // The export reads the saved file.
+  if (isDirty() && !autosave) {
+    const answer = await ask(`Save ${baseName(current)} before exporting?`, "The export uses the saved file.", "Save and Export")
+    if (answer !== "save") return
+  }
+  if (isDirty()) flushSave()
+  send({ type: "export", req: ++reqSeq, path: current, to })
+}
+
+let exporting: HTMLElement | null = null // the "Exporting…" notice
+
+function exported(path: string | null) {
+  exporting?.remove()
+  if (!path) return // the writer closed the save dialog
+  toast(`Exported ${baseName(path)}.`, "info", [
+    { label: "Open", run: () => send({ type: "reveal", path }) },
+    { label: "Show in Finder", run: () => send({ type: "reveal", path, finder: true }) },
+  ])
+}
+
+// ---------- previews we draw ourselves: Markdown from the text as typed, PDF from LaTeX ----------
+
+let previewKind = "" // html (tinymist, Quarto), markdown or pdf
+function toPreview(msg: object) {
+  const frame = $<HTMLIFrameElement>("preview")
+  const url = frame.src && new URL(frame.src) // quire://localhost has no URL.origin, so build it
+  if (url) frame.contentWindow?.postMessage(msg, `${url.protocol}//${url.host}`)
+}
+let markdownTimer = 0
+function sendMarkdown() {
+  clearTimeout(markdownTimer)
+  markdownTimer = window.setTimeout(() => {
+    if (previewKind === "markdown" && current && current === previewing) toPreview({ markdown: ta.value, dir: parentOf(current) })
+  }, 150)
+}
+// The viewer asks for the text once it has loaded.
+window.addEventListener("message", (e) => {
+  if (e.source === $<HTMLIFrameElement>("preview").contentWindow && e.data === "ready") sendMarkdown()
+})
 
 // ---------- preview sync: a click in the preview shows that text; the preview follows the caret ----------
 
@@ -1496,216 +1439,19 @@ function followCaret() {
   }, 300)
 }
 
-// ---------- chat ----------
-
-const messages = $("messages")
-const chatInput = $<HTMLTextAreaElement>("chat-input")
-const toolEls = new Map<string, HTMLElement>()
-let bubble: { el: HTMLElement; text: string } | null = null // agent message being streamed
-let running = false
-
-const TOOL_ICONS: Record<string, string> = {
-  read: "file", edit: "edit", delete: "trash", move: "arrow-right", search: "search",
-  execute: "terminal", think: "lightbulb", fetch: "globe", switch_mode: "arrow-swap",
-}
-
-// Small, safe Markdown for agent replies: text is escaped first, then styled.
-function md(src: string): string {
-  const inline = (s: string) =>
-    esc(s)
-      .replace(/`([^`]+)`/g, "<code>$1</code>")
-      .replace(/\*\*([^*]+)\*\*/g, "<strong>$1</strong>")
-      .replace(/(^|[\s(])[*_]([^*_\s][^*_]*)[*_](?=[\s.,;:!?)]|$)/g, "$1<em>$2</em>")
-  const out: string[] = []
-  src.split(/```[\w-]*\n?/).forEach((part, i) => {
-    if (i % 2) {
-      out.push(`<pre><code>${esc(part.replace(/\n$/, ""))}</code></pre>`)
-      return
-    }
-    for (const block of part.split(/\n{2,}/)) {
-      const lines = block.split("\n").filter((l) => l.trim())
-      if (!lines.length) continue
-      if (lines.every((l) => /^\s*[-*]\s/.test(l))) out.push(`<ul>${lines.map((l) => `<li>${inline(l.replace(/^\s*[-*]\s/, ""))}</li>`).join("")}</ul>`)
-      else if (lines.every((l) => /^\s*\d+[.)]\s/.test(l))) out.push(`<ol>${lines.map((l) => `<li>${inline(l.replace(/^\s*\d+[.)]\s/, ""))}</li>`).join("")}</ol>`)
-      else out.push(`<p>${lines.map((l) => (/^#{1,6}\s/.test(l) ? `<strong>${inline(l.replace(/^#+\s/, ""))}</strong>` : inline(l))).join("<br>")}</p>`)
-    }
-  })
-  return out.join("")
-}
-
-function add(cls: string, html = "", tag = "div") {
-  $("chat-empty").hidden = true
-  const el = document.createElement(tag)
-  el.className = cls
-  el.innerHTML = html
-  const stick = messages.scrollHeight - messages.scrollTop - messages.clientHeight < 40
-  messages.append(el)
-  if (stick) messages.scrollTop = messages.scrollHeight
-  return el
-}
-
-function setRunning(r: boolean) {
-  running = r
-  $("send").hidden = r
-  $("stop").hidden = !r
-  agentState = r ? "working" : agentState === "working" ? "ready" : agentState
-  renderAgentStatus()
-}
-
-function updateSendState() {
-  $<HTMLButtonElement>("send").disabled = !chatInput.value.trim() || agentState === "none" || agentState === "starting"
-}
-
-function renderChips() {
-  const chips: string[] = []
-  if (current) chips.push(`<span class="chip" title="The agent sees this file">${fileIcon(current)}${esc(current.split("/").pop()!)}</span>`)
-  if (current && ta.selectionEnd > ta.selectionStart) {
-    const lines = lineOf(ta.selectionEnd) - lineOf(ta.selectionStart) + 1
-    chips.push(`<span class="chip" title="The selected text is sent with your message">${icon("selection")}Selection · ${lines} line${lines > 1 ? "s" : ""}</span>`)
-  }
-  $("chips").innerHTML = chips.join("")
-}
-
-function fitChatInput() {
-  chatInput.style.height = "auto"
-  chatInput.style.height = `${chatInput.scrollHeight}px`
-  updateSendState()
-}
-chatInput.oninput = fitChatInput
-$("composer").onsubmit = (e) => {
-  e.preventDefault()
-  const text = chatInput.value.trim()
-  if (!text || running) return
-  flushSave()
-  const selected = ta.selectionEnd > ta.selectionStart ? ta.value.slice(ta.selectionStart, ta.selectionEnd) : null
-  send({ type: "prompt", text, path: current, selection: selected })
-  chatInput.value = ""
-  fitChatInput()
-}
-chatInput.onkeydown = (e) => {
-  if (e.key === "Enter" && !e.shiftKey && !e.isComposing) {
-    e.preventDefault()
-    $<HTMLFormElement>("composer").requestSubmit()
-  }
-}
-$("stop").onclick = () => send({ type: "cancel" })
-
-function onUpdate(u: any) {
-  const kind = u.sessionUpdate
-  if (kind === "agent_message_chunk" && u.content?.type === "text") {
-    bubble ??= { el: add("msg agent"), text: "" }
-    bubble.text += u.content.text
-    const stick = messages.scrollHeight - messages.scrollTop - messages.clientHeight < 80
-    bubble.el.innerHTML = md(bubble.text)
-    if (stick) messages.scrollTop = messages.scrollHeight
-    return
-  }
-  bubble = null
-  if (kind === "agent_thought_chunk" && u.content?.type === "text") {
-    const last = messages.lastElementChild as HTMLElement | null
-    const el = last?.matches("details.thought")
-      ? last
-      : add("thought", `<summary>${icon("lightbulb")} Thinking</summary><div></div>`, "details")
-    el.querySelector("div")!.textContent += u.content.text
-  } else if (kind === "tool_call") {
-    const el = add("tool")
-    toolEls.set(u.toolCallId, el)
-    renderTool(el, u)
-  } else if (kind === "tool_call_update") {
-    const el = toolEls.get(u.toolCallId)
-    if (el) renderTool(el, { ...JSON.parse(el.dataset.u ?? "{}"), ...u })
-  } else if (kind === "plan") {
-    const items = u.entries
-      .map((e: any) => `<li class="${esc(e.status)}">${icon(e.status === "completed" ? "pass-filled" : e.status === "in_progress" ? "circle-large-filled" : "circle-large-outline")}<span>${esc(e.content)}</span></li>`)
-      .join("")
-    const last = messages.lastElementChild
-    if (last?.classList.contains("plan")) last.innerHTML = items
-    else add("plan", items, "ul")
-  }
-}
-
-function renderTool(el: HTMLElement, u: any) {
-  el.dataset.u = JSON.stringify({ title: u.title, kind: u.kind, status: u.status })
-  const status = u.status ?? "pending"
-  const state =
-    status === "completed" ? icon("check", "state completed") : status === "failed" ? icon("error", "state failed") : icon("loading", "state codicon-modifier-spin")
-  el.innerHTML = `${icon(TOOL_ICONS[u.kind] ?? "tools")}<span class="name">${esc(u.title ?? "Tool")}</span>${state}`
-}
-
-function onPermission(msg: any) {
-  if (!isOpen("chat")) setPanel("chat", true)
-  const el = add("permission")
-  el.innerHTML = `<div class="title">${icon("shield")}<span>Allow the agent to: <strong>${esc(msg.toolCall?.title ?? "use a tool")}</strong>?</span></div><div class="actions"></div>`
-  const row = el.querySelector(".actions")!
-  msg.options.forEach((o: any, i: number) => {
-    const b = document.createElement("button")
-    b.type = "button"
-    b.className = `btn ${o.kind?.startsWith("reject") ? "ghost" : i === 0 ? "primary" : "secondary"}`
-    b.textContent = o.name
-    b.onclick = () => {
-      send({ type: "permission", id: msg.id, option: o.optionId })
-      row.innerHTML = `<span class="answered">${icon("check")} ${esc(o.name)}</span>`
-    }
-    row.append(b)
-  })
-  row.querySelector<HTMLElement>("button")?.focus()
-}
-
-function onTurnStart(turn: number, text: string) {
-  bubble = null
-  setRunning(true)
-  const el = add("msg user")
-  el.textContent = text
-  el.dataset.turn = String(turn)
-  const restore = document.createElement("button")
-  restore.className = "restore"
-  restore.hidden = true
-  restore.title = "Put every file the agent changed back to how it was before this message"
-  restore.innerHTML = `${icon("history")} Restore files`
-  restore.onclick = () => {
-    ask(
-      "Restore files to before this message?",
-      "Every file the agent changed goes back to how it was. Later edits to those files are lost.",
-      "Restore",
-    ).then((a) => a === "save" && send({ type: "restore", turn }))
-  }
-  el.append(document.createElement("br"), restore)
-  messages.scrollTop = messages.scrollHeight
-}
-
-function onTurnEnd(turn: number, stop: string) {
-  bubble = null
-  setRunning(false)
-  const r = messages.querySelector<HTMLElement>(`[data-turn="${turn}"] .restore`)
-  if (r) r.hidden = false
-  if (stop === "cancelled") add("chat-note", "Stopped.")
-}
-
-// ---------- notifications ----------
-
-function toast(message: string, kind: "error" | "info" = "error", actions: { label: string; run: () => void }[] = []) {
-  const el = document.createElement("div")
-  el.className = "toast"
-  el.innerHTML = `${icon(kind === "error" ? "error" : "info")}<div class="text"><span></span><div class="toast-actions"></div></div><button class="icon-btn small" title="Close">${icon("close")}</button>`
-  el.querySelector(".text span")!.textContent = message
-  for (const a of actions) {
-    const b = document.createElement("button")
-    b.className = "btn secondary sm"
-    b.textContent = a.label
-    b.onclick = () => {
-      el.remove()
-      a.run()
-    }
-    el.querySelector(".toast-actions")!.append(b)
-  }
-  el.querySelector<HTMLElement>(".icon-btn")!.onclick = () => el.remove()
-  const list = $("toasts")
-  list.append(el)
-  while (list.children.length > 3) list.firstElementChild!.remove()
-  if (kind === "info") setTimeout(() => el.remove(), 6000)
-}
-
 // ---------- start ----------
+
+connectEditor(edit, () => openInline("cite"))
+connectChat({
+  send,
+  context: () => ({ path: current, selection: ta.selectionEnd > ta.selectionStart ? ta.value.slice(ta.selectionStart, ta.selectionEnd) : null }),
+  save: flushSave,
+  working: (busy) => {
+    agentState = busy ? "working" : agentState === "working" ? "ready" : agentState
+    renderAgentStatus()
+  },
+  show: () => setPanel("chat", true),
+})
 
 for (const p of Object.keys(panels) as Panel[]) {
   const saved = store.get(`panel.${p}`)
@@ -1717,13 +1463,6 @@ for (const k of ["sidebar-w", "chat-w", "preview-fr"]) {
   const v = store.get(k)
   if (v) app.style.setProperty(`--${k}`, v)
 }
-// Developer aid: compare Grammarly in several kinds of field. Shown only with ?dev in the URL.
-$("plain").hidden = !new URLSearchParams(location.search).has("dev")
-$("plain").onclick = () => {
-  store.set("plain-doc", ta.value)
-  window.open("/grammarly.html", "_blank")
-}
-buildFormatBar()
 $("app-name").textContent = APP_NAME
 $("welcome-mark").textContent = APP_NAME
 function renderAutosave() {
@@ -1742,16 +1481,22 @@ $("sb-autosave").onclick = () => {
 }
 renderAutosave()
 window.addEventListener("beforeunload", (e) => {
-  if (autosave) return flushSave()
+  // The page reloads: save now when it can be; otherwise ask to stay.
+  if (autosave && !holdSave) return flushSave()
   if (isDirty()) {
-    e.preventDefault() // the browser asks before leaving with unsaved changes
+    e.preventDefault()
     e.returnValue = ""
   }
 })
-// The desktop app closes its window without "beforeunload", so it asks here instead.
-;(window as any).__TAURI__?.window.getCurrentWindow().onCloseRequested(async (e: Event) => {
-  if (!(await leaveCurrent())) return e.preventDefault()
-  for (let i = 0; i < 20 && pendingSave != null; i++) await new Promise((r) => setTimeout(r, 100)) // let the save land
+// Before the app quits or restarts: ask about unsaved changes and let the last save land.
+async function readyToQuit() {
+  if (!(await leaveCurrent())) return false
+  for (let i = 0; i < 20 && pendingSave != null; i++) await new Promise((r) => setTimeout(r, 100))
+  return true
+}
+// Closing the window sends no "beforeunload", so it asks here instead.
+tauri.window.getCurrentWindow().onCloseRequested(async (e: Event) => {
+  if (!(await readyToQuit())) e.preventDefault()
 })
 render()
 renderTree()
@@ -1760,10 +1505,12 @@ renderTab()
 renderAgentStatus()
 renderAcStatus()
 
-// ---------- messages from the helper ----------
+// ---------- messages from the app ----------
 
-ws.onmessage = (ev) => {
-  const msg = JSON.parse(ev.data)
+// Listen first, then ask for the state: nothing sent in between is missed.
+tauri.event.listen("message", (e: { payload: any }) => onMessage(e.payload)).then(() => send({ type: "hello" }))
+
+function onMessage(msg: any) {
   switch (msg.type) {
     case "hello":
       agents = msg.agents
@@ -1788,12 +1535,19 @@ ws.onmessage = (ev) => {
       renderReviewStatus()
       renderAgentStatus()
       if (root && !current) {
-        const first = files.find((f) => f === "main.typ") ?? files.find((f) => f.endsWith(".typ"))
+        const first =
+          ["main.typ", "main.tex", "index.qmd", "main.md", "README.md"].find((f) => files.includes(f)) ??
+          files.find((f) => langOf(f) !== "text")
         if (first) send({ type: "open_file", path: first })
       }
       break
     case "file":
       openFile(msg.path, msg.content, msg.baseline)
+      break
+    case "update_ready":
+      toast(`${APP_NAME} ${msg.version} is installed. It opens the next time you start ${APP_NAME}.`, "info", [
+        { label: "Restart now", run: async () => (await readyToQuit()) && send({ type: "restart" }) },
+      ])
       break
     case "file_changed":
       if (msg.path === current) {
@@ -1806,14 +1560,24 @@ ws.onmessage = (ev) => {
       renderReviewStatus()
       break
     case "preview": {
-      // Load the preview from the other name of this computer (localhost vs 127.0.0.1). The
-      // browser then treats it as another site and runs it in its own process, so redrawing
-      // a long document never freezes typing in the editor.
-      const url = new URL(msg.url)
-      url.hostname = location.hostname === "localhost" ? "127.0.0.1" : "localhost"
-      $<HTMLIFrameElement>("preview").src = url.href
+      previewing = msg.path
+      previewKind = msg.kind
+      $("preview-name").textContent = `Preview ${baseName(msg.path)}`
+      // The Markdown and PDF viewers stay loaded (and keep their scroll) from file to file.
+      const url = new URL(msg.url).href
+      if ($<HTMLIFrameElement>("preview").src !== url) $<HTMLIFrameElement>("preview").src = url
+      if (previewKind === "markdown") sendMarkdown()
       break
     }
+    case "latex":
+      if (previewKind === "pdf") toPreview(msg) // the PDF viewer reloads, or shows the error
+      break
+    case "exporting":
+      exporting = toast(`Exporting ${msg.name}…`, "info")
+      break
+    case "exported":
+      exported(msg.path)
+      break
     case "saved":
       if (msg.path === current && pendingSave != null) {
         saved = pendingSave
@@ -1825,6 +1589,9 @@ ws.onmessage = (ev) => {
       const move = (p: string) => (within(p, msg.from) ? msg.to + p.slice(msg.from.length) : p)
       if (current && within(current, msg.from)) {
         current = move(current)
+        lang = langOf(current) // x.txt renamed to x.md is Markdown now
+        resetLayer()
+        render()
         renderTab()
         updateInfo()
       }
@@ -1902,6 +1669,7 @@ ws.onmessage = (ev) => {
       goTo(msg.path, msg.line, msg.col)
       break
     case "error":
+      if (msg.op === "export") exporting?.remove()
       if (msg.op === "warm") {
         // Autocomplete could not start yet: say so where it lives, without a notice.
         $("sb-ac").title = `Autocomplete is not ready: ${msg.message}`

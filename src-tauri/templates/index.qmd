@@ -1,0 +1,36 @@
+---
+title: "Untitled"
+author: "Your Name"
+format: html
+number-sections: true
+---
+
+## Introduction {#sec-intro}
+
+This is a Quarto document. Write **bold**, *italic*, `code` and
+[links](https://quarto.org/docs/guide/).
+
+- A bullet list
+- with two items
+
+1. A numbered list
+2. with two items
+
+## Math
+
+Inline math sits in dollar signs, like $a^2 + b^2 = c^2$. A numbered equation:
+
+$$
+\sum_{k=1}^{n} k = \frac{n(n + 1)}{2}
+$$ {#eq-sum}
+
+## Tables
+
+| Item  | Value |
+|-------|-------|
+| Alpha | 1     |
+| Beta  | 2     |
+
+: A small table. {#tbl-items}
+
+@tbl-items and @eq-sum are numbered for you. @sec-intro is the start.

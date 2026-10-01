@@ -1,6 +1,6 @@
 //! ACP bridge: one agent process with up to three sessions.
 //!
-//! - chat:     the chat bar. Its updates stream to the browser as-is.
+//! - chat:     the chat bar. Its updates stream to the page as-is.
 //! - inline:   select-and-edit. Replies with replacement text only.
 //! - complete: autocomplete. Replies with the next few words only.
 //!
@@ -13,6 +13,7 @@ use std::path::{Path, PathBuf};
 use std::process::Stdio;
 use std::sync::atomic::{AtomicU64, Ordering::Relaxed};
 use std::sync::{Arc, LazyLock, Mutex, MutexGuard};
+use std::time::{Duration, Instant};
 
 use serde_json::{json, Map, Value};
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
@@ -20,7 +21,7 @@ use tokio::process::{Child, ChildStdin, ChildStdout, Command};
 use tokio::sync::oneshot;
 
 use crate::lock;
-use crate::server::send;
+use crate::project::{language_name, restart_agent, send};
 
 const AGENTS: &str = include_str!("../../agents.json");
 const NO_AGENT: &str = "No agent running. Open a folder first.";
@@ -28,25 +29,30 @@ const STOPPED: &str = "The agent stopped.";
 const EFFORT_IDS: [&str; 3] = ["effort", "reasoning_effort", "thought_level"];
 const FAST_MODEL_HINTS: [&str; 5] = ["haiku", "mini", "flash", "fast", "small"];
 const LOW_EFFORT: [&str; 4] = ["minimal", "none", "off", "low"];
+// An agent that quits on its own is started again, unless it quit this soon after it started:
+// then it would most likely quit again, over and over.
+const RESTART_AFTER: Duration = Duration::from_secs(30);
 
 fn inline_prompt(path: &str, instruction: &str, selected: &str, before: &str, after: &str) -> String {
     format!(
-        "You are editing a Typst document ({path}). Rewrite the SELECTED text following the instruction.\n\
+        "You are editing a {} document ({path}). Rewrite the SELECTED text following the instruction.\n\
          Reply with ONLY the replacement text. No explanation, no quotes, no code fences. Do not use any tools.\n\
          If nothing is selected, reply with the text to insert at the cursor.\n\n\
          Instruction: {instruction}\n\n\
          Text before the selection:\n{before}\n\n\
          SELECTED:\n{selected}\n\n\
-         Text after the selection:\n{after}"
+         Text after the selection:\n{after}",
+        language_name(path)
     )
 }
 
-fn complete_prompt(before: &str, after: &str) -> String {
+fn complete_prompt(path: &str, before: &str, after: &str) -> String {
     format!(
-        "You are the autocomplete of a Typst editor. Continue the text at <CURSOR>.\n\
+        "You are the autocomplete of a {} editor. Continue the text at <CURSOR>.\n\
          Reply with ONLY the text to insert: a few words, at most one sentence. Start with a space if one is needed.\n\
          No explanation, no quotes, no code fences. Do not use any tools.\n\n\
-         {before}<CURSOR>{after}"
+         {before}<CURSOR>{after}",
+        language_name(path)
     )
 }
 
@@ -130,6 +136,7 @@ struct Conn {
     next: AtomicU64,
     waiting: Mutex<HashMap<u64, oneshot::Sender<Result<Value, String>>>>,
     group: i32, // its process group: npx starts the real agent as its own child
+    started: Instant,
     _child: Mutex<Child>,
 }
 
@@ -191,6 +198,7 @@ async fn read(conn: Arc<Conn>, stdout: ChildStdout) {
         }
     }
     lock(&conn.waiting).clear(); // requests still waiting fail with STOPPED
+    BRIDGE.quit(&conn);
 }
 
 pub static BRIDGE: LazyLock<Bridge> = LazyLock::new(Bridge::default);
@@ -199,21 +207,24 @@ pub static BRIDGE: LazyLock<Bridge> = LazyLock::new(Bridge::default);
 pub struct Bridge {
     st: Mutex<State>,
     session_lock: tokio::sync::Mutex<()>, // two requests must not open two sessions of one kind
+    inline_lock: tokio::sync::Mutex<()>,
     complete_lock: tokio::sync::Mutex<()>,
     completions: AtomicU64,
+    newest_completion: AtomicU64,
     permissions: AtomicU64,
 }
 
 #[derive(Default)]
 struct State {
     conn: Option<Arc<Conn>>,
+    starting: Option<Arc<Conn>>, // started, not answered "initialize" yet
     agent_id: Option<String>,
     root: Option<PathBuf>,
     sessions: HashMap<String, String>,           // kind -> session id
     options: BTreeMap<String, Value>,            // kind -> config options
     chosen: HashMap<String, Map<String, Value>>, // kind -> user picks, re-applied to new sessions
     replies: HashMap<String, String>,            // session id -> reply so far
-    pending: HashMap<String, oneshot::Sender<Option<String>>>, // permission id -> answer
+    pending: HashMap<String, (oneshot::Sender<Option<String>>, Value)>, // permission id -> answer, question
 }
 
 impl State {
@@ -221,18 +232,23 @@ impl State {
         self.sessions.iter().find(|(_, s)| *s == session_id).map(|(k, _)| k.clone())
     }
 
-    fn picks_for(&self, kind: &str) -> Map<String, Value> {
-        let chosen = |k: &str| self.chosen.get(k).cloned().unwrap_or_default();
-        if kind != "inline" {
-            return chosen(kind);
-        }
-        // Inline edits follow the chat model and effort, never its mode (a
-        // permissive mode would let the inline session edit files).
-        let shared: HashSet<&str> = list(self.options.get("chat"))
-            .filter(|o| is_model(o) || is_effort(o))
-            .filter_map(|o| o["id"].as_str())
-            .collect();
-        chosen("chat").into_iter().filter(|(k, _)| shared.contains(k.as_str())).collect()
+    /// The writer's picks to apply to a new `kind` session, the model first: effort choices
+    /// depend on the model.
+    fn picks_for(&self, kind: &str) -> Vec<(String, Value)> {
+        let ids = |k: &str, keep: fn(&Value) -> bool| -> HashSet<String> {
+            list(self.options.get(k)).filter(|o| keep(o)).filter_map(|o| o["id"].as_str().map(String::from)).collect()
+        };
+        let mut picks: Vec<(String, Value)> = if kind == "inline" {
+            // Inline edits follow the chat model and effort, never its mode (a
+            // permissive mode would let the inline session edit files).
+            let shared = ids("chat", |o| is_model(o) || is_effort(o));
+            self.chosen.get("chat").into_iter().flatten().filter(|(k, _)| shared.contains(*k)).map(|(k, v)| (k.clone(), v.clone())).collect()
+        } else {
+            self.chosen.get(kind).into_iter().flatten().map(|(k, v)| (k.clone(), v.clone())).collect()
+        };
+        let models = ids(kind, is_model);
+        picks.sort_by_key(|(k, _)| !models.contains(k));
+        picks
     }
 
     /// Smallest model (model=true) or lowest effort the complete session offers.
@@ -284,7 +300,8 @@ impl Bridge {
         send(json!({"type": "options", "kind": kind, "options": options}));
     }
 
-    pub async fn start(&self, agent_id: &str, root: &Path) -> Result<(), String> {
+    /// Ok(false): another start or a stop came first, and this agent was stopped.
+    pub async fn start(&self, agent_id: &str, root: &Path) -> Result<bool, String> {
         let spec = find_agent(agent_id)?;
         self.stop();
         self.st().root = Some(root.into()); // set first: nothing may start a session in the previous folder
@@ -304,28 +321,35 @@ impl Bridge {
             next: AtomicU64::new(0),
             waiting: Mutex::default(),
             group: child.id().unwrap_or(0) as i32,
+            started: Instant::now(),
             _child: Mutex::new(child),
         });
         tokio::spawn(read(conn.clone(), stdout));
-        if let Err(e) = conn.request("initialize", json!({"protocolVersion": 1, "clientCapabilities": {}})).await {
-            conn.kill();
-            return Err(e);
-        }
+        self.st().starting = Some(conn.clone()); // so a stop meanwhile stops it too
+        let started = conn.request("initialize", json!({"protocolVersion": 1, "clientCapabilities": {}})).await;
         {
             let mut st = self.st();
+            if !st.starting.as_ref().is_some_and(|c| Arc::ptr_eq(c, &conn)) {
+                return Ok(false);
+            }
+            st.starting = None;
+            if let Err(e) = started {
+                conn.kill();
+                return Err(e);
+            }
             if st.agent_id.as_deref() != Some(agent_id) {
                 st.chosen.clear();
             }
             st.agent_id = Some(agent_id.into());
             st.conn = Some(conn); // usable only now, once it knows its folder and has started
         }
-        self.session("chat").await.map(|_| ())
+        self.session("chat").await.map(|_| true)
     }
 
     pub fn stop(&self) {
         self.resolve_permissions(None);
         let mut st = self.st();
-        if let Some(conn) = st.conn.take() {
+        for conn in [st.conn.take(), st.starting.take()].into_iter().flatten() {
             conn.kill();
         }
         st.sessions.clear();
@@ -391,7 +415,7 @@ impl Bridge {
         self.send_options(kind);
         let inline_too = kind == "chat" && {
             let st = self.st();
-            st.sessions.contains_key("inline") && st.picks_for("inline").contains_key(config_id)
+            st.sessions.contains_key("inline") && st.picks_for("inline").iter().any(|(k, _)| k == config_id)
         };
         if inline_too {
             self.apply_option("inline", config_id, value).await?;
@@ -424,39 +448,72 @@ impl Bridge {
     }
 
     pub async fn inline(&self, path: &str, instruction: &str, selected: &str, before: &str, after: &str) -> Result<String, String> {
+        // One at a time: two prompts in one session would mix their replies.
+        if self.inline_lock.try_lock().is_err() {
+            self.cancel("inline").await; // the newer request wins
+        }
+        let _one = self.inline_lock.lock().await;
         let (_, reply) = self.prompt("inline", &inline_prompt(path, instruction, selected, before, after)).await?;
         Ok(strip_fences(&reply))
     }
 
-    pub async fn complete(&self, before: &str, after: &str) -> Result<String, String> {
+    pub async fn complete(&self, path: &str, before: &str, after: &str) -> Result<String, String> {
+        let me = self.newest_completion.fetch_add(1, Relaxed) + 1;
         if self.complete_lock.try_lock().is_err() {
             self.cancel("complete").await; // a newer keystroke wins
         }
         let _one = self.complete_lock.lock().await;
+        if self.newest_completion.load(Relaxed) != me {
+            return Ok(String::new()); // a newer keystroke came while this one waited
+        }
         // ponytail: every completion adds to the session history; start a fresh
         // session every 20 so it stays small. Smarter: agent-side NES when agents ship it.
         if self.completions.fetch_add(1, Relaxed) % 20 == 19 {
             self.st().sessions.remove("complete");
         }
-        let (_, reply) = self.prompt("complete", &complete_prompt(before, after)).await?;
+        let (_, reply) = self.prompt("complete", &complete_prompt(path, before, after)).await?;
         let reply = strip_fences(&reply).trim_end_matches('\n').to_string();
         // A suggestion is one short line. Anything else is chatter or an error message.
         Ok(if reply.contains('\n') || reply.chars().count() > 300 { String::new() } else { reply })
     }
 
-    pub fn resolve_permissions(&self, option_id: Option<String>) {
-        for (_, tx) in self.st().pending.drain() {
+    fn resolve_permissions(&self, option_id: Option<String>) {
+        for (_, (tx, _)) in self.st().pending.drain() {
             let _ = tx.send(option_id.clone());
         }
     }
 
     pub fn answer_permission(&self, pid: &str, option_id: Option<String>) {
-        if let Some(tx) = self.st().pending.remove(pid) {
+        if let Some((tx, _)) = self.st().pending.remove(pid) {
             let _ = tx.send(option_id);
         }
     }
 
+    /// The permission questions still waiting for the writer.
+    pub fn open_permissions(&self) -> Vec<Value> {
+        self.st().pending.values().map(|(_, question)| question.clone()).collect()
+    }
+
     // --- called by the agent ---
+
+    /// The agent process ended. A stop or a newer start takes it out first, so if it is still
+    /// the current one, it quit on its own (it crashed): start it again.
+    fn quit(&self, conn: &Arc<Conn>) {
+        let id = {
+            let st = self.st();
+            st.conn.as_ref().filter(|c| Arc::ptr_eq(c, conn)).and(st.agent_id.clone())
+        };
+        let Some(id) = id else { return };
+        let name = find_agent(&id).map_or(id.clone(), |a| a.name);
+        if conn.started.elapsed() < RESTART_AFTER {
+            self.stop();
+            send(json!({"type": "agent", "id": id, "ready": false}));
+            send(json!({"type": "error", "message": format!("{name} stopped right after it started. Click it in the status bar to try again.")}));
+        } else {
+            send(json!({"type": "error", "message": format!("{name} stopped. Quire is starting it again, with a new conversation.")}));
+            restart_agent(&id);
+        }
+    }
 
     fn session_update(&self, params: &Value) {
         let (sid, update) = (params["sessionId"].as_str().unwrap_or(""), &params["update"]);
@@ -486,8 +543,9 @@ impl Bridge {
         }
         let pid = format!("p{}", self.permissions.fetch_add(1, Relaxed));
         let (tx, rx) = oneshot::channel();
-        self.st().pending.insert(pid.clone(), tx);
-        send(json!({"type": "permission", "id": pid, "toolCall": params["toolCall"], "options": options}));
+        let question = json!({"type": "permission", "id": pid, "toolCall": params["toolCall"], "options": options});
+        self.st().pending.insert(pid, (tx, question.clone()));
+        send(question);
         match rx.await.ok().flatten() {
             Some(option_id) => selected(&option_id.into()),
             None => cancelled,

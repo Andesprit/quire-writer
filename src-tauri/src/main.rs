@@ -1,16 +1,15 @@
-//! Typst Writer. The desktop app shows the editor in a window. With --browser it serves the
-//! same page to a browser instead (Chrome or Safari with the Grammarly extension).
+//! Quire, a macOS app. The window shows the editor (web/); this side opens the project, runs
+//! the agent and the previews, and talks to the page through Tauri's own messages.
 
 mod agent;
-mod server;
+mod project;
 
 use std::fs::File;
-use std::net::TcpListener;
 use std::os::fd::AsRawFd;
-use std::path::PathBuf;
 use std::process::{Command, Stdio};
 use std::sync::{Mutex, MutexGuard};
 
+use serde_json::Value;
 use tauri::menu::{Menu, MenuItem, MenuItemKind};
 use tauri::{Manager, RunEvent, WebviewUrl, WebviewWindowBuilder};
 use tokio::signal::unix::{signal, SignalKind};
@@ -21,51 +20,29 @@ fn lock<T>(m: &Mutex<T>) -> MutexGuard<'_, T> {
     m.lock().unwrap_or_else(|e| e.into_inner())
 }
 
+/// Every message from the page comes through here.
+#[tauri::command]
+fn message(app: tauri::AppHandle, msg: Value) {
+    match msg["type"].as_str() {
+        Some("restart") => app.request_restart(), // to open an installed update; the page saved first
+        _ => project::receive(msg),
+    }
+}
+
 fn main() {
-    let mut args = std::env::args().skip(1);
-    match args.next().as_deref() {
-        Some("--browser") => browser(args.next()),
-        _ => desktop(),
-    }
-}
-
-/// Serve the page on PORT (8765 by default), open it in the browser, and open `folder`.
-fn browser(folder: Option<String>) {
-    let port: u16 = std::env::var("PORT").ok().and_then(|p| p.parse().ok()).unwrap_or(8765);
-    let url = format!("http://127.0.0.1:{port}");
-    // Bind before starting anything: otherwise the agent starts, then the server fails to
-    // bind, and an older copy keeps running unnoticed.
-    let Ok(listener) = TcpListener::bind(("127.0.0.1", port)) else {
-        eprintln!(
-            "Port {port} is busy: Typst Writer (or another program) is already running at {url}.\n\
-             Stop it with Ctrl+C in its terminal, then start again. Or use another port: PORT=8766"
-        );
-        std::process::exit(1);
-    };
-    println!("Typst Writer on {url}");
-    if std::env::var_os("NO_BROWSER").is_none() {
-        let _ = Command::new("open").arg(&url).spawn();
-    }
-    let web = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../web/dist");
-    tokio::runtime::Runtime::new().expect("could not start").block_on(async {
-        // Ctrl+C or a plain kill: stop the agent and the preview too.
-        let mut term = signal(SignalKind::terminate()).expect("could not listen for SIGTERM");
-        tokio::select! {
-            r = server::serve(listener, web, folder) => if let Err(e) = r { eprintln!("{e}") },
-            _ = tokio::signal::ctrl_c() => {}
-            _ = term.recv() => {}
-        }
-        server::shutdown();
-    });
-}
-
-fn desktop() {
-    // Set PATH before any thread starts. Resources/bin holds the bundled tinymist, found first.
-    let resources = std::env::current_exe().ok().and_then(|exe| Some(exe.parent()?.parent()?.join("Resources")));
-    let bin = resources.unwrap_or_default().join("bin");
-    std::env::set_var("PATH", format!("{}:{}", bin.display(), shell_path()));
+    // Set PATH before any thread starts. The bundled tinymist sits next to the app's own
+    // program (a signed sidecar), and is found first.
+    let bin = std::env::current_exe().ok().and_then(|exe| Some(exe.parent()?.to_path_buf()));
+    std::env::set_var("PATH", format!("{}:{}", bin.unwrap_or_default().display(), shell_path()));
+    let folder = std::env::args().nth(1); // a folder to open at start: cargo run -- sample
     tauri::Builder::default()
-        .setup(|app| {
+        .plugin(tauri_plugin_updater::Builder::new().build())
+        .invoke_handler(tauri::generate_handler![message])
+        .register_asynchronous_uri_scheme_protocol("quire", |ctx, request, responder| {
+            let (app, path) = (ctx.app_handle().clone(), request.uri().path().to_string());
+            std::thread::spawn(move || responder.respond(project::protocol(&app, &path))); // files can be large
+        })
+        .setup(move |app| {
             // Our errors and the agents' logs (their stderr) go to a file: an app has no terminal.
             let logs = app.path().app_log_dir()?;
             std::fs::create_dir_all(&logs)?;
@@ -74,18 +51,27 @@ fn desktop() {
                 libc::dup2(log.as_raw_fd(), 1);
                 libc::dup2(log.as_raw_fd(), 2);
             }
-            // Bound now, so the window can load the page as soon as the server runs.
-            let listener = TcpListener::bind("127.0.0.1:0")?;
-            let port = listener.local_addr()?.port();
-            let web = app.path().resource_dir()?.join("web");
+            project::start(app.handle().clone(), folder.clone());
+            #[cfg(not(debug_assertions))] // a dev build has no app bundle to replace
+            tauri::async_runtime::spawn(update(app.handle().clone()));
+
+            // Started from a terminal: Ctrl+C, a kill or a closed terminal quits the normal way,
+            // which stops the agent and the preview (they run as their own processes) too.
+            let handle = app.handle().clone();
             tauri::async_runtime::spawn(async move {
-                if let Err(e) = server::serve(listener, web, None).await {
-                    eprintln!("{e}");
+                let mut quit = [SignalKind::interrupt(), SignalKind::terminate(), SignalKind::hangup()]
+                    .map(|kind| signal(kind).expect("could not listen for signals"));
+                let [int, term, hup] = &mut quit;
+                tokio::select! {
+                    _ = int.recv() => {}
+                    _ = term.recv() => {}
+                    _ = hup.recv() => {}
                 }
+                handle.exit(0);
             });
+
             let name = app.package_info().name.clone(); // productName in tauri.conf.json
-            let url = format!("http://127.0.0.1:{port}").parse()?;
-            WebviewWindowBuilder::new(app, "main", WebviewUrl::External(url))
+            WebviewWindowBuilder::new(app, "main", WebviewUrl::App("index.html".into()))
                 .title(&name)
                 .inner_size(1400.0, 900.0)
                 .build()?;
@@ -95,7 +81,7 @@ fn desktop() {
             let menu = Menu::default(app.handle())?;
             if let Some(MenuItemKind::Submenu(m)) = menu.items()?.first() {
                 m.remove_at(m.items()?.len() - 1)?;
-                m.append(&MenuItem::with_id(app, "quit", &format!("Quit {name}"), true, Some("CmdOrCtrl+Q"))?)?;
+                m.append(&MenuItem::with_id(app, "quit", format!("Quit {name}"), true, Some("CmdOrCtrl+Q"))?)?;
             }
             app.set_menu(menu)?;
             Ok(())
@@ -111,9 +97,34 @@ fn desktop() {
         .expect("could not start the app")
         .run(|_, event| {
             if let RunEvent::Exit = event {
-                server::shutdown(); // the agent and the preview run as their own processes
+                project::shutdown(); // the agent and the preview run as their own processes
             }
         });
+}
+
+/// Updates come from the latest GitHub release, checked after start and then daily. One is
+/// installed in the background and opens at the next start; the page offers a restart now.
+#[cfg(not(debug_assertions))]
+async fn update(app: tauri::AppHandle) {
+    use std::time::Duration;
+    use tauri_plugin_updater::UpdaterExt;
+    // ponytail: by then the page listens for messages; keep the news for "hello" if a slow start ever misses it.
+    tokio::time::sleep(Duration::from_secs(10)).await;
+    loop {
+        let found = match app.updater() {
+            Ok(updater) => updater.check().await,
+            Err(e) => Err(e),
+        };
+        match found {
+            Ok(Some(update)) => match update.download_and_install(|_, _| {}, || {}).await {
+                Ok(()) => return project::send(serde_json::json!({"type": "update_ready", "version": update.version})),
+                Err(e) => eprintln!("update to {}: {e}", update.version),
+            },
+            Ok(None) => {}
+            Err(e) => eprintln!("update check: {e}"),
+        }
+        tokio::time::sleep(Duration::from_secs(24 * 60 * 60)).await;
+    }
 }
 
 /// Apps opened from Finder get a bare PATH without Homebrew, so `npx` and `node` (which most

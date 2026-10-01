@@ -1,0 +1,21 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>PDF preview</title>
+  <style>
+    body { margin: 0; background: #e8e8e8; font: 13px -apple-system, system-ui, sans-serif; }
+    #pages { display: flex; flex-direction: column; align-items: center; gap: 12px; padding: 16px; }
+    canvas { background: #fff; box-shadow: 0 1px 4px rgb(0 0 0 / 0.2); }
+    #note { position: sticky; top: 0; z-index: 1; margin: 0; padding: 8px 16px; background: #fff8e1; color: #5c4400; white-space: pre-wrap; font: 12px ui-monospace, Menlo, monospace; }
+    #note:empty { display: none; }
+    #note.busy { background: #f3f3f3; color: #555; font-family: -apple-system, system-ui, sans-serif; }
+  </style>
+</head>
+<body>
+  <p id="note" class="busy">Compiling…</p>
+  <div id="pages"></div>
+  <script type="module" src="./pdf.ts"></script>
+</body>
+</html>

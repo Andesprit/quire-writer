@@ -17,8 +17,12 @@
   },
   "include": [
     "main.ts",
-    "grammarly.ts",
-    "typst.ts",
-    "merge.ts"
+    "ui.ts",
+    "format.ts",
+    "chat.ts",
+    "merge.ts",
+    "highlight.ts",
+    "markdown.ts",
+    "pdf.ts"
   ]
 }

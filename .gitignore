@@ -3,3 +3,7 @@ web/dist/
 build/
 src-tauri/target/
 src-tauri/gen/
+sample/quarto/report.html
+sample/quarto/report_files/
+.impeccable/
+.atelier/

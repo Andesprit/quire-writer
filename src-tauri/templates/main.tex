@@ -1,0 +1,46 @@
+\documentclass[11pt]{article}
+\usepackage{amsmath}
+\usepackage{hyperref}
+
+\title{Untitled}
+\author{Your Name}
+\date{\today}
+
+\begin{document}
+\maketitle
+
+\section{Introduction}\label{sec:intro}
+This is a LaTeX document. Write \textbf{bold}, \emph{italic}, \texttt{code} and
+\href{https://www.overleaf.com/learn}{links}.
+
+\begin{itemize}
+  \item A bullet list
+  \item with two items
+\end{itemize}
+
+\begin{enumerate}
+  \item A numbered list
+  \item with two items
+\end{enumerate}
+
+\subsection{Math}
+Inline math sits in dollar signs, like $a^2 + b^2 = c^2$. A numbered equation:
+\begin{equation}\label{eq:sum}
+  \sum_{k=1}^{n} k = \frac{n(n + 1)}{2}
+\end{equation}
+
+\subsection{Tables}
+\begin{table}[h]
+  \centering
+  \begin{tabular}{lr}
+    Item & Value \\
+    \hline
+    Alpha & 1 \\
+    Beta & 2 \\
+  \end{tabular}
+  \caption{A small table.}\label{tab:items}
+\end{table}
+
+Table~\ref{tab:items} and Equation~\ref{eq:sum} are numbered for you.
+Section~\ref{sec:intro} is the start.
+\end{document}

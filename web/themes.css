@@ -1,0 +1,442 @@
+/* Quire's own themes. VS Code Dark Modern (the :root default) and Light Modern live in style.css.
+   A theme sets the tokens, then restyles the same layout; it never changes what is on screen.
+   Editor metrics stay fixed (15px/1.7): the coloured layer and the text field must line up. */
+
+/* ---------- Quire Series: the project is a book in a series ----------
+   White stock, black ink, and one series colour per kind of document that fills the
+   title band and the status band. Secondary text is tinted from the series colour, never grey. */
+
+:root[data-theme="quire-series"] {
+  color-scheme: light;
+  --series: #23439b;
+  --series-deep: color-mix(in oklab, var(--series) 78%, black);
+  --series-tint: color-mix(in oklab, var(--series) 13%, white);
+  --series-wash: color-mix(in oklab, var(--series) 5%, white);
+  --chrome: #ffffff;
+  --editor: #ffffff;
+  --widget: #ffffff;
+  --border: #141414;
+  --widget-border: #141414;
+  --fg: #141414;
+  --fg-strong: #000000;
+  --muted: color-mix(in oklab, var(--series) 62%, #141414);
+  --icon-inactive: color-mix(in oklab, var(--series) 60%, #8a8a8a);
+  --focus: var(--series);
+  --btn: var(--series);
+  --btn-hover: var(--series-deep);
+  --btn-fg: #ffffff;
+  --btn2: var(--series-tint);
+  --btn2-hover: color-mix(in oklab, var(--series) 22%, white);
+  --input: #ffffff;
+  --input-border: #141414;
+  --placeholder: color-mix(in oklab, var(--series) 55%, #6a6a6a);
+  --hover: var(--series-wash);
+  --hover-strong: var(--series-tint);
+  --active: var(--series);
+  --selection: color-mix(in oklab, var(--series) 24%, white);
+  --caret: var(--series);
+  --line-number: color-mix(in oklab, var(--series) 42%, white);
+  --line-number-active: var(--series);
+  --modified: #b04a12;
+  --warn: #8a5a00;
+  --ok: #2d6a3e;
+  --danger: #b3261e;
+  --diff-ins-text: color-mix(in oklab, var(--series) 16%, white);
+  --diff-del-text: #f6dcd8;
+  --kbd: var(--series-wash);
+  --kbd-border: color-mix(in oklab, var(--series) 30%, white);
+  --shadow: 0 6px 20px rgb(20 30 70 / 0.16);
+  --scroll: color-mix(in srgb, var(--series) 35%, transparent);
+  --scroll-hover: color-mix(in srgb, var(--series) 60%, transparent);
+  --preview-bg: var(--series-wash);
+  --syn-keyword: #a62b63;
+  --syn-function: #8a4b12;
+  --syn-string: #2d6a3e;
+  --syn-comment: #66708f;
+  --syn-math: #2d6a3e;
+  --syn-heading: var(--series);
+  --syn-label: var(--series);
+  --syn-raw: #7a3d8f;
+  --ft-typ: var(--series);
+  --ft-bib: #9a6c0c;
+  --ft-data: #2d6a3e;
+  --ui: "Gill Sans", "Gill Sans MT", Seravek, Calibri, sans-serif;
+  --manuscript: Charter, "Bitstream Charter", "Iowan Old Style", Georgia, serif;
+}
+/* The series colour follows the open file. */
+:root[data-theme="quire-series"][data-lang="latex"] { --series: #2d6a3e; }
+:root[data-theme="quire-series"][data-lang="quarto"] { --series: #a62b63; }
+:root[data-theme="quire-series"][data-lang="markdown"] { --series: #b5461a; }
+:root[data-theme="quire-series"][data-lang="text"] { --series: #3d4a5c; }
+
+[data-theme="quire-series"] body { font-size: 14px; }
+[data-theme="quire-series"] #app { grid-template-rows: 44px minmax(0, 1fr) 26px; }
+[data-theme="quire-series"] #titlebar { background: var(--series); border: 0; color: #fff; }
+[data-theme="quire-series"] .app-name { color: #fff; font-weight: 600; font-size: 12px; letter-spacing: 0.16em; text-transform: uppercase; opacity: 0.85; }
+[data-theme="quire-series"] .window-title { order: -1; flex: none; text-align: left; color: #fff; font-size: 19px; font-weight: 600; letter-spacing: -0.01em; }
+[data-theme="quire-series"] .title-actions { margin-left: auto; }
+[data-theme="quire-series"] #titlebar .icon-btn { color: #fff; }
+[data-theme="quire-series"] #titlebar .icon-btn[aria-pressed="false"] { color: rgb(255 255 255 / 0.6); }
+[data-theme="quire-series"] #titlebar .icon-btn:hover { background: var(--series-deep); }
+[data-theme="quire-series"] .pane-title,
+[data-theme="quire-series"] .section-head { color: var(--series); font-weight: 600; letter-spacing: 0.14em; }
+[data-theme="quire-series"] .row { height: 24px; }
+[data-theme="quire-series"] .row.active, [data-theme="quire-series"] .row.active :is(.name, .codicon[class]) { color: #fff; }
+[data-theme="quire-series"] .row.active { font-weight: 600; }
+[data-theme="quire-series"] .tabs { background: #fff; }
+[data-theme="quire-series"] .tab { border-right: 0; }
+[data-theme="quire-series"] .tab.active::before { height: 3px; background: var(--series); }
+[data-theme="quire-series"] .format-bar,
+[data-theme="quire-series"] .format-bar .sep { border-color: var(--series-tint); background-color: #fff; }
+[data-theme="quire-series"] .format-bar .sep { background: var(--series-tint); }
+[data-theme="quire-series"] .breadcrumbs .crumb:last-child { color: var(--series); font-weight: 600; }
+[data-theme="quire-series"] :is(.btn, #composer, .msg.user, .chip, .send, #review-bar, #inline-box, .ctx-menu, .ctx-menu button, .menu, .toast, .ask, .permission, kbd) { border-radius: 0; }
+[data-theme="quire-series"] .btn { font-weight: 600; }
+[data-theme="quire-series"] .msg.user { background: var(--series-wash); border-color: var(--series-tint); }
+[data-theme="quire-series"] #composer { border-width: 1.5px; }
+[data-theme="quire-series"] .chip { border: 0; background: var(--series-tint); color: var(--series-deep); }
+[data-theme="quire-series"] #review-bar { border: 1.5px solid var(--series); }
+[data-theme="quire-series"] #statusbar { background: var(--series); border: 0; }
+[data-theme="quire-series"] #statusbar .item { color: #fff; font-size: 13px; }
+[data-theme="quire-series"] #statusbar button.item:hover { background: var(--series-deep); }
+[data-theme="quire-series"] #sb-review { font-weight: 600; }
+[data-theme="quire-series"] .front::selection { background: color-mix(in srgb, var(--series) 26%, transparent); }
+@media (max-width: 900px) {
+  [data-theme="quire-series"] :is(#chat, #preview-group) { top: 44px; bottom: 26px; }
+}
+@media (max-width: 640px) {
+  [data-theme="quire-series"] #sidebar { top: 44px; bottom: 26px; }
+  [data-theme="quire-series"] .window-title { font-size: 15px; }
+}
+
+/* ---------- Quire Galley: the manuscript is a printer's proof ----------
+   A white galley strip on a cool desk, line numbers and guides in non-photo blue, and every
+   agent change marked in red ink, the proofreader's colour. Autocomplete writes in green. */
+
+:root[data-theme="quire-galley"] {
+  color-scheme: light;
+  --desk: #e4e9ee;
+  --desk-2: #d8dfe6;
+  --npblue: #9fd3e6;
+  --npblue-ink: #2f7591;
+  --proof-red: #c8281e;
+  --chrome: #ffffff;
+  --editor: #ffffff;
+  --widget: #ffffff;
+  --border: #c3ccd6;
+  --widget-border: #16181d;
+  --fg: #16181d;
+  --fg-strong: #000000;
+  --muted: #4a5566;
+  --icon-inactive: #5d6878;
+  --focus: var(--npblue-ink);
+  --btn: #16181d;
+  --btn-hover: #30343d;
+  --btn-fg: #ffffff;
+  --btn2: #ffffff;
+  --btn2-hover: #eef1f4;
+  --input: #ffffff;
+  --input-border: #16181d;
+  --placeholder: #5f6a7a;
+  --hover: #edf1f4;
+  --hover-strong: rgb(22 24 29 / 0.07);
+  --active: #ffffff;
+  --selection: #c4e6f2;
+  --caret: #16181d;
+  --line-number: var(--npblue-ink);
+  --line-number-active: #16181d;
+  --modified: var(--proof-red);
+  --warn: #8a5a00;
+  --ok: #2a7a3c;
+  --danger: var(--proof-red);
+  --diff-ins-text: #fbe9e7;
+  --diff-del-text: transparent;
+  --kbd: #f3f5f7;
+  --kbd-border: #c3ccd6;
+  --shadow: 0 1px 1px rgb(30 45 60 / 0.12), 0 12px 30px -10px rgb(30 45 60 / 0.3);
+  --scroll: rgb(47 117 145 / 0.35);
+  --scroll-hover: rgb(47 117 145 / 0.6);
+  --preview-bg: var(--desk);
+  --syn-keyword: #8a4b12;
+  --syn-function: #8a4b12;
+  --syn-string: #2a7a3c;
+  --syn-comment: #6f7c8f;
+  --syn-math: #5a3fa0;
+  --syn-heading: #16181d;
+  --syn-label: var(--npblue-ink);
+  --syn-raw: #6b4a2a;
+  --ft-typ: var(--npblue-ink);
+  --ft-bib: #8a5a00;
+  --ft-data: #2a7a3c;
+  --ui: "Helvetica Neue", Helvetica, Arial, sans-serif;
+  --manuscript: "Iowan Old Style", Palatino, "Book Antiqua", Georgia, serif;
+}
+[data-theme="quire-galley"] .app-name { font-weight: 800; font-size: 16px; letter-spacing: -0.01em; }
+[data-theme="quire-galley"] :is(.pane-title, .section-head) { color: var(--npblue-ink); font-size: 10.5px; font-weight: 600; letter-spacing: 0.14em; }
+[data-theme="quire-galley"] :is(#activitybar, #sidebar, #editor-group, #preview-group, .tabs, .format-bar, .welcome) { background: var(--desk); }
+[data-theme="quire-galley"] #activitybar { background: var(--desk-2); border-color: var(--border); }
+[data-theme="quire-galley"] .row.active { box-shadow: inset 0 1px var(--border), inset 0 -1px var(--border); font-weight: 600; }
+[data-theme="quire-galley"] .tab { border-right-color: transparent; }
+[data-theme="quire-galley"] .tab.active { background: #fff; box-shadow: 1px 0 var(--border), -1px 0 var(--border); }
+[data-theme="quire-galley"] .tab.active::before { background: var(--fg); }
+/* The galley strip: a white sheet behind the text column, line numbers left on the desk. */
+[data-theme="quire-galley"] #editor::before {
+  content: "";
+  position: absolute;
+  top: 10px;
+  bottom: 0;
+  left: calc(var(--gutter) - 18px);
+  width: min(calc(100% - var(--gutter) + 12px), calc(78ch + 46px));
+  font: 15px var(--manuscript);
+  background: #fff;
+  box-shadow: var(--shadow);
+}
+[data-theme="quire-galley"] .review {
+  background: var(--desk) linear-gradient(#fff, #fff) no-repeat calc(var(--gutter) - 18px) 10px / min(calc(100% - var(--gutter) + 12px), calc(78ch + 46px)) 100%;
+}
+[data-theme="quire-galley"] .ln.added::after, [data-theme="quire-galley"] .ln.modified::after { background: var(--proof-red); width: 2px; }
+[data-theme="quire-galley"] .review ins { background: none; color: var(--proof-red); text-decoration: underline 1.5px; text-underline-offset: 3px; }
+[data-theme="quire-galley"] .review del { text-decoration-color: var(--proof-red); text-decoration-thickness: 1.5px; }
+[data-theme="quire-galley"] .review .chunk.focused::before { background: var(--proof-red); }
+[data-theme="quire-galley"] .ghost-text { color: var(--ok); }
+[data-theme="quire-galley"] :is(.btn, #composer, .msg.user, .chip, #review-bar, #inline-box, .ctx-menu, .ctx-menu button, .menu, .toast, .ask, .permission) { border-radius: 0; }
+[data-theme="quire-galley"] .btn.secondary { border-color: var(--fg); }
+[data-theme="quire-galley"] .msg.user { background: none; border: 0; border-top: 1px solid var(--border); padding: 8px 0 0; }
+[data-theme="quire-galley"] .msg.agent { font: 14.5px/1.55 var(--manuscript); }
+[data-theme="quire-galley"] .permission { border: 1.5px solid var(--proof-red); }
+[data-theme="quire-galley"] .permission .title { color: var(--proof-red); }
+[data-theme="quire-galley"] .send { border-radius: 0; }
+[data-theme="quire-galley"] #review-bar { border-color: var(--fg); }
+[data-theme="quire-galley"] #sb-review, [data-theme="quire-galley"] .labels-head em { color: var(--proof-red); }
+[data-theme="quire-galley"] .front::selection { background: rgb(159 211 230 / 0.6); }
+
+/* ---------- Quire Coupon: every agent change is a coupon in a wallet ----------
+   Carrier navy around white coupon stock, carbon purple for every filled figure and for
+   accepting, red for what is open or voided. Labels in condensed airline capitals. */
+
+:root[data-theme="quire-coupon"] {
+  color-scheme: light;
+  --navy: #13264d;
+  --navy-2: #1c3466;
+  --navy-3: #2c4682;
+  --carbon: #4a3c96;
+  --coupon-red: #cf2630;
+  --caps: "Avenir Next Condensed", "DIN Condensed", "Arial Narrow", sans-serif;
+  --carbon-face: "Courier New", Courier, monospace;
+  --chrome: #fbfbf9;
+  --editor: #ffffff;
+  --widget: #fbfbf9;
+  --border: #c2c8d6;
+  --widget-border: var(--navy);
+  --fg: #12182a;
+  --fg-strong: #000000;
+  --muted: #48546e;
+  --icon-inactive: #9fb0d6;
+  --focus: var(--carbon);
+  --btn: var(--carbon);
+  --btn-hover: #3c3080;
+  --btn-fg: #ffffff;
+  --btn2: #eceef3;
+  --btn2-hover: #dfe3ec;
+  --input: #ffffff;
+  --input-border: #c2c8d6;
+  --placeholder: #5f6a84;
+  --hover: #eef0f5;
+  --hover-strong: rgb(19 38 77 / 0.08);
+  --active: #ffffff;
+  --selection: #dcd7f3;
+  --caret: var(--coupon-red);
+  --line-number: #858fa8;
+  --line-number-active: var(--coupon-red);
+  --modified: var(--coupon-red);
+  --warn: #8a5a00;
+  --ok: var(--carbon);
+  --danger: var(--coupon-red);
+  --diff-ins-text: #e6e2f7;
+  --diff-del-text: #f9dfe0;
+  --kbd: #eef0f5;
+  --kbd-border: #c2c8d6;
+  --shadow: 0 2px 0 rgb(19 38 77 / 0.18), 0 10px 24px -8px rgb(19 38 77 / 0.35);
+  --scroll: rgb(19 38 77 / 0.3);
+  --scroll-hover: rgb(19 38 77 / 0.5);
+  --preview-bg: #e8ebf2;
+  --syn-keyword: #9a4a18;
+  --syn-function: #9a4a18;
+  --syn-string: #2d6a3e;
+  --syn-comment: #737d95;
+  --syn-math: var(--carbon);
+  --syn-heading: var(--navy);
+  --syn-label: var(--navy-3);
+  --syn-raw: #6b3c8a;
+  --ft-typ: var(--navy-3);
+  --ft-bib: #9a4a18;
+  --ft-data: #2d6a3e;
+  --ui: "Avenir Next", Avenir, "Helvetica Neue", sans-serif;
+}
+[data-theme="quire-coupon"] :is(#titlebar, #activitybar) { background: var(--navy); border-color: var(--navy); }
+[data-theme="quire-coupon"] .app-name { color: #fff; font: 600 17px var(--caps); letter-spacing: 0.16em; text-transform: uppercase; }
+[data-theme="quire-coupon"] .window-title { color: #b9c6e4; font-family: var(--caps); letter-spacing: 0.08em; text-transform: uppercase; }
+[data-theme="quire-coupon"] #titlebar .icon-btn { color: #fff; }
+[data-theme="quire-coupon"] :is(#titlebar, #activitybar) :is(.icon-btn, .activity):hover { background: var(--navy-2); color: #fff; }
+[data-theme="quire-coupon"] .activity.active { color: #fff; }
+[data-theme="quire-coupon"] .activity.active::before { width: 3px; background: var(--coupon-red); }
+[data-theme="quire-coupon"] :is(.pane-title, .section-head) { font: 600 12px var(--caps); letter-spacing: 0.18em; text-transform: uppercase; }
+[data-theme="quire-coupon"] .row.active { box-shadow: inset 0 1px var(--border), inset 0 -1px var(--border); font-weight: 600; }
+[data-theme="quire-coupon"] .row.label .name, [data-theme="quire-coupon"] #sb-pos, [data-theme="quire-coupon"] #sb-words { font-family: var(--carbon-face); }
+[data-theme="quire-coupon"] .row.label .name { color: var(--carbon); }
+[data-theme="quire-coupon"] .ln::before { font-family: var(--carbon-face); }
+[data-theme="quire-coupon"] .tabs { background: var(--chrome); }
+[data-theme="quire-coupon"] .tab.active::before { height: 3px; background: var(--coupon-red); }
+[data-theme="quire-coupon"] .review ins { background: none; color: var(--carbon); font-weight: 700; text-decoration: underline 2px; text-underline-offset: 3px; }
+[data-theme="quire-coupon"] .review del { background: none; color: var(--muted); text-decoration-color: var(--coupon-red); text-decoration-thickness: 2px; }
+/* The chat is the wallet: navy, with stock-white coupons in it. */
+[data-theme="quire-coupon"] #chat {
+  --fg: #e8ecf6;
+  --fg-strong: #ffffff;
+  --muted: #a9b6d6;
+  --hover-strong: rgb(255 255 255 / 0.1);
+  --kbd: rgb(255 255 255 / 0.1);
+  background: var(--navy);
+  border-color: var(--navy);
+  color: var(--fg);
+}
+[data-theme="quire-coupon"] #chat .pane-title { color: #b9c6e4; }
+[data-theme="quire-coupon"] .msg.user { background: var(--navy-2); border: 0; border-radius: 0; color: #fff; }
+[data-theme="quire-coupon"] .msg.agent pre { background: var(--navy-2); border-color: var(--navy-3); }
+[data-theme="quire-coupon"] .tool,
+[data-theme="quire-coupon"] .permission {
+  --fg: #12182a;
+  --muted: #48546e;
+  position: relative;
+  padding: 5px 10px 5px 20px;
+  border: 0;
+  border-radius: 0;
+  background: #fbfbf9 radial-gradient(circle, var(--navy) 1.5px, transparent 2px) 6px 0 / 6px 6px repeat-y;
+  color: var(--fg);
+  box-shadow: 0 2px 0 rgb(0 0 0 / 0.2);
+}
+[data-theme="quire-coupon"] .tool .state.completed { color: var(--carbon); }
+[data-theme="quire-coupon"] .permission { padding: 10px 12px 10px 22px; outline: 2px solid var(--coupon-red); outline-offset: -5px; }
+[data-theme="quire-coupon"] #composer { --fg: #12182a; --muted: #48546e; --hover-strong: rgb(19 38 77 / 0.08); color: var(--fg); background: #fbfbf9; border: 0; border-radius: 0; }
+[data-theme="quire-coupon"] .chip { border-radius: 0; font-family: var(--caps); letter-spacing: 0.08em; }
+[data-theme="quire-coupon"] .send { border-radius: 0; background: var(--coupon-red); }
+[data-theme="quire-coupon"] .send:disabled { background: var(--btn2); }
+[data-theme="quire-coupon"] #review-bar {
+  border: 0;
+  border-radius: 0;
+  padding-left: 20px;
+  background: #fbfbf9 radial-gradient(circle, var(--navy) 1.5px, transparent 2px) 7px 0 / 6px 6px repeat-y;
+}
+[data-theme="quire-coupon"] #review-bar .btn { font-family: var(--caps); letter-spacing: 0.1em; text-transform: uppercase; }
+[data-theme="quire-coupon"] #reject-all { color: var(--coupon-red); }
+[data-theme="quire-coupon"] :is(.btn, #inline-box, .ctx-menu, .ctx-menu button, .menu, .toast, .ask) { border-radius: 2px; }
+[data-theme="quire-coupon"] #statusbar { background: var(--navy); border-color: var(--navy); }
+[data-theme="quire-coupon"] #statusbar .item { color: #e8ecf6; font-family: var(--caps); font-size: 13px; letter-spacing: 0.06em; }
+[data-theme="quire-coupon"] #statusbar button.item:hover { background: var(--navy-2); }
+[data-theme="quire-coupon"] #sb-review { color: #ff9ba1; }
+[data-theme="quire-coupon"] .front::selection { background: rgb(74 60 150 / 0.22); }
+
+/* ---------- Quire Slate: a lecture hall of sliding blackboards ----------
+   Chalk-white text on slate, the agent in yellow chalk, rejected text in pink. Panels sit in
+   aluminium frames, the preview is the projection screen, the status bar is the chalk tray. */
+
+:root[data-theme="quire-slate"] {
+  color-scheme: dark;
+  --chrome: #141c18;
+  --editor: #1d2a25;
+  --widget: #18221e;
+  --border: #0c110f;
+  --widget-border: #3a4a43;
+  --fg: #e6e4dc;
+  --fg-strong: #f6f4ec;
+  --muted: #a9b3ac;
+  --icon-inactive: #87948d;
+  --focus: #ecd277;
+  --btn: #ecd277;
+  --btn-hover: #f4de92;
+  --btn-fg: #1d2a25;
+  --btn2: #2c3b35;
+  --btn2-hover: #36473f;
+  --input: rgb(14 20 17 / 0.72);
+  --input-border: #3a4a43;
+  --placeholder: #8e9a93;
+  --hover: rgb(236 234 226 / 0.06);
+  --hover-strong: rgb(236 234 226 / 0.1);
+  --active: rgb(236 234 226 / 0.1);
+  --selection: rgb(236 210 119 / 0.3);
+  --caret: #f6f4ec;
+  --line-number: #7d8b84;
+  --line-number-active: #e6e4dc;
+  --modified: #ecd277;
+  --warn: #ecd277;
+  --ok: #a9d89c;
+  --danger: #ee9a95;
+  --diff-ins-text: rgb(236 210 119 / 0.2);
+  --diff-del-text: rgb(238 154 149 / 0.2);
+  --kbd: rgb(236 234 226 / 0.08);
+  --kbd-border: rgb(236 234 226 / 0.2);
+  --shadow: 0 8px 22px rgb(0 0 0 / 0.55);
+  --scroll: rgb(236 234 226 / 0.2);
+  --scroll-hover: rgb(236 234 226 / 0.35);
+  --preview-bg: #2a3530;
+  --syn-keyword: #ee9a95;
+  --syn-function: #e9b98a;
+  --syn-string: #b9e3b0;
+  --syn-comment: #8e9a93;
+  --syn-math: #b9e3b0;
+  --syn-heading: #f6f4ec;
+  --syn-label: #96c8e8;
+  --syn-raw: #d8c3ef;
+  --ft-typ: #96c8e8;
+  --ft-bib: #e9b98a;
+  --ft-data: #b9e3b0;
+  --ui: "Avenir Next", Avenir, system-ui, sans-serif;
+  --manuscript: "Avenir Next", Avenir, system-ui, sans-serif;
+}
+[data-theme="quire-slate"] #app { background: #101613; }
+/* One slate for every board, fixed to the window so panels and overlays share the grain. */
+[data-theme="quire-slate"] :is(#sidebar, #editor-group, #chat, .review, .welcome, .ghost-line) {
+  background: #1d2a25 url("./slate.webp") 0 0 / 1024px fixed;
+}
+[data-theme="quire-slate"] :is(#sidebar, #editor-group, #chat) {
+  border: 0;
+  box-shadow: inset 0 0 0 1px #4d5552, inset 0 0 0 4px #a3aaae, inset 0 0 0 5px #2a302d, inset 0 0 36px 4px rgb(0 0 0 / 0.45);
+}
+[data-theme="quire-slate"] :is(.tabs, .format-bar) { background: transparent; border-color: rgb(236 234 226 / 0.08); }
+[data-theme="quire-slate"] .tabs { margin: 4px 4px 0; }
+[data-theme="quire-slate"] .tab { border-right-color: rgb(236 234 226 / 0.08); }
+[data-theme="quire-slate"] .tab.active { background: rgb(236 234 226 / 0.06); }
+[data-theme="quire-slate"] .tab.active::before { background: #ecd277; }
+[data-theme="quire-slate"] :is(.pane-title, .section-head) { font-family: Futura, var(--ui); letter-spacing: 0.14em; color: var(--muted); }
+[data-theme="quire-slate"] .pane-title { margin: 4px 4px 0; }
+[data-theme="quire-slate"] #tree, [data-theme="quire-slate"] #labels { margin: 0 4px; }
+[data-theme="quire-slate"] .behind { text-shadow: 0 0 1px rgb(236 234 226 / 0.35); }
+[data-theme="quire-slate"] .review ins { background: none; color: #ecd277; text-decoration: underline 2px rgb(236 210 119 / 0.55); text-underline-offset: 3px; }
+[data-theme="quire-slate"] .review del { background: none; color: #ee9a95; text-decoration-color: rgb(238 154 149 / 0.9); text-decoration-thickness: 2px; }
+[data-theme="quire-slate"] .ghost-text { color: #8e9a93; }
+[data-theme="quire-slate"] .msg.agent { color: #eedc95; }
+[data-theme="quire-slate"] .msg.agent strong { color: #f6e7ac; }
+[data-theme="quire-slate"] #messages { margin: 0 4px; }
+[data-theme="quire-slate"] #composer { margin: 0 14px 14px; }
+/* The preview is a projection screen hanging from its roller. */
+[data-theme="quire-slate"] #preview-group { background: #101613; border: 0; padding: 0 10px; }
+[data-theme="quire-slate"] #preview-group .tabs {
+  margin: 6px -6px 0;
+  border: 0;
+  border-radius: 7px;
+  background: linear-gradient(#e6e8ea, #a3a9ae);
+  box-shadow: 0 3px 6px rgb(0 0 0 / 0.5);
+  position: relative;
+  z-index: 1;
+}
+[data-theme="quire-slate"] #preview-group .tab.active { background: none; color: #141c18; }
+[data-theme="quire-slate"] #preview-group .tab.active::before { display: none; }
+[data-theme="quire-slate"] #preview-group .icon-btn { color: #141c18; }
+[data-theme="quire-slate"] #preview { margin-top: -4px; border-bottom: 12px solid #3a4044; box-shadow: 0 10px 22px rgb(0 0 0 / 0.55); }
+/* The status bar is the chalk tray. */
+[data-theme="quire-slate"] #statusbar { background: linear-gradient(#aab0b4, #727a7e); border-top: 1px solid #c9cdd0; box-shadow: 0 -2px 6px rgb(0 0 0 / 0.5); }
+[data-theme="quire-slate"] #statusbar .item { color: #101614; font-weight: 500; }
+[data-theme="quire-slate"] #statusbar button.item:hover { background: rgb(0 0 0 / 0.1); }
+[data-theme="quire-slate"] #sb-review { color: #101614; }
+[data-theme="quire-slate"] #sb-review::before { content: ""; width: 22px; height: 6px; margin-right: 2px; border-radius: 3px; background: #ecd277; box-shadow: inset 0 -2px rgb(0 0 0 / 0.18); }
+[data-theme="quire-slate"] .front::selection { background: rgb(236 210 119 / 0.3); }
