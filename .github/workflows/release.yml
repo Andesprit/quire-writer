@@ -99,3 +99,15 @@ jobs:
             Installed copies update themselves once this release is published.
           releaseDraft: true
           args: --config '{"bundle":{"createUpdaterArtifacts":true}}'
+
+      - name: Notarize the disk image
+        if: env.APPLE_ID != ''
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+        run: |
+          # Tauri notarizes the app inside; the .dmg needs its own ticket, or macOS warns when it is opened.
+          dmg=$(ls src-tauri/target/release/bundle/dmg/*.dmg)
+          xcrun notarytool submit "$dmg" --apple-id "$APPLE_ID" --password "$APPLE_PASSWORD" --team-id "$APPLE_TEAM_ID" --wait
+          xcrun stapler staple "$dmg"
+          gh release upload "$GITHUB_REF_NAME" "$dmg" --clobber
