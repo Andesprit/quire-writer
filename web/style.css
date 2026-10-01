@@ -700,6 +700,21 @@ details.thought div { white-space: pre-wrap; margin-top: 4px; padding-left: 18px
 .permission .answered { color: var(--muted); font-size: 12px; }
 .chat-error { display: flex; gap: 6px; color: var(--danger); overflow-wrap: anywhere; white-space: pre-wrap; }
 .chat-note { color: var(--muted); font-size: 12px; }
+#agent-note {
+  display: flex;
+  gap: 8px;
+  margin: 0 10px 8px;
+  padding: 8px 10px;
+  border-radius: 8px;
+  background: var(--widget);
+  line-height: 1.45;
+  overflow-wrap: anywhere;
+}
+#agent-note > .codicon { margin-top: 2px; }
+#agent-note > div { flex: 1; min-width: 0; }
+#agent-note p { margin: 4px 0 0; color: var(--muted); font-size: 12px; }
+#agent-note.failed > .codicon { color: var(--danger); }
+#agent-note .actions { display: flex; flex-wrap: wrap; gap: 6px; margin-top: 8px; }
 
 #composer {
   margin: 0 10px 10px;

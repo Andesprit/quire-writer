@@ -42,7 +42,7 @@
   <div class="issues">
     <article class="issue" id="check-setup">
       <h2>Start with Check Setup</h2>
-      <p>In Quire, choose <b>Check Setup…</b> in the Quire menu. It shows whether your agent runs, what the agent needs to start, and the tool each preview and export uses. When something is missing, it shows the command that installs it. It also opens by itself when your agent cannot start. On Linux there is no menu bar, so it opens only then.</p>
+      <p>In Quire, choose <b>Check Setup…</b> in the Quire menu. It shows whether your agent runs, what the agent needs to start, and the tool each preview and export uses. When something is missing, it shows the command that installs it. When your agent cannot start, the chat says why and offers <b>Try Again</b> and <b>Check Setup</b>. On Linux there is no menu bar, so open Check Setup from there.</p>
       <p>The full log is in <code>~/Library/Logs/com.andesprit.quire/agent.log</code> on a Mac. On Linux, Check Setup shows where it is.</p>
       <p>The commands on this page use <a href="https://brew.sh">Homebrew</a>. On Linux, use Homebrew or your system's package manager.</p>
     </article>
@@ -78,18 +78,18 @@
     <article class="issue" id="broken-download">
       <h2>npm says ENOENT for a file in _npx</h2>
       <p class="said">You see: <code>npm error enoent Could not read package.json</code> with a path that has <code>/_npx/</code> in it.</p>
-      <p>The first start of an agent downloads it. If that download stopped half way, for example because Quire was closed during it, npm keeps a broken copy. Remove the agents npm downloaded. The next start downloads the agent again.</p>
+      <p>The first start of an agent downloads it. If that download stopped half way, for example because Quire was closed during it, npm keeps a broken copy. Quire versions after 0.2.2 remove that copy and download the agent again by themselves, and the chat says so. They also stop npm when Quire closes, so the copy is not left locked. On Quire 0.2.2 or older, remove the agents npm downloaded. The next start downloads the agent again.</p>
       <pre>rm -rf ~/.npm/_npx</pre>
     </article>
 
     <article class="issue" id="login">
       <h2>The agent says you are not logged in</h2>
-      <p>The agent runs with your own login, the same one it uses in a terminal. Open Terminal, start the agent's own program and log in there. For example: <code>claude</code> for Claude Code, <code>codex login</code> for Codex, or <code>gemini</code> for Gemini CLI. Then choose <b>Try Again</b> in Check Setup.</p>
+      <p>The agent runs with your own login, the same one it uses in a terminal. Open Terminal, start the agent's own program and log in there. For example: <code>claude</code> for Claude Code, <code>codex login</code> for Codex, or <code>gemini</code> for Gemini CLI. Then choose <b>Try Again</b> in the chat or in Check Setup.</p>
     </article>
 
     <article class="issue" id="stopped">
       <h2>"… stopped right after it started"</h2>
-      <p>The agent quit in its first 30 seconds. Check Setup shows the last lines it printed, and the log has the rest. The messages above cover the usual reasons. If yours is not here, <a href="https://github.com/Andesprit/quire-writer/issues">open an issue on GitHub</a> with those lines.</p>
+      <p>The agent quit in its first 30 seconds. The chat and Check Setup show the last lines it printed, and the log has the rest. The messages above cover the usual reasons. If yours is not here, <a href="https://github.com/Andesprit/quire-writer/issues">open an issue on GitHub</a> with those lines.</p>
     </article>
 
     <article class="issue" id="tools">

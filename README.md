@@ -62,7 +62,7 @@ open it and drag Quire to Applications. Needs a Mac with Apple Silicon.
 The agents run with your own tools and login: Node.js (22 or newer for Claude;
 `brew install node`), and the agent's own sign-in (Claude Code, Codex). Quire > Check
 Setup lists what the agent and each preview need, with the command that installs what is
-missing; it opens by itself when an agent cannot start, with what the agent printed. The
+missing. When an agent cannot start, the chat says why, with what the agent printed. The
 whole log is in `~/Library/Logs/com.andesprit.quire/agent.log`. Known problems and their
 fixes: [Troubleshooting](https://andesprit.com/quire-writer/troubleshooting.html).
 

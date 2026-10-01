@@ -1096,6 +1096,35 @@ function renderAgentStatus(text?: string) {
   $("sb-agent").title = root && agentState === "none" ? "Start the agent" : "Open chat"
   setAgentReady(agentState === "ready" || agentState === "working")
   if ($<HTMLDialogElement>("setup").open) renderSetup()
+  renderAgentNote(name, label)
+}
+
+// Above the composer, the chat says what the agent does until it can take a message: it is
+// starting, or why it could not start, with a way out.
+let agentNote = ""
+let slowStart: ReturnType<typeof setTimeout> | undefined
+function renderAgentNote(name: string, label: string) {
+  const failed = agentState === "none" && !!agentError
+  const key = agentState === "starting" ? `starting:${label}` : failed ? `failed:${agentError}` : ""
+  if (key === agentNote) return
+  agentNote = key
+  clearTimeout(slowStart)
+  const note = $("agent-note")
+  note.hidden = !key
+  note.className = failed ? "failed" : ""
+  if (agentState === "starting") {
+    note.innerHTML = `${icon("loading", "codicon-modifier-spin")}<div><span>${esc(label)}</span></div>`
+    const hint = `<p>The first start downloads ${esc(name)}. This can take a minute or two.</p>`
+    slowStart = setTimeout(() => note.lastElementChild!.insertAdjacentHTML("beforeend", hint), 5000)
+  } else if (failed) {
+    note.innerHTML = `${icon("error")}<div><b>${esc(name)} could not start.</b><pre class="setup-said">${esc(agentError)}</pre><div class="actions"><button type="button" class="btn primary sm" data-start>Try Again</button><button type="button" class="btn secondary sm" data-setup>Check Setup</button></div></div>`
+    setPanel("chat", true)
+  }
+}
+$("agent-note").onclick = (e) => {
+  const b = (e.target as HTMLElement).closest("button")
+  if (b?.hasAttribute("data-start")) send({ type: "set_agent", id: agentId })
+  else if (b?.hasAttribute("data-setup")) send({ type: "check_setup" })
 }
 
 // ---------- Check Setup: what the agent, the previews and the exports need ----------
@@ -1709,7 +1738,6 @@ function onMessage(msg: any) {
       agentError = msg.error ?? ""
       renderAgentStatus(msg.error && "Agent failed to start")
       if (msg.ready && acToggle.checked) send({ type: "warm", kind: "complete" })
-      if (msg.error) send({ type: "check_setup" }) // show why, next to what the agent needs
       break
     case "setup": {
       setupRows = msg.rows
@@ -1773,10 +1801,12 @@ function onMessage(msg: any) {
         acBusy = false
         renderAcStatus()
       } else {
-        if (running) add("chat-error", `${icon("error")}<span>${esc(msg.message)}</span>`)
+        // The agent's own errors (no op) go to the chat too, as when it stopped and starts again.
+        if (running || !msg.op) add("chat-error", `${icon("error")}<span>${esc(msg.message)}</span>`)
         toast(msg.message)
         if (agentState === "starting") {
           agentState = "none"
+          agentError = msg.message
           renderAgentStatus("Agent failed to start")
         }
       }

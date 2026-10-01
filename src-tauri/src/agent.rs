@@ -32,6 +32,8 @@ const LOW_EFFORT: [&str; 4] = ["minimal", "none", "off", "low"];
 // An agent that quits on its own is started again, unless it quit this soon after it started:
 // then it would most likely quit again, over and over.
 const RESTART_AFTER: Duration = Duration::from_secs(30);
+// A stopped agent gets this long to end on its own, then it is killed.
+const KILL_AFTER: Duration = Duration::from_secs(2);
 
 fn inline_prompt(path: &str, instruction: &str, selected: &str, before: &str, after: &str) -> String {
     format!(
@@ -110,6 +112,18 @@ fn ask_npm_afresh(argv: &[String], error: &str) -> Option<Vec<String>> {
         .then(|| argv.iter().filter(|a| *a != "--prefer-offline").cloned().collect())
 }
 
+/// npx downloads an agent into its own folder, `_npx/<hash>`, on first start. A download cut
+/// short (Quire quit during it) leaves that folder without package.json, and every later
+/// start fails with ENOENT for it. The folder to remove, so that the next start downloads
+/// the agent again.
+// ponytail: npm prints "***" for any part of a path that looks like a UUID, so such a path
+// is not found and the writer removes the folder by hand (Troubleshooting). Normal npm
+// caches (~/.npm) have none.
+fn broken_download(error: &str) -> Option<PathBuf> {
+    let path = regex::Regex::new(r"(/[^\n']*/_npx/[0-9a-f]{16})/").unwrap().captures(error)?;
+    error.contains("ENOENT").then(|| PathBuf::from(&path[1]))
+}
+
 pub fn registry() -> Vec<Agent> {
     // `atelier harness sync` (flow-atelier) writes a fresher copy here; use it when present.
     let user = std::env::var("HOME").map(|h| PathBuf::from(h).join(".atelier/acp_registry.json"));
@@ -153,7 +167,7 @@ struct Conn {
     group: i32, // its process group: npx starts the real agent as its own child
     started: Instant,
     said: Arc<Mutex<Vec<String>>>, // its last lines of error output: why it stopped
-    _child: Mutex<Child>,
+    child: Mutex<Child>,
 }
 
 impl Conn {
@@ -174,10 +188,32 @@ impl Conn {
         self.write(json!({"jsonrpc": "2.0", "method": method, "params": params})).await
     }
 
-    fn kill(&self) {
-        if self.group > 0 {
-            unsafe { libc::killpg(self.group, libc::SIGTERM) };
-        }
+    /// Ends its whole process group: SIGTERM, then SIGKILL for whatever still runs after
+    /// KILL_AFTER. npm, while it downloads an agent, finishes its current step before it obeys
+    /// SIGTERM, which can take minutes, and keeps the agent's npx folder locked until then.
+    /// The handle finishes once all of it has ended.
+    fn kill(self: &Arc<Self>) -> std::thread::JoinHandle<()> {
+        let conn = self.clone();
+        std::thread::spawn(move || {
+            let group = conn.group;
+            if group <= 0 {
+                return;
+            }
+            unsafe { libc::killpg(group, libc::SIGTERM) };
+            let until = Instant::now() + KILL_AFTER;
+            loop {
+                // Collect npx once it has ended: until then Linux counts it as running.
+                let _ = lock(&conn.child).try_wait();
+                if unsafe { libc::killpg(group, 0) } != 0 {
+                    return; // nothing in the group runs any more
+                }
+                if Instant::now() >= until {
+                    unsafe { libc::killpg(group, libc::SIGKILL) };
+                    return;
+                }
+                std::thread::sleep(Duration::from_millis(50));
+            }
+        })
     }
 }
 
@@ -357,6 +393,7 @@ impl Bridge {
         self.st().root = Some(root.into()); // set first: nothing may start a session in the previous folder
         self.st().error = None;
         let mut argv = spec.argv;
+        let mut cleaned = false;
         let conn = loop {
             let mut child = Command::new(&argv[0])
                 .args(&argv[1..])
@@ -379,11 +416,19 @@ impl Bridge {
                 group: child.id().unwrap_or(0) as i32,
                 started: Instant::now(),
                 said,
-                _child: Mutex::new(child),
+                child: Mutex::new(child),
             });
             tokio::spawn(read(conn.clone(), stdout, stderr));
             self.st().starting = Some(conn.clone()); // so a stop meanwhile stops it too
             let started = conn.request("initialize", json!({"protocolVersion": 1, "clientCapabilities": {}})).await;
+            // A download cut short: remove it and start once more. Removing takes a moment, and
+            // a stop meanwhile is seen below.
+            let broken = (!cleaned).then(|| started.as_ref().err().and_then(|e| broken_download(e))).flatten().filter(|d| d.is_dir());
+            if let Some(dir) = broken.clone() {
+                cleaned = true;
+                send(json!({"type": "status", "text": format!("Downloading {} again: its first download was cut short...", spec.name)}));
+                let _ = tokio::task::spawn_blocking(move || std::fs::remove_dir_all(dir)).await;
+            }
             let mut st = self.st();
             if !st.starting.as_ref().is_some_and(|c| Arc::ptr_eq(c, &conn)) {
                 return Ok(false);
@@ -391,7 +436,9 @@ impl Bridge {
             st.starting = None;
             if let Err(e) = started {
                 conn.kill();
-                argv = ask_npm_afresh(&argv, &e).ok_or(e)?;
+                if broken.is_none() {
+                    argv = ask_npm_afresh(&argv, &e).ok_or(e)?;
+                }
                 continue;
             }
             if st.agent_id.as_deref() != Some(agent_id) {
@@ -408,14 +455,14 @@ impl Bridge {
         }
     }
 
-    pub fn stop(&self) {
+    /// The handles finish once the agent's processes have ended.
+    pub fn stop(&self) -> Vec<std::thread::JoinHandle<()>> {
         self.resolve_permissions(None);
         let mut st = self.st();
-        for conn in [st.conn.take(), st.starting.take()].into_iter().flatten() {
-            conn.kill();
-        }
+        let ending = [st.conn.take(), st.starting.take()].into_iter().flatten().map(|conn| conn.kill()).collect();
         st.sessions.clear();
         st.options.clear();
+        ending
     }
 
     pub async fn session(&self, kind: &str) -> Result<String, String> {
@@ -642,9 +689,47 @@ mod tests {
         assert_eq!(ask_npm_afresh(&npx, "npm error code ETARGET").unwrap(), ["npx", "-y", "a@1", "--acp"]);
         assert!(ask_npm_afresh(&npx, "npm error code E404").is_none());
         assert!(ask_npm_afresh(&["npx".into(), "-y".into(), "a@1".into()], "npm error code ETARGET").is_none());
+        // A download cut short, as npm says it (a home folder may have a space).
+        let enoent = "The agent stopped. It said:\nnpm error code ENOENT\nnpm error syscall open\n\
+                      npm error path /Users/A B/.npm/_npx/698eb38f5d7f5a61/package.json\nnpm error errno -2\n\
+                      npm error enoent Could not read package.json: Error: ENOENT: no such file or directory, open '/Users/A B/.npm/_npx/698eb38f5d7f5a61/package.json'";
+        assert_eq!(broken_download(enoent).unwrap(), Path::new("/Users/A B/.npm/_npx/698eb38f5d7f5a61"));
+        assert!(broken_download("npm error code ENOENT\nnpm error path /Users/me/book/package.json").is_none());
+        assert!(broken_download("npm error code E404\nnpm error path /Users/me/.npm/_npx/698eb38f5d7f5a61/package.json").is_none());
         let bundled: Value = serde_json::from_str(AGENTS).unwrap();
         assert!(list(Some(&bundled["agents"])).filter_map(launch).any(|a| a.id == "claude-acp"));
         assert_eq!(strip_fences("```typst\nhello\n```\n"), "hello");
         assert_eq!(strip_fences(" hello"), " hello");
+    }
+
+    #[tokio::test]
+    async fn kill_ends_the_group() {
+        let start = |script: &str| {
+            let mut child = Command::new("sh").args(["-c", script]).stdin(Stdio::piped()).stdout(Stdio::piped()).process_group(0).spawn().unwrap();
+            let said = BufReader::new(child.stdout.take().unwrap()).lines();
+            let conn = Arc::new(Conn {
+                stdin: child.stdin.take().unwrap().into(),
+                next: AtomicU64::new(0),
+                waiting: Mutex::default(),
+                group: child.id().unwrap() as i32,
+                started: Instant::now(),
+                said: Arc::default(),
+                child: Mutex::new(child),
+            });
+            (conn, said)
+        };
+        // An agent ends on SIGTERM: quitting does not wait for KILL_AFTER.
+        let t = Instant::now();
+        start("sleep 30").0.kill().join().unwrap();
+        assert!(t.elapsed() < KILL_AFTER);
+        // npm finishing a download step, with a child of its own: killed after KILL_AFTER.
+        let (npm, mut said) = start("trap '' TERM; sleep 30 & echo ready; wait");
+        said.next_line().await.unwrap(); // it ignores SIGTERM from now on
+        let t = Instant::now();
+        npm.kill().join().unwrap();
+        assert!(t.elapsed() >= KILL_AFTER);
+        std::thread::sleep(Duration::from_millis(200));
+        let _ = lock(&npm.child).try_wait();
+        assert_ne!(unsafe { libc::killpg(npm.group, 0) }, 0);
     }
 }

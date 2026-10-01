@@ -1631,8 +1631,12 @@ pub fn protocol(app: &AppHandle, path: &str) -> Response<Vec<u8>> {
 
 /// Stop the agent and the preview, which run as their own processes.
 pub fn shutdown() {
-    BRIDGE.stop();
+    let agent = BRIDGE.stop();
     ws().stop_preview();
+    // Wait: an npx still downloading the agent would outlive Quire and keep its folder locked.
+    for ending in agent {
+        let _ = ending.join();
+    }
 }
 
 #[cfg(test)]
