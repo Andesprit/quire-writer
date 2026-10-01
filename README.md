@@ -38,13 +38,17 @@ with Cmd+K, accept autocomplete with Tab, and keep Grammarly working in the edit
   citation at the cursor (`@key`, `\cite{key}` or `[@key]`). Needs the internet (doi.org).
 - Export (button at the right of the file tab): the whole document as PDF or Word, or as
   OpenDocument, web page, e-book, Markdown, LaTeX or Typst. PDF comes from tinymist (Typst),
-  your TeX (LaTeX) or Quarto (Quarto, Markdown); the other formats from Pandoc, or the copy
-  inside Quarto. Citations become formatted references. Build files stay out of the project.
+  your TeX (LaTeX) or Quarto (Quarto, Markdown); Quarto documents get the other formats from
+  Quarto, the rest from Pandoc (or the copy inside Quarto). Citations become formatted
+  references. Build files stay out of the project.
+- One look for documents: web pages and Word files from Typst, LaTeX and Markdown, and the
+  Markdown preview, set the text in a book face with clean headings, tinted tables, quotes
+  and code. Quarto documents keep Quarto's look and their own settings.
 - Explorer: new file, new folder, rename (F2), delete (moves to the macOS Trash), right-click menu.
 - Saving: auto save (default) or manual with Cmd+S; switch in the status bar. With auto save
   off, a dot marks unsaved changes and the app asks before closing them.
 - Formatting bar: headings, bold, italic, math, lists, links, citations, footnotes, figures,
-  tables, in the markup of the open file's language.
+  tables, in the markup of the open file's language. A narrow editor wraps it onto two rows.
 - Color themes (button at the bottom of the left bar): VS Code Dark Modern and Light Modern,
   and Quire's own Series, Galley, Coupon and Slate.
 - Updates itself: a new version installs in the background and opens at the next start.

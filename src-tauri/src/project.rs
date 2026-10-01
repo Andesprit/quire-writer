@@ -1111,11 +1111,15 @@ async fn convert(file: &Path, root: &Path, to: &str, bib: Option<PathBuf>, tmp: 
                 return Err(why(&String::from_utf8_lossy(&o.stderr)));
             }
             let mut cmd = pandoc()?;
-            cmd.args(["-f", "html", "-t", "docx"]).arg(&html).arg("-o").arg(&out);
+            // Typst's web page keeps <h1> for the title: its = headings are <h2>.
+            cmd.args(["-f", "html", "-t", "docx", "--shift-heading-level-by=-1"]).arg(&html).arg("-o").arg(&out);
+            cmd.arg("--reference-doc").arg(style_file("reference.docx", REFERENCE_DOCX)?);
             cmd
         }
-        // Not Typst source: Quarto writes that next to the document, over any file of that name.
-        (Lang::Quarto | Lang::Markdown, _) if to != "typ" && on_path("quarto") => {
+        // Quarto documents keep Quarto's own look (and the one their settings choose); Markdown
+        // gets the app's, from Pandoc, as its preview has. Not Typst source: Quarto writes that
+        // next to the document, over any file of that name.
+        (Lang::Quarto, _) | (Lang::Markdown, "pdf") if to != "typ" && on_path("quarto") => {
             let format = match quarto_format {
                 "pdf" => quarto_pdf(&fs::read_to_string(file).unwrap_or_default()),
                 f => f,
@@ -1148,7 +1152,10 @@ async fn convert(file: &Path, root: &Path, to: &str, bib: Option<PathBuf>, tmp: 
                         cmd.arg("--bibliography").arg(bib);
                     }
                     if to == "html" {
-                        cmd.args(["-s", "--embed-resources", "--mathml"]);
+                        cmd.args(["-s", "--embed-resources", "--mathml", "--css"]).arg(style_file("document.css", DOCUMENT_CSS.as_bytes())?);
+                    }
+                    if to == "docx" {
+                        cmd.arg("--reference-doc").arg(style_file("reference.docx", REFERENCE_DOCX)?);
                     }
                 }
             }
@@ -1157,10 +1164,28 @@ async fn convert(file: &Path, root: &Path, to: &str, bib: Option<PathBuf>, tmp: 
     };
     let _rendering = cmd.as_std().get_args().next().is_some_and(|a| a == "render").then(|| Rendering::start(file));
     let o = cmd.current_dir(file.parent().unwrap()).stdin(Stdio::null()).output().await.map_err(err)?;
-    if o.status.success() {
-        return Ok(());
+    if !o.status.success() {
+        return Err(why(&(String::from_utf8_lossy(&o.stdout).into_owned() + &String::from_utf8_lossy(&o.stderr))));
     }
-    Err(why(&(String::from_utf8_lossy(&o.stdout).into_owned() + &String::from_utf8_lossy(&o.stderr))))
+    if (lang, to) == (Lang::Typst, "html") {
+        // Typst's web page comes with no style: give it the app's.
+        let html = fs::read_to_string(&out).map_err(err)?;
+        fs::write(&out, html.replacen("</head>", &format!("<style>{DOCUMENT_CSS}</style></head>"), 1)).map_err(err)?;
+    }
+    Ok(())
+}
+
+/// How a document looks: as a web page (the Markdown preview's look too) and in Word.
+const DOCUMENT_CSS: &str = include_str!("../../web/document.css");
+const REFERENCE_DOCX: &[u8] = include_bytes!("../style/reference.docx");
+
+/// A file of the app's own, written where Pandoc can read it.
+fn style_file(name: &str, bytes: &[u8]) -> Result<PathBuf, String> {
+    let p = std::env::temp_dir().join(format!("quire-{name}"));
+    if fs::read(&p).ok().as_deref() != Some(bytes) {
+        fs::write(&p, bytes).map_err(err)?;
+    }
+    Ok(p)
 }
 
 /// Documents Quarto renders now (no end yet), or finished rendering under two seconds ago.

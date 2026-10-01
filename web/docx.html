@@ -17,6 +17,10 @@
     /* Pandoc's Word files name no page size: Word then uses Letter with 1 inch margins. A
        size the file does name comes as an inline style and wins. */
     #pages section.docx { width: 8.5in; padding: 1in; }
+    /* Word draws a table's header row from its style's first-row part; docx-preview leaves
+       that out. Drawn here as src-tauri/style/reference.docx says. */
+    #pages table.first-row tr:first-child > td { background: #f5f6f8; border-bottom: 1.5pt solid #c9ced6; }
+    #pages table.first-row tr:first-child span { font-weight: 700; color: #111418; }
   </style>
 </head>
 <body>

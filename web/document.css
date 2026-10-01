@@ -1,0 +1,103 @@
+/* How a document looks as a web page: the Markdown preview, and the web pages the app makes
+   from Typst, LaTeX and Markdown (the preview and the export). A well-set article: a book
+   face for the text, a clean sans for headings, quiet rules and tints. The Word files get the
+   same look from src-tauri/style/reference.docx. */
+:root {
+  --text: #1d2125;
+  --strong: #111418;
+  --muted: #5b6370;
+  --rule: #e3e6ea;
+  --tint: #f5f6f8;
+  --accent: #2457c5;
+  --sans: -apple-system, BlinkMacSystemFont, "Helvetica Neue", "Segoe UI", Arial, sans-serif;
+  --mono: ui-monospace, "SF Mono", Menlo, Consolas, monospace;
+}
+html { background: #fff; }
+body {
+  max-width: 42rem;
+  margin: 0 auto;
+  padding: 56px 32px 120px;
+  color: var(--text);
+  background: #fff;
+  font: 17px/1.7 Charter, "Bitstream Charter", "Iowan Old Style", Georgia, serif;
+  font-kerning: normal;
+  text-rendering: optimizeLegibility;
+  -webkit-font-smoothing: antialiased;
+  overflow-wrap: break-word;
+}
+
+h1, h2, h3, h4, h5, h6, .title {
+  margin: 2.2em 0 0.7em;
+  font-family: var(--sans);
+  font-weight: 650;
+  line-height: 1.25;
+  letter-spacing: -0.011em;
+  color: var(--strong);
+  text-wrap: balance;
+}
+h1, .title { margin-top: 0.4em; font-size: 2.15rem; font-weight: 700; letter-spacing: -0.022em; }
+h2 { padding-bottom: 0.35em; border-bottom: 1px solid var(--rule); font-size: 1.55rem; }
+h3 { font-size: 1.25rem; }
+h4 { font-size: 1.05rem; }
+h5, h6 { font-size: 0.85rem; text-transform: uppercase; letter-spacing: 0.06em; color: var(--muted); }
+#title-block-header { margin-bottom: 2.6em; }
+.subtitle { margin: -0.3em 0 0.6em; font: 1.2em/1.4 var(--sans); color: var(--muted); }
+.author, .date { margin: 0.15em 0; font: 0.95em var(--sans); color: var(--muted); }
+body > :first-child, #doc > :first-child { margin-top: 0; }
+
+p, ul, ol, dl, blockquote, pre, table, figure, .sourceCode { margin: 0 0 1.15em; }
+ul, ol { padding-left: 1.5em; }
+li { margin: 0.3em 0; }
+li > ul, li > ol, li > p { margin: 0.3em 0; }
+li::marker { color: var(--muted); }
+strong, b { font-weight: 700; color: var(--strong); }
+a { color: var(--accent); text-decoration: underline; text-decoration-color: rgb(36 87 197 / 0.35); text-underline-offset: 0.18em; }
+a:hover { text-decoration-color: currentColor; }
+mark { padding: 0 0.15em; background: #fff1a8; border-radius: 3px; }
+hr { height: 1px; margin: 2.6em 0; border: 0; background: var(--rule); }
+
+code, kbd, samp, pre { font-family: var(--mono); }
+code { padding: 0.12em 0.38em; font-size: 0.84em; background: var(--tint); border-radius: 5px; }
+pre {
+  padding: 16px 18px;
+  overflow-x: auto;
+  font-size: 0.84em;
+  line-height: 1.55;
+  background: #f6f8fa;
+  border: 1px solid var(--rule);
+  border-radius: 10px;
+}
+pre code { padding: 0; font-size: inherit; background: none; }
+
+blockquote {
+  margin-left: 0;
+  margin-right: 0;
+  padding: 0.7em 1.2em;
+  color: #3c444f;
+  background: #f7f9fc;
+  border-left: 4px solid var(--accent);
+  border-radius: 0 8px 8px 0;
+}
+blockquote > :last-child { margin-bottom: 0; }
+
+img, svg, video { max-width: 100%; height: auto; }
+img { border-radius: 6px; }
+figure { margin-left: 0; margin-right: 0; text-align: center; }
+figure > table { margin-left: auto; margin-right: auto; text-align: left; }
+figcaption, caption { margin-top: 0.7em; font: 0.86em/1.5 var(--sans); color: var(--muted); caption-side: bottom; }
+
+table { border-collapse: collapse; font: 0.9em/1.5 var(--sans); font-variant-numeric: tabular-nums; }
+th, td { padding: 0.55em 0.95em; text-align: left; vertical-align: top; border-bottom: 1px solid var(--rule); }
+thead th, tr:first-child > th { font-weight: 600; color: var(--strong); background: var(--tint); border-bottom: 2px solid #c9ced6; }
+tbody tr:nth-child(even) > td { background: #fafbfc; }
+
+math[display="block"], .katex-display { margin: 1.3em 0; overflow-x: auto; overflow-y: hidden; }
+.footnotes { margin-top: 3em; padding-top: 1em; font-size: 0.88em; color: var(--muted); border-top: 1px solid var(--rule); }
+.footnotes hr { display: none; }
+
+@media (max-width: 600px) {
+  body { padding: 32px 20px 80px; font-size: 16px; }
+}
+@media print {
+  body { max-width: none; padding: 0; }
+}

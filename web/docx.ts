@@ -26,6 +26,9 @@ async function load() {
   const next = document.createElement("div")
   await renderAsync(data, next)
   if (id !== latest) return
+  // Word's bullets are characters of its Symbol and Wingdings fonts, which a Mac lacks:
+  // draw the bullets they stand for.
+  for (const s of next.querySelectorAll("style")) s.textContent = s.textContent!.replaceAll("\uf0b7", "•").replaceAll("\uf0a7", "▪")
   const y = scrollY
   pages.replaceChildren(...next.childNodes)
   pageWidth = pages.querySelector<HTMLElement>("section.docx")?.offsetWidth ?? 0
