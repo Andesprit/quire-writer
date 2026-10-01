@@ -52,6 +52,7 @@ with Cmd+K, accept autocomplete with Tab, and keep Grammarly working in the edit
 - Color themes (button at the bottom of the left bar): VS Code Dark Modern and Light Modern,
   and Quire's own Series, Galley, Coupon and Slate.
 - Updates itself: a new version installs in the background and opens at the next start.
+  Quire > Check for Updates looks right away.
 
 ## Install
 
@@ -78,7 +79,8 @@ It goes online only for these:
   provider's terms apply.
 - Starting an agent the first time: `npx` or `uvx` download it from npm or PyPI.
 - Citations by DOI or arXiv ID: one request to doi.org.
-- Updates: a check on GitHub at start and once a day, then the download of a new version.
+- Updates: a check on GitHub at start, once a day and when you choose Check for Updates, then
+  the download of a new version.
 
 Your own TeX, Quarto or Pandoc may go online on their own, for example to fetch packages.
 

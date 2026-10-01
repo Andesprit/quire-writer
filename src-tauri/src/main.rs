@@ -64,7 +64,16 @@ fn main() {
             }
             project::start(app.handle().clone(), folder.clone());
             #[cfg(not(debug_assertions))] // a dev build has no app bundle to replace
-            tauri::async_runtime::spawn(update(app.handle().clone()));
+            {
+                let app = app.handle().clone();
+                tauri::async_runtime::spawn(async move {
+                    // ponytail: by then the page listens for messages; keep the news for "hello" if a slow start ever misses it.
+                    tokio::time::sleep(std::time::Duration::from_secs(10)).await;
+                    while !update(&app, false).await {
+                        tokio::time::sleep(std::time::Duration::from_secs(24 * 60 * 60)).await;
+                    }
+                });
+            }
 
             // Started from a terminal: Ctrl+C, a kill or a closed terminal quits the normal way,
             // which stops the agent and the preview (they run as their own processes) too.
@@ -97,17 +106,24 @@ fn main() {
                 if let Some(MenuItemKind::Submenu(m)) = menu.items()?.first() {
                     m.remove_at(m.items()?.len() - 1)?;
                     m.append(&MenuItem::with_id(app, "quit", format!("Quit {name}"), true, Some("CmdOrCtrl+Q"))?)?;
+                    #[cfg(not(debug_assertions))] // a dev build has no app bundle to replace
+                    m.insert(&MenuItem::with_id(app, "update", "Check for Updates…", true, None::<&str>)?, 1)?; // under About
                 }
                 app.set_menu(menu)?;
             }
             Ok(())
         })
-        .on_menu_event(|app, e| {
-            if e.id() == "quit" {
+        .on_menu_event(|app, e| match e.id().as_ref() {
+            "quit" => {
                 if let Some(w) = app.get_webview_window("main") {
                     let _ = w.close();
                 }
             }
+            "update" => {
+                let app = app.clone();
+                tauri::async_runtime::spawn(async move { update(&app, true).await });
+            }
+            _ => {}
         })
         .build(tauri::generate_context!())
         .expect("could not start the app")
@@ -118,29 +134,46 @@ fn main() {
         });
 }
 
-/// Updates come from the latest GitHub release, checked after start and then daily. One is
-/// installed in the background and opens at the next start; the page offers a restart now.
-#[cfg(not(debug_assertions))]
-async fn update(app: tauri::AppHandle) {
-    use std::time::Duration;
+/// Updates come from the latest GitHub release, checked after start, then daily, and when
+/// asked from the menu. One is installed in the background and opens at the next start; the
+/// page offers a restart now. Only when asked does the page also hear "none" or a failure.
+/// True once one is installed.
+async fn update(app: &tauri::AppHandle, asked: bool) -> bool {
     use tauri_plugin_updater::UpdaterExt;
-    // ponytail: by then the page listens for messages; keep the news for "hello" if a slow start ever misses it.
-    tokio::time::sleep(Duration::from_secs(10)).await;
-    loop {
-        let found = match app.updater() {
-            Ok(updater) => updater.check().await,
-            Err(e) => Err(e),
-        };
-        match found {
-            Ok(Some(update)) => match update.download_and_install(|_, _| {}, || {}).await {
-                Ok(()) => return project::send(serde_json::json!({"type": "update_ready", "version": update.version})),
-                Err(e) => eprintln!("update to {}: {e}", update.version),
-            },
-            Ok(None) => {}
-            Err(e) => eprintln!("update check: {e}"),
-        }
-        tokio::time::sleep(Duration::from_secs(24 * 60 * 60)).await;
+    // One check at a time, so the daily one and the menu's never download twice.
+    static INSTALLED: tokio::sync::Mutex<Option<String>> = tokio::sync::Mutex::const_new(None);
+    let mut installed = INSTALLED.lock().await;
+    if let Some(version) = installed.as_ref() {
+        project::send(serde_json::json!({"type": "update_ready", "version": version}));
+        return true;
     }
+    let name = &app.package_info().name;
+    let notice = |kind: &str, message: String| {
+        eprintln!("{message}");
+        if asked {
+            project::send(serde_json::json!({"type": "notice", "kind": kind, "message": message}));
+        }
+    };
+    let found = match app.updater() {
+        Ok(updater) => updater.check().await,
+        Err(e) => Err(e),
+    };
+    match found {
+        Ok(Some(update)) => {
+            notice("info", format!("Downloading {name} {}…", update.version));
+            match update.download_and_install(|_, _| {}, || {}).await {
+                Ok(()) => {
+                    project::send(serde_json::json!({"type": "update_ready", "version": update.version}));
+                    *installed = Some(update.version);
+                    return true;
+                }
+                Err(e) => notice("error", format!("Could not install {name} {}: {e}", update.version)),
+            }
+        }
+        Ok(None) => notice("info", format!("{name} {} is the latest version.", app.package_info().version)),
+        Err(e) => notice("error", format!("Could not check for updates: {e}")),
+    }
+    false
 }
 
 /// Apps opened from Finder get a bare PATH without Homebrew, so `npx` and `node` (which most

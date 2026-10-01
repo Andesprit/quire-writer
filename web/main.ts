@@ -1591,6 +1591,9 @@ function onMessage(msg: any) {
         { label: "Restart now", run: async () => (await readyToQuit()) && send({ type: "restart" }) },
       ])
       break
+    case "notice":
+      toast(msg.message, msg.kind)
+      break
     case "file_changed":
       if (msg.path === current) {
         if (msg.deleted) closeFile(`${msg.path} was deleted.`)
