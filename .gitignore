@@ -1,0 +1,7 @@
+.venv/
+__pycache__/
+web/node_modules/
+web/dist/
+build/
+src-tauri/target/
+src-tauri/gen/

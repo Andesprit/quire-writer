@@ -1,0 +1,13 @@
+{
+  "version": "0.0.1",
+  "configurations": [
+    {
+      "name": "typst-writer",
+      "runtimeExecutable": "sh",
+      "runtimeArgs": ["-c", "PATH=\"$HOME/.cargo/bin:$PATH\" exec cargo run --quiet --manifest-path src-tauri/Cargo.toml -- --browser sample"],
+      "env": { "NO_BROWSER": "1" },
+      "port": 8765,
+      "autoPort": true
+    }
+  ]
+}

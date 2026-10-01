@@ -1,0 +1,183 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Typst Writer</title>
+  <link rel="stylesheet" href="./style.css" />
+</head>
+<body>
+  <!--
+  THESIS: A writer's workbench in the grammar of VS Code and Cursor, played straight; it refuses the "distraction-free writing app" look and the chat-first AI screen. The document owns the center; the agent works at the edge and every change it makes waits for review.
+  OWN-WORLD: VS Code Dark/Light Modern tokens (#1f1f1f / #fff editor, #181818 / #f8f8f8 chrome, #0078d4 / #005fb8 focus blue), 1px hairline borders, Codicons, 13px system UI, iA Writer Quattro for the manuscript, Dark+/Light+ syntax colors, Cursor's rounded composer and floating review bar.
+  STORY: The writer sees their manuscript with a live preview, asks the agent (Cmd+K on a selection, or the chat), then reviews each change and accepts, edits or rejects it.
+  FIRST VIEWPORT: title bar; activity bar; explorer 240px; editor tab + breadcrumbs + manuscript; preview group; status bar with agent, words, position, autocomplete. Chat opens on the right with Cmd+J.
+  FORM: pinned by the brief (VS Code/Cursor canon), no roll.
+  FINISH: unreviewed and undocumented is unfinished; this build ends with the finish review, the verdict, DESIGN.md, and every shipping raster carrying its provenance
+  -->
+  <div id="app" class="no-chat">
+    <header id="titlebar">
+      <span class="app-name" id="app-name">Typst Writer</span>
+      <span id="window-title" class="window-title"></span>
+      <div class="title-actions">
+        <button class="icon-btn" id="toggle-sidebar" title="Toggle explorer (Cmd+Shift+E)" aria-pressed="true"><i class="codicon codicon-layout-sidebar-left"></i></button>
+        <button class="icon-btn" id="toggle-preview" title="Toggle preview (Cmd+\)" aria-pressed="true"><i class="codicon codicon-open-preview"></i></button>
+        <button class="icon-btn" id="toggle-chat" title="Toggle chat (Cmd+J)" aria-pressed="false"><i class="codicon codicon-layout-sidebar-right"></i></button>
+      </div>
+    </header>
+
+    <nav id="activitybar" aria-label="Views">
+      <button class="activity active" id="act-explorer" title="Explorer (Cmd+Shift+E)"><i class="codicon codicon-files"></i></button>
+      <button class="activity" id="act-chat" title="Chat (Cmd+J)"><i class="codicon codicon-comment-discussion"></i></button>
+      <div class="spacer"></div>
+      <button class="activity" id="theme" title="Switch light / dark theme"><i class="codicon codicon-color-mode"></i></button>
+    </nav>
+
+    <aside id="sidebar" aria-label="Explorer">
+      <div class="pane-title">Explorer</div>
+      <div class="section-head">
+        <i class="codicon codicon-chevron-down"></i>
+        <span id="folder-name">No folder opened</span>
+        <button class="icon-btn small" id="new-file" title="New file"><i class="codicon codicon-new-file"></i></button>
+        <button class="icon-btn small" id="new-folder" title="New folder"><i class="codicon codicon-new-folder"></i></button>
+        <button class="icon-btn small" id="collapse-all" title="Collapse folders"><i class="codicon codicon-collapse-all"></i></button>
+        <button class="icon-btn small" id="open-folder-2" title="Open another folder"><i class="codicon codicon-folder-opened"></i></button>
+      </div>
+      <div id="tree" role="tree" aria-label="Files"></div>
+      <div id="no-folder" class="empty-pane">
+        <p>You have not opened a folder yet.</p>
+        <button class="btn primary" id="open-folder">Open Folder</button>
+        <p class="muted">Open the folder that holds your Typst project. The agent works inside this folder only.</p>
+      </div>
+      <button class="section-head labels-head" id="labels-head" aria-expanded="true" aria-controls="labels">
+        <i class="codicon codicon-chevron-down"></i>
+        <span>Labels</span>
+        <em id="labels-count"></em>
+      </button>
+      <div id="labels" role="list" aria-label="Labels"></div>
+    </aside>
+    <div class="sash" data-sash="sidebar"></div>
+
+    <section id="editor-group" aria-label="Editor">
+      <div class="tabs">
+        <div class="tab active" id="tab" hidden>
+          <i class="codicon codicon-file-text ft-typ" id="tab-icon"></i>
+          <span id="tab-name"></span>
+          <i class="codicon codicon-diff review-mark" id="tab-review" title="Has changes to review"></i>
+          <span class="tab-dirty" title="Unsaved changes (Cmd+S to save)"></span>
+        </div>
+        <div class="tab-actions">
+          <button class="icon-btn" id="plain" title="Open in a plain text field (compare Grammarly)"><i class="codicon codicon-whole-word"></i></button>
+          <button class="icon-btn" id="open-preview-side" title="Toggle preview (Cmd+\)"><i class="codicon codicon-open-preview"></i></button>
+        </div>
+      </div>
+      <div class="format-bar" id="format-bar" role="toolbar" aria-label="Formatting"></div>
+      <div class="breadcrumbs" id="breadcrumbs"></div>
+      <div id="editor-wrap">
+        <div id="editor">
+          <div class="layer behind" id="hl" aria-hidden="true"></div>
+          <textarea class="layer front" id="text" spellcheck="true" autocapitalize="sentences" aria-label="Document text"></textarea>
+        </div>
+        <div id="review-view" class="layer review" hidden aria-label="Changes to review"></div>
+        <div id="welcome" class="welcome">
+          <div class="welcome-mark" id="welcome-mark" aria-hidden="true"></div>
+          <dl class="shortcuts">
+            <dt>Edit selection with AI</dt><dd><kbd>&#8984;</kbd><kbd>K</kbd></dd>
+            <dt>Toggle chat</dt><dd><kbd>&#8984;</kbd><kbd>J</kbd></dd>
+            <dt>Accept suggestion</dt><dd><kbd>Tab</kbd></dd>
+            <dt>Toggle preview</dt><dd><kbd>&#8984;</kbd><kbd>\</kbd></dd>
+            <dt>Toggle explorer</dt><dd><kbd>&#8679;</kbd><kbd>&#8984;</kbd><kbd>E</kbd></dd>
+          </dl>
+        </div>
+        <div id="review-bar" role="toolbar" aria-label="Review changes" hidden>
+          <button class="icon-btn" id="prev-change" title="Previous change"><i class="codicon codicon-chevron-up"></i></button>
+          <span id="review-count"></span>
+          <button class="icon-btn" id="next-change" title="Next change"><i class="codicon codicon-chevron-down"></i></button>
+          <span class="divider"></span>
+          <button class="btn ghost" id="review-toggle"></button>
+          <button class="btn ghost" id="reject-all"><i class="codicon codicon-discard"></i> Reject all</button>
+          <button class="btn primary" id="accept-all"><i class="codicon codicon-check"></i> Accept all</button>
+        </div>
+      </div>
+    </section>
+    <div class="sash" data-sash="preview"></div>
+
+    <section id="preview-group" aria-label="Preview">
+      <div class="tabs">
+        <div class="tab active">
+          <i class="codicon codicon-open-preview"></i>
+          <span id="preview-name">Preview</span>
+          <button class="icon-btn small tab-close" id="close-preview" title="Close preview"><i class="codicon codicon-close"></i></button>
+        </div>
+      </div>
+      <iframe id="preview" title="Preview"></iframe>
+      <div id="preview-empty" class="empty-pane center"><p class="muted">The preview appears when you open a .typ file.</p></div>
+    </section>
+    <div class="sash" data-sash="chat"></div>
+
+    <aside id="chat" aria-label="Chat">
+      <div class="pane-title">
+        Chat
+        <button class="icon-btn small" id="close-chat" title="Close chat (Cmd+J)"><i class="codicon codicon-close"></i></button>
+      </div>
+      <div id="messages" aria-live="polite">
+        <div class="chat-empty" id="chat-empty">
+          <i class="codicon codicon-sparkle"></i>
+          <p>Ask the agent to draft, rewrite or check your writing.</p>
+          <p class="muted">It sees the open file and your selection. Every change it makes waits for your review.</p>
+        </div>
+      </div>
+      <form id="composer">
+        <div class="chips" id="chips"></div>
+        <textarea id="chat-input" rows="3" placeholder="Ask the agent to write or change something"></textarea>
+        <div class="composer-bar">
+          <select id="agent" class="ghost-select" title="Agent"></select>
+          <span id="chat-options" class="options"></span>
+          <button type="submit" class="send" id="send" title="Send (Enter)"><i class="codicon codicon-arrow-up"></i></button>
+          <button type="button" class="send stop" id="stop" title="Stop" hidden><i class="codicon codicon-debug-stop"></i></button>
+        </div>
+      </form>
+    </aside>
+
+    <footer id="statusbar">
+      <button class="item" id="sb-agent" title="Open chat"><i class="codicon codicon-hubot"></i> <span id="sb-agent-text">No agent</span></button>
+      <button class="item" id="sb-review" hidden title="Go to the next change"><i class="codicon codicon-diff"></i> <span id="sb-review-text"></span></button>
+      <span class="spacer"></span>
+      <span class="item" id="sb-pos"></span>
+      <span class="item" id="sb-words"></span>
+      <span class="item" id="sb-lang">Typst</span>
+      <button class="item" id="sb-autosave"></button>
+      <button class="item" id="sb-ac" aria-haspopup="true" title="Autocomplete settings"><i class="codicon codicon-sparkle"></i> <span id="sb-ac-text">Autocomplete</span></button>
+    </footer>
+  </div>
+
+  <div id="ac-menu" class="menu" hidden>
+    <label class="check"><input type="checkbox" id="ac-toggle" /> Suggest while I type</label>
+    <p class="muted">Grey text appears when you pause. Tab accepts, Esc dismisses.</p>
+    <div id="complete-options" class="options stacked"></div>
+  </div>
+
+  <div id="inline-box" hidden>
+    <div class="inline-row">
+      <i class="codicon codicon-sparkle" id="inline-icon"></i>
+      <textarea id="inline-input" rows="1" placeholder="Edit selection"></textarea>
+    </div>
+    <div class="inline-foot"><span id="inline-status"></span><span class="muted">Enter to send &middot; Esc to close</span></div>
+  </div>
+
+  <dialog id="ask" class="ask">
+    <form method="dialog">
+      <p class="ask-title"></p>
+      <p class="ask-body"></p>
+      <div class="ask-actions">
+        <button value="cancel" class="btn secondary">Cancel</button>
+        <button value="discard" class="btn secondary">Don't Save</button>
+        <button value="save" class="btn primary">Save</button>
+      </div>
+    </form>
+  </dialog>
+  <div id="ctx-menu" class="ctx-menu" role="menu" hidden></div>
+  <div id="toasts" aria-live="assertive"></div>
+  <script type="module" src="./main.ts"></script>
+</body>
+</html>

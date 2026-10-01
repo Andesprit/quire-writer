@@ -1,0 +1,29 @@
+[package]
+name = "typst-writer"
+version = "0.1.0"
+edition = "2021"
+
+[build-dependencies]
+tauri-build = { version = "2", features = [] }
+
+[dependencies]
+tauri = { version = "2", features = [] }
+libc = "0.2"
+tokio = { version = "1.53.1", features = ["macros", "process", "fs", "net", "io-util", "time", "sync", "signal", "rt-multi-thread"] }
+axum = { version = "0.8.9", default-features = false, features = ["ws", "tokio", "http1"] }
+tower-http = { version = "0.6", features = ["fs"] }
+tokio-tungstenite = "0.29"
+futures-util = "0.3.34"
+notify = "8.2.0"
+trash = "5.2.9"
+regex = "1.13.1"
+unicode-normalization = "0.1.25"
+serde_json = "1.0.151"
+
+# Smaller app binary (Tauri's size guide). No panic = "abort": a bug in one request must
+# not close the window with the writer's text in it.
+[profile.release]
+codegen-units = 1
+lto = true
+opt-level = "s"
+strip = true

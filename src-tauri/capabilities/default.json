@@ -1,0 +1,7 @@
+{
+  "identifier": "default",
+  "description": "The helper's page may only listen for the close request and then close the window.",
+  "windows": ["main"],
+  "remote": { "urls": ["http://127.0.0.1:*"] },
+  "permissions": ["core:event:default", "core:window:allow-destroy"]
+}
