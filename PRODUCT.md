@@ -4,7 +4,7 @@
 
 ## Platform
 
-desktop (macOS)
+desktop (macOS; Linux builds are experimental)
 
 ## Users
 

@@ -5,7 +5,8 @@ Thank you for helping. Bug reports, ideas, documentation and code are all welcom
 ## Before you start
 
 - For a bug, open an issue with the bug form. Attach the end of the log:
-  `~/Library/Logs/com.andesprit.quire/agent.log`.
+  `~/Library/Logs/com.andesprit.quire/agent.log` (Linux:
+  `~/.local/share/com.andesprit.quire/logs/agent.log`).
 - For a new feature or a large change, open an issue first, so we can agree on the idea
   before you spend time on code.
 - Security problems: do not open a public issue. See [SECURITY.md](SECURITY.md).

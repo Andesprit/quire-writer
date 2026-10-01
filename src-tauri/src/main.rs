@@ -1,5 +1,6 @@
-//! Quire, a macOS app. The window shows the editor (web/); this side opens the project, runs
-//! the agent and the previews, and talks to the page through Tauri's own messages.
+//! Quire, a macOS app (Linux builds are experimental). The window shows the editor (web/);
+//! this side opens the project, runs the agent and the previews, and talks to the page
+//! through Tauri's own messages.
 
 mod agent;
 mod project;
@@ -10,6 +11,7 @@ use std::process::{Command, Stdio};
 use std::sync::{Mutex, MutexGuard};
 
 use serde_json::Value;
+#[cfg(target_os = "macos")]
 use tauri::menu::{Menu, MenuItem, MenuItemKind};
 use tauri::{Manager, RunEvent, WebviewUrl, WebviewWindowBuilder};
 use tokio::signal::unix::{signal, SignalKind};
@@ -77,13 +79,17 @@ fn main() {
                 .build()?;
 
             // The built-in Quit ends the app without asking the page about unsaved changes.
-            // This one closes the window, which asks first.
-            let menu = Menu::default(app.handle())?;
-            if let Some(MenuItemKind::Submenu(m)) = menu.items()?.first() {
-                m.remove_at(m.items()?.len() - 1)?;
-                m.append(&MenuItem::with_id(app, "quit", format!("Quit {name}"), true, Some("CmdOrCtrl+Q"))?)?;
+            // This one closes the window, which asks first. Linux gets no menu bar: closing the
+            // window is the way out there, and it asks too.
+            #[cfg(target_os = "macos")]
+            {
+                let menu = Menu::default(app.handle())?;
+                if let Some(MenuItemKind::Submenu(m)) = menu.items()?.first() {
+                    m.remove_at(m.items()?.len() - 1)?;
+                    m.append(&MenuItem::with_id(app, "quit", format!("Quit {name}"), true, Some("CmdOrCtrl+Q"))?)?;
+                }
+                app.set_menu(menu)?;
             }
-            app.set_menu(menu)?;
             Ok(())
         })
         .on_menu_event(|app, e| {

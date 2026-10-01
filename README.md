@@ -45,6 +45,11 @@ Every change the agent makes waits for your review. In the app it is called Quir
 Download the `.dmg` of the [latest release](https://github.com/Andesprit/quire-writer/releases/latest),
 open it and drag Quire to Applications. Needs a Mac with Apple Silicon.
 
+Linux (x86_64) is experimental: take the `.AppImage` (most systems) or the `.deb` (Debian,
+Ubuntu) from the same release. It is built and started on every change, but used far less
+than the Mac app: please report what does not work. On Linux the shortcuts are Ctrl where
+the app says Cmd, there is no menu bar, and the Quire themes fall back to other fonts.
+
 ## Privacy
 
 Quire has no account, no telemetry and no server of its own. Your files stay on your Mac.
@@ -65,6 +70,10 @@ Needs Rust, `node`, `tinymist` (`brew install tinymist`), and an agent you are l
 to (for Claude: Claude Code). For the LaTeX preview: MacTeX or Tectonic
 (`brew install tectonic`). For the Quarto preview and Markdown PDF: Quarto. For Word and the
 other export formats: Pandoc (`brew install pandoc`) or Quarto, which carries its own.
+
+On Linux, also install Tauri's libraries (Debian and Ubuntu:
+`sudo apt install libwebkit2gtk-4.1-dev libappindicator3-dev librsvg2-dev patchelf`), and
+name the tinymist copy below `tinymist-x86_64-unknown-linux-gnu`.
 
 ```bash
 cd web && npm install && npm run build && cd ..

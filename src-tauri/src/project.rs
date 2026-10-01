@@ -1350,7 +1350,11 @@ async fn handle(msg: &Value) -> Result<(), String> {
                 return Err("Only exported files open from here.".into());
             }
             let finder = msg["finder"].as_bool().unwrap_or(false);
+            #[cfg(target_os = "macos")]
             Command::new("open").args(finder.then_some("-R")).arg(path).spawn().map_err(err)?;
+            // Linux file managers share no "show this file": open its folder instead.
+            #[cfg(not(target_os = "macos"))]
+            Command::new("xdg-open").arg(if finder { path.parent().unwrap_or(&path) } else { &path }).spawn().map_err(err)?;
         }
         _ => {}
     }

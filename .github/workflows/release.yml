@@ -1,5 +1,6 @@
 # Push a tag v<version> (the version in src-tauri/Cargo.toml) to build Quire for Apple Silicon
-# Macs. The result is a draft GitHub release: publish it, and installed apps update themselves.
+# Macs and, experimentally, for Linux (x86_64). The result is a draft GitHub release: publish
+# it, and installed apps update themselves.
 name: Release
 
 on:
@@ -10,8 +11,17 @@ env:
   TINYMIST: v0.15.8 # bundled with the app for the Typst preview
 
 jobs:
-  macos:
-    runs-on: macos-latest # Apple Silicon
+  build:
+    strategy:
+      fail-fast: false
+      max-parallel: 1 # one build at a time adds its system to the release's latest.json
+      matrix:
+        include:
+          - os: macos-latest # Apple Silicon
+            bundles: app,dmg
+          - os: ubuntu-22.04 # x86_64. The oldest Ubuntu we build on: the AppImage runs on newer systems, not older.
+            bundles: appimage,deb
+    runs-on: ${{ matrix.os }}
     permissions:
       contents: write
     steps:
@@ -24,6 +34,12 @@ jobs:
             echo "::error::Tag $GITHUB_REF_NAME does not match version $version in src-tauri/Cargo.toml"
             exit 1
           fi
+
+      - name: Linux libraries
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libwebkit2gtk-4.1-dev libappindicator3-dev librsvg2-dev patchelf
 
       - uses: actions/setup-node@v7
         with:
@@ -43,16 +59,18 @@ jobs:
 
       - name: Get tinymist
         run: |
+          target=$(rustc -vV | sed -n 's/^host: //p')
           mkdir -p build/bin && cd build/bin
-          file=tinymist-aarch64-apple-darwin.tar.gz
+          file=tinymist-$target.tar.gz
           curl -fsSLO "https://github.com/Myriad-Dreamin/tinymist/releases/download/$TINYMIST/$file"
           curl -fsSLO "https://github.com/Myriad-Dreamin/tinymist/releases/download/$TINYMIST/$file.sha256"
           shasum -a 256 -c "$file.sha256"
           tar xzf "$file" --strip-components 1
-          mv tinymist tinymist-aarch64-apple-darwin # the sidecar name Tauri expects
+          mv tinymist "tinymist-$target" # the sidecar name Tauri expects
           rm "$file" "$file.sha256"
 
       - name: Apple signing
+        if: runner.os == 'macOS'
         env:
           APPLE_CERTIFICATE: ${{ secrets.APPLE_CERTIFICATE }}
           APPLE_CERTIFICATE_PASSWORD: ${{ secrets.APPLE_CERTIFICATE_PASSWORD }}
@@ -95,13 +113,16 @@ jobs:
           tagName: ${{ github.ref_name }}
           releaseName: Quire ${{ github.ref_name }}
           releaseBody: |
-            Download the `.dmg` below, open it and drag Quire to Applications. Needs a Mac with Apple Silicon.
+            **macOS** (Apple Silicon): download the `.dmg`, open it and drag Quire to Applications.
+
+            **Linux** (x86_64, experimental): the `.AppImage` runs on most systems; the `.deb` is for Debian and Ubuntu. Report what does not work in an issue.
+
             Installed copies update themselves once this release is published.
           releaseDraft: true
-          args: --config '{"bundle":{"createUpdaterArtifacts":true}}'
+          args: --bundles ${{ matrix.bundles }} --config '{"bundle":{"createUpdaterArtifacts":true}}'
 
       - name: Notarize the disk image
-        if: env.APPLE_ID != ''
+        if: runner.os == 'macOS' && env.APPLE_ID != ''
         env:
           GH_TOKEN: ${{ github.token }}
           GH_REPO: ${{ github.repository }}

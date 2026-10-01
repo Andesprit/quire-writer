@@ -28,10 +28,10 @@ body:
     validations:
       required: true
   - type: input
-    id: macos
+    id: system
     attributes:
-      label: macOS version
-      placeholder: "26.0"
+      label: System and version
+      placeholder: "macOS 26.0, or Ubuntu 24.04 (AppImage)"
     validations:
       required: true
   - type: input
@@ -50,5 +50,5 @@ body:
     id: log
     attributes:
       label: Log
-      description: The last lines of ~/Library/Logs/com.andesprit.quire/agent.log. Remove anything private first.
+      description: The last lines of ~/Library/Logs/com.andesprit.quire/agent.log (on Linux ~/.local/share/com.andesprit.quire/logs/agent.log). Remove anything private first.
       render: text

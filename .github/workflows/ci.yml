@@ -32,3 +32,47 @@ jobs:
           # The app bundles tinymist as a sidecar; compiling only needs the file to exist.
           mkdir -p build/bin && touch build/bin/tinymist-aarch64-apple-darwin
           cargo test --manifest-path src-tauri/Cargo.toml
+
+  # Linux builds are experimental: they must compile, pass the tests and start.
+  linux:
+    runs-on: ubuntu-22.04
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: Linux libraries
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libwebkit2gtk-4.1-dev libappindicator3-dev librsvg2-dev patchelf xvfb
+
+      - uses: actions/setup-node@v7
+        with:
+          node-version: lts/*
+          cache: npm
+          cache-dependency-path: web/package-lock.json
+
+      - name: Build the page
+        working-directory: web
+        run: npm ci && npm run build
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: src-tauri
+
+      - name: App tests
+        run: |
+          mkdir -p build/bin && touch build/bin/tinymist-x86_64-unknown-linux-gnu
+          cargo test --manifest-path src-tauri/Cargo.toml
+
+      - name: The app starts
+        env:
+          WEBKIT_DISABLE_DMABUF_RENDERER: 1 # no GPU on the runner
+          LIBGL_ALWAYS_SOFTWARE: 1
+        run: |
+          cargo build --manifest-path src-tauri/Cargo.toml
+          # Still running after 20 seconds (timeout's 124) means it started and did not crash.
+          status=0
+          xvfb-run -a timeout 20 src-tauri/target/debug/quire "$PWD/sample" || status=$?
+          cat ~/.local/share/com.andesprit.quire/logs/agent.log 2>/dev/null | tail -20 || true
+          [ "$status" = 124 ] || { echo "::error::The app exited with status $status before 20 seconds"; exit 1; }
