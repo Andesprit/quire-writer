@@ -1571,7 +1571,6 @@ function onMessage(msg: any) {
       changed = new Set(msg.changed)
       labels = msg.labels ?? []
       if (selected && !files.includes(selected) && !dirs.includes(selected)) selected = null
-      if (root && agentState === "none") agentState = "starting"
       renderTree()
       renderLabels()
       renderTab()

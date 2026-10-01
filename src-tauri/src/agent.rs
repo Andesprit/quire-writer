@@ -17,11 +17,11 @@ use std::time::{Duration, Instant};
 
 use serde_json::{json, Map, Value};
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
-use tokio::process::{Child, ChildStdin, ChildStdout, Command};
+use tokio::process::{Child, ChildStderr, ChildStdin, ChildStdout, Command};
 use tokio::sync::oneshot;
 
 use crate::lock;
-use crate::project::{language_name, restart_agent, send};
+use crate::project::{language_name, restart_agent, send, why};
 
 const AGENTS: &str = include_str!("../../agents.json");
 const NO_AGENT: &str = "No agent running. Open a folder first.";
@@ -137,6 +137,7 @@ struct Conn {
     waiting: Mutex<HashMap<u64, oneshot::Sender<Result<Value, String>>>>,
     group: i32, // its process group: npx starts the real agent as its own child
     started: Instant,
+    said: Arc<Mutex<Vec<String>>>, // its last lines of error output: why it stopped
     _child: Mutex<Child>,
 }
 
@@ -165,8 +166,21 @@ impl Conn {
     }
 }
 
+/// The agent's error output goes to the app's log; its last lines are kept to say why it stopped.
+async fn keep_stderr(stderr: ChildStderr, said: Arc<Mutex<Vec<String>>>) {
+    let mut lines = BufReader::new(stderr).lines();
+    while let Ok(Some(line)) = lines.next_line().await {
+        eprintln!("{line}");
+        let mut said = lock(&said);
+        said.push(line);
+        if said.len() > 40 {
+            said.remove(0);
+        }
+    }
+}
+
 /// Everything the agent sends: replies to our requests, updates, and its own requests.
-async fn read(conn: Arc<Conn>, stdout: ChildStdout) {
+async fn read(conn: Arc<Conn>, stdout: ChildStdout, stderr: tokio::task::JoinHandle<()>) {
     let mut reader = BufReader::new(stdout);
     let mut line = Vec::new();
     while reader.read_until(b'\n', &mut line).await.is_ok_and(|n| n > 0) {
@@ -197,8 +211,14 @@ async fn read(conn: Arc<Conn>, stdout: ChildStdout) {
             _ => {} // other notifications, or a line that is not JSON
         }
     }
-    lock(&conn.waiting).clear(); // requests still waiting fail with STOPPED
-    BRIDGE.quit(&conn);
+    // It quit: requests still waiting fail with what it said last (npx failing, a Node.js too old).
+    let _ = tokio::time::timeout(Duration::from_secs(1), stderr).await;
+    let said = why(&lock(&conn.said).join("\n"));
+    let stopped = if said.is_empty() { STOPPED.to_string() } else { format!("{STOPPED} It said:\n{said}") };
+    for (_, tx) in lock(&conn.waiting).drain() {
+        let _ = tx.send(Err(stopped.clone()));
+    }
+    BRIDGE.quit(&conn, &said);
 }
 
 pub static BRIDGE: LazyLock<Bridge> = LazyLock::new(Bridge::default);
@@ -291,6 +311,10 @@ impl Bridge {
         self.st().conn.is_some()
     }
 
+    pub fn starting(&self) -> bool {
+        self.st().starting.is_some()
+    }
+
     pub fn all_options(&self) -> Vec<(String, Value)> {
         self.st().options.iter().map(|(k, v)| (k.clone(), v.clone())).collect()
     }
@@ -310,21 +334,25 @@ impl Bridge {
             .envs(spec.env)
             .current_dir(root)
             .stdin(Stdio::piped())
-            .stdout(Stdio::piped()) // stderr: the app's log, or the terminal
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
             .process_group(0)
             .kill_on_drop(true)
             .spawn()
             .map_err(|e| format!("Could not start {}: {e}", spec.argv[0]))?;
-        let (stdin, stdout) = (child.stdin.take().unwrap(), child.stdout.take().unwrap());
+        let (stdin, stdout, stderr) = (child.stdin.take().unwrap(), child.stdout.take().unwrap(), child.stderr.take().unwrap());
+        let said = Arc::new(Mutex::new(Vec::new()));
+        let stderr = tokio::spawn(keep_stderr(stderr, said.clone()));
         let conn = Arc::new(Conn {
             stdin: stdin.into(),
             next: AtomicU64::new(0),
             waiting: Mutex::default(),
             group: child.id().unwrap_or(0) as i32,
             started: Instant::now(),
+            said,
             _child: Mutex::new(child),
         });
-        tokio::spawn(read(conn.clone(), stdout));
+        tokio::spawn(read(conn.clone(), stdout, stderr));
         self.st().starting = Some(conn.clone()); // so a stop meanwhile stops it too
         let started = conn.request("initialize", json!({"protocolVersion": 1, "clientCapabilities": {}})).await;
         {
@@ -502,7 +530,7 @@ impl Bridge {
 
     /// The agent process ended. A stop or a newer start takes it out first, so if it is still
     /// the current one, it quit on its own (it crashed): start it again.
-    fn quit(&self, conn: &Arc<Conn>) {
+    fn quit(&self, conn: &Arc<Conn>, said: &str) {
         let id = {
             let st = self.st();
             st.conn.as_ref().filter(|c| Arc::ptr_eq(c, conn)).and(st.agent_id.clone())
@@ -512,7 +540,8 @@ impl Bridge {
         if conn.started.elapsed() < RESTART_AFTER {
             self.stop();
             send(json!({"type": "agent", "id": id, "ready": false}));
-            send(json!({"type": "error", "message": format!("{name} stopped right after it started. Click it in the status bar to try again.")}));
+            let said = if said.is_empty() { String::new() } else { format!(" It said:\n{said}") };
+            send(json!({"type": "error", "message": format!("{name} stopped right after it started. Click it in the status bar to try again.{said}")}));
         } else {
             send(json!({"type": "error", "message": format!("{name} stopped. Quire is starting it again, with a new conversation.")}));
             restart_agent(&id);

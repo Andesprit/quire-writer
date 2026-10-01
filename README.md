@@ -54,6 +54,11 @@ with Cmd+K, accept autocomplete with Tab, and keep Grammarly working in the edit
 Download the `.dmg` of the [latest release](https://github.com/Andesprit/quire-writer/releases/latest),
 open it and drag Quire to Applications. Needs a Mac with Apple Silicon.
 
+The agents run with your own tools and login: Node.js (22 or newer for Claude;
+`brew install node`), and the agent's own sign-in (Claude Code, Codex). When an agent
+stops, the app says what it printed; the whole log is in
+`~/Library/Logs/com.andesprit.quire/agent.log`.
+
 Linux (x86_64) is experimental: take the `.AppImage` (most systems) or the `.deb` (Debian,
 Ubuntu) from the same release. It is built and started on every change, but used far less
 than the Mac app: please report what does not work. On Linux the shortcuts are Ctrl where

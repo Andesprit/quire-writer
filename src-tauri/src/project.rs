@@ -994,7 +994,7 @@ async fn quarto_preview(rel: &str, asked: u64) -> Result<(), String> {
 
 /// What a tool printed when it failed, short: its "ERROR: ..." line and what follows up to the
 /// stack trace, or else its last lines.
-fn why(output: &str) -> String {
+pub fn why(output: &str) -> String {
     let output = re(r"\x1b\[[0-9;]*m").replace_all(output, "");
     let lines: Vec<&str> = output.lines().collect();
     let from = lines.iter().position(|l| l.trim_start().to_lowercase().starts_with("error")).unwrap_or(lines.len().saturating_sub(8));
@@ -1470,6 +1470,13 @@ fn hello() {
     let agent = BRIDGE.agent_id().unwrap_or(DEFAULT_AGENT.into());
     send(json!({"type": "hello", "agents": agents, "agent": agent}));
     send(ws().state());
+    // Whether the agent runs: an agent that failed before the page listened stays not running.
+    if BRIDGE.starting() {
+        let name = find_agent(&agent).map_or(agent.clone(), |a| a.name);
+        send(json!({"type": "status", "text": format!("Starting {name}...")}));
+    } else {
+        send(json!({"type": "agent", "id": agent, "ready": BRIDGE.running()}));
+    }
     for (kind, options) in BRIDGE.all_options() {
         send(json!({"type": "options", "kind": kind, "options": options}));
     }
