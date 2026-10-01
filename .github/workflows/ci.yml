@@ -1,0 +1,34 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  check:
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v7
+
+      - uses: actions/setup-node@v7
+        with:
+          node-version: lts/*
+          cache: npm
+          cache-dependency-path: web/package-lock.json
+
+      - name: Page checks and build
+        working-directory: web
+        run: npm ci && npm run check && npm run build
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: src-tauri
+
+      - name: App tests
+        run: |
+          # The app bundles tinymist as a sidecar; compiling only needs the file to exist.
+          mkdir -p build/bin && touch build/bin/tinymist-aarch64-apple-darwin
+          cargo test --manifest-path src-tauri/Cargo.toml
