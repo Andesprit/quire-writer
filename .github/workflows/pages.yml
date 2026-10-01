@@ -1,6 +1,6 @@
 name: Website
 
-# Publishes site/ to GitHub Pages: https://andesprit.github.io/quire-writer/
+# Publishes site/ to GitHub Pages: https://andesprit.com/quire-writer/
 on:
   push:
     branches: [main]
