@@ -9,17 +9,18 @@
 <meta property="og:description" content="A free, open-source writing app for Typst, LaTeX, Quarto and Markdown, with the AI agent of your choice. Every change waits for your review.">
 <meta property="og:image" content="https://andesprit.com/quire-writer/themes.webp">
 <meta property="og:url" content="https://andesprit.com/quire-writer/">
-<meta name="theme-color" content="#23439b">
+<meta name="theme-color" content="#060709">
+<link rel="preload" href="fonts/geist.woff2" as="font" type="font/woff2" crossorigin>
 <link rel="icon" href="icon.png">
 <link rel="stylesheet" href="style.css">
 </head>
 <body>
 <!--
-THESIS: The page proves the app's one promise by letting the visitor review an agent's edits; it refuses the screenshot hero over a grid of feature cards.
-OWN-WORLD: Quire Series as shipped in the app: white stock, black ink, a series-colour band top and bottom that follows the open file (Typst blue, LaTeX green, Quarto magenta, Markdown orange), Gill Sans letter-spaced capitals, Charter manuscript, square corners, ink rules, no greys.
-STORY: The visitor sees three agent edits waiting, accepts or rejects them, and watches only what they accept land in the preview; then learns it works with any ACP agent, four kinds of document and no account; then downloads.
-FIRST VIEWPORT: Series band with mark, nav and Download; headline left at about 64px, lede and Download / GitHub buttons right; the demo window (editor, preview, chat) full width beneath, its top half visible.
-FORM: Review demo, candidate 2 of 7 (the user locked it over the dealt lead); seed d3d91999.
+THESIS: The page continues the film: the visitor meets Quire on the dark stage its video uses, then proves the promise by reviewing the agent's edits in a live copy of the app; it refuses the light screenshot hero over a grid of feature cards.
+OWN-WORLD: Night stage #060709 lit by four drifting lights in the app's colours for Typst, LaTeX, Quarto and Markdown, over a fading grid; Geist for every word, Instrument Serif italic in #9db8ff for the phrase each heading lands on; the app itself in VS Code Dark Modern; hairlines at 9% white; blue pill buttons; 3D keycaps.
+STORY: The visitor watches or tries the review, learns the three ways to ask, sees their own agent among the registry, the page, the looks, how Quire compares with VS Code, Cursor and Claude Code, what stays private, then downloads.
+FIRST VIEWPORT: Translucent bar with mark, nav and Download; a centred 82px two-line headline (the 6rem display cap), second line in the serif; lede, the four format pills from the video, Download and GitHub pills; the film beneath in a lit frame, its top visible. Signature motion: the film lies down flat as it scrolls into view, as the window rises in the video.
+FORM: Pinned by the user ("Dark, like the video"), so no roll was run; code-led, no image generation.
 FINISH: unreviewed and undocumented is unfinished; this build ends with the finish review, the verdict, DESIGN.md, and every shipping raster carrying its provenance
 -->
 <svg width="0" height="0" style="position:absolute" aria-hidden="true">
@@ -29,12 +30,15 @@ FINISH: unreviewed and undocumented is unfinished; this build ends with the fini
   <symbol id="i-down" viewBox="0 0 16 16"><path d="M3.14598 5.85423L7.64598 10.3542C7.84098 10.5492 8.15798 10.5492 8.35298 10.3542L12.853 5.85423C13.048 5.65923 13.048 5.34223 12.853 5.14723C12.658 4.95223 12.341 4.95223 12.146 5.14723L7.99998 9.29323L3.85398 5.14723C3.65898 4.95223 3.34198 4.95223 3.14698 5.14723C2.95198 5.34223 2.95098 5.65923 3.14598 5.85423Z"/></symbol>
   <symbol id="i-arrow" viewBox="0 0 16 16"><path d="M13.854 8.14576L8.854 3.14576C8.659 2.95076 8.342 2.95076 8.147 3.14576C7.952 3.34076 7.952 3.65776 8.147 3.85276L12.293 7.99876H2.5C2.224 7.99876 2 8.22276 2 8.49876C2 8.77476 2.224 8.99876 2.5 8.99876H12.293L8.147 13.1448C7.952 13.3398 7.952 13.6568 8.147 13.8518C8.245 13.9498 8.373 13.9978 8.501 13.9978C8.629 13.9978 8.757 13.9488 8.855 13.8518L13.855 8.85176C14.05 8.65676 14.05 8.33976 13.855 8.14476L13.854 8.14576Z"/></symbol>
   <symbol id="i-download" viewBox="0 0 16 16"><path d="M16 13.5C16 13.565 15.987 13.63 15.961 13.69C15.935 13.751 15.897 13.805 15.85 13.85L13.85 15.85C13.804 15.897 13.75 15.935 13.69 15.961C13.63 15.987 13.565 16 13.5 16C13.435 16 13.371 15.987 13.31 15.961C13.249 15.935 13.195 15.897 13.15 15.85L11.15 13.85C11.103 13.804 11.065 13.75 11.039 13.69C11.013 13.63 11 13.565 11 13.5C11 13.435 11.013 13.37 11.039 13.31C11.065 13.249 11.103 13.195 11.15 13.15C11.196 13.103 11.25 13.065 11.31 13.039C11.37 13.013 11.435 13 11.5 13C11.565 13 11.629 13.013 11.69 13.039C11.751 13.065 11.805 13.103 11.85 13.15L13 14.29V9.5C13 9.367 13.052 9.24 13.146 9.146C13.24 9.053 13.367 9 13.5 9C13.633 9 13.76 9.052 13.854 9.146C13.947 9.24 14 9.367 14 9.5V14.29L15.15 13.15C15.196 13.103 15.25 13.065 15.31 13.039C15.37 13.013 15.435 13 15.5 13C15.565 13 15.629 13.013 15.69 13.039C15.751 13.065 15.805 13.103 15.85 13.15C15.897 13.196 15.935 13.25 15.961 13.31C15.987 13.37 16 13.435 16 13.5ZM11 12H12V11H3C2.448 11 2 10.552 2 10V3C2 2.448 2.448 2 3 2H13C13.552 2 14 2.448 14 3V8H15V3C15 1.895 14.105 1 13 1H3C1.895 1 1 1.895 1 3V10C1 11.105 1.895 12 3 12H5V14H3.5C3.224 14 3 14.224 3 14.5C3 14.776 3.224 15 3.5 15H10V14H6V12H10V13.5C10 13.295 10.041 13.097 10.122 12.91C10.203 12.723 10.319 12.559 10.466 12.421C10.565 12.317 10.725 12.204 10.905 12.125C10.936 12.111 10.968 12.106 11 12.095V12Z"/></symbol>
+  <symbol id="i-x" viewBox="0 0 16 16"><path d="M3.65 3.65a.5.5 0 0 1 .7 0L8 7.29l3.65-3.64a.5.5 0 0 1 .7.7L8.71 8l3.64 3.65a.5.5 0 0 1-.7.7L8 8.71l-3.65 3.64a.5.5 0 0 1-.7-.7L7.29 8 3.65 4.35a.5.5 0 0 1 0-.7z"/></symbol>
   <symbol id="i-github" viewBox="0 0 24 25"><path d="M12 0.567749C9.62663 0.567749 7.30656 1.27154 5.33316 2.59011C3.35977 3.90869 1.8217 5.78284 0.913451 7.97555C0.00519944 10.1683 -0.232441 12.5811 0.230582 14.9088C0.693605 17.2366 1.83649 19.3748 3.51473 21.053C5.19296 22.7313 7.33115 23.8742 9.65893 24.3372C11.9867 24.8002 14.3995 24.5626 16.5922 23.6543C18.7849 22.7461 20.6591 21.208 21.9776 19.2346C23.2962 17.2612 24 14.9411 24 12.5678C24 9.38516 22.7357 6.33291 20.4853 4.08247C18.2349 1.83203 15.1826 0.567749 12 0.567749ZM15.1629 22.3512H15.0703C15.0004 22.355 14.9304 22.3445 14.8646 22.3204C14.7989 22.2962 14.7388 22.2588 14.688 22.2106C14.6411 22.161 14.6044 22.1026 14.5803 22.0388C14.5562 21.9749 14.545 21.9069 14.5474 21.8386V20.4329C14.5543 19.9655 14.5577 19.4935 14.5577 19.0169C14.5562 18.6686 14.5055 18.3223 14.4069 17.9883C14.3135 17.6511 14.1256 17.3477 13.8652 17.114C14.5623 17.0467 15.2475 16.8882 15.9034 16.6426C16.4565 16.4323 16.9568 16.1035 17.3692 15.6792C17.7759 15.2516 18.0786 14.7359 18.2537 14.1723C18.4668 13.4832 18.5681 12.7644 18.5537 12.0432C18.5574 11.5394 18.4691 11.0392 18.2932 10.5672C18.1149 10.0915 17.8452 9.6553 17.4994 9.28318C17.5737 9.09515 17.6277 8.89977 17.6606 8.70032C17.6942 8.50094 17.7108 8.29908 17.7103 8.0969C17.7106 7.8366 17.6807 7.57715 17.6212 7.32375C17.5666 7.06431 17.4927 6.80931 17.4 6.56089C17.3646 6.54686 17.3267 6.53987 17.2886 6.54032H17.1789C16.9499 6.54299 16.7228 6.58056 16.5052 6.65175C16.2649 6.72144 16.0299 6.80852 15.8023 6.91232C15.5754 7.01389 15.3544 7.12836 15.1406 7.25518C14.9263 7.38204 14.736 7.50375 14.568 7.6169C12.8858 7.14804 11.1074 7.14804 9.42515 7.6169C9.25372 7.50375 9.06687 7.38204 8.85258 7.25518C8.63597 7.12696 8.41153 7.01245 8.18058 6.91232C7.95337 6.80605 7.7177 6.71889 7.47601 6.65175C7.26242 6.58104 7.03926 6.54346 6.81429 6.54032H6.70458C6.66702 6.54 6.62976 6.54699 6.59486 6.56089C6.50045 6.80962 6.42313 7.0645 6.36344 7.32375C6.31009 7.57802 6.28309 7.8371 6.28287 8.0969C6.28296 8.29913 6.30016 8.50099 6.33429 8.70032C6.36662 8.89971 6.42007 9.0951 6.49372 9.28318C6.14842 9.65537 5.87936 10.0916 5.70172 10.5672C5.52524 11.0391 5.43635 11.5393 5.43944 12.0432C5.42538 12.7604 5.52371 13.4753 5.73086 14.162C5.91225 14.7259 6.21408 15.2436 6.61544 15.6792C7.03026 16.1005 7.52986 16.4289 8.08115 16.6426C8.73413 16.8929 9.41811 17.0532 10.1143 17.1192C9.91979 17.2951 9.76544 17.5109 9.66172 17.7518C9.56305 17.9901 9.49564 18.2401 9.46115 18.4958C9.09453 18.6717 8.69349 18.7642 8.28687 18.7666C7.90903 18.7811 7.53632 18.6755 7.22229 18.4649C6.92064 18.2418 6.66507 17.9624 6.46972 17.642C6.38262 17.5073 6.28519 17.3794 6.17829 17.2598C6.06536 17.134 5.94081 17.0192 5.80629 16.9169C5.67374 16.8178 5.52843 16.7371 5.37429 16.6769C5.22244 16.6103 5.05841 16.5758 4.89258 16.5758C4.85241 16.5768 4.81234 16.5802 4.77258 16.586C4.71822 16.5861 4.66408 16.593 4.61144 16.6066C4.56482 16.6188 4.52071 16.6391 4.48115 16.6666C4.46333 16.6765 4.44842 16.6909 4.43789 16.7083C4.42736 16.7258 4.42159 16.7457 4.42115 16.766C4.42551 16.8142 4.44036 16.8607 4.46465 16.9025C4.48893 16.9442 4.52207 16.9802 4.56172 17.0078C4.65429 17.082 4.73144 17.1392 4.79315 17.1792L4.82229 17.1998C4.95641 17.3027 5.08408 17.4137 5.20458 17.5323C5.31733 17.6303 5.41804 17.7414 5.50458 17.8632C5.5951 17.9814 5.67269 18.109 5.73601 18.2438C5.80915 18.3775 5.88629 18.5318 5.96744 18.7066C6.15489 19.1802 6.48887 19.5815 6.92058 19.8518C7.37379 20.0949 7.88243 20.216 8.39658 20.2032C8.57132 20.2032 8.74591 20.1929 8.91944 20.1723C9.09087 20.1449 9.26229 20.1158 9.43372 20.0815V21.8249C9.43682 21.8954 9.42498 21.9657 9.39898 22.0313C9.37298 22.0969 9.33341 22.1563 9.28287 22.2055C9.23208 22.2537 9.17197 22.291 9.10623 22.3152C9.0405 22.3394 8.97052 22.3499 8.90058 22.346H8.83887C6.50699 21.5927 4.52068 20.0316 3.23764 17.9437C1.95459 15.8559 1.45912 13.3786 1.84043 10.9579C2.22175 8.53721 3.4548 6.33219 5.31754 4.7399C7.18028 3.14761 9.55032 2.27269 12.0009 2.27269C14.4514 2.27269 16.8215 3.14761 18.6842 4.7399C20.5469 6.33219 21.78 8.53721 22.1613 10.9579C22.5426 13.3786 22.0471 15.8559 20.7641 17.9437C19.4811 20.0316 17.4948 21.5927 15.1629 22.346V22.3512Z"/></symbol>
 </svg>
 
+<div class="stage" aria-hidden="true"><i></i><i></i><i></i><i></i></div>
+
 <div class="band">
   <div class="wrap top">
-    <a class="brand" href="./"><img src="icon.png" alt="" width="36" height="36">Quire Writer<small>Typst · LaTeX · Quarto · Markdown</small></a>
+    <a class="brand" href="./"><img src="icon.png" alt="" width="32" height="32">Quire Writer<small>Typst · LaTeX · Quarto · Markdown</small></a>
     <nav aria-label="Main">
       <a href="#ask">Features</a>
       <a href="#privacy">Privacy</a>
@@ -47,16 +51,17 @@ FINISH: unreviewed and undocumented is unfinished; this build ends with the fini
 
 <main>
   <header class="wrap hero">
-    <h1>Your agent writes. <span>Nothing lands without your say.</span></h1>
-    <div>
-      <p class="lede">Quire Writer is a free, open-source writing app for Typst, LaTeX, Quarto and Markdown. Ask the AI agent you already use to draft, fix or rewrite your text. Every change waits for your review.</p>
-      <div class="actions">
-        <a class="btn" href="https://github.com/Andesprit/quire-writer/releases/latest"><svg class="i"><use href="#i-download"/></svg>Download for Mac</a>
-        <a class="btn ghost" href="https://github.com/Andesprit/quire-writer"><svg class="i" style="width:18px;height:18px"><use href="#i-github"/></svg>Source on GitHub</a>
-      </div>
-      <p class="fine">For Macs with Apple Silicon. Linux builds are experimental.</p>
+    <h1><span class="rise">Your agent writes.</span> <span class="rise"><em>Nothing lands without your say.</em></span></h1>
+    <p class="lede rise">Quire Writer is a free, open-source writing app for Typst, LaTeX, Quarto and Markdown. Ask the AI agent you already use to draft, fix or rewrite your text. Every change waits for your review.</p>
+    <ul class="formats rise" aria-label="Kinds of document">
+      <li style="--c:var(--blue)">Typst</li><li style="--c:var(--green)">LaTeX</li><li style="--c:var(--pink)">Quarto</li><li style="--c:var(--orange)">Markdown</li>
+    </ul>
+    <div class="actions rise">
+      <a class="btn" href="https://github.com/Andesprit/quire-writer/releases/latest"><svg class="i"><use href="#i-download"/></svg>Download for Mac</a>
+      <a class="btn ghost" href="https://github.com/Andesprit/quire-writer"><svg class="i"><use href="#i-github"/></svg>Source on GitHub</a>
     </div>
-    <figure class="film">
+    <p class="fine rise">Free and open source. For Macs with Apple Silicon; Linux builds are experimental.</p>
+    <figure class="film rise">
       <div class="film-frame">
         <video id="film" controls playsinline preload="none" poster="demo.webp" width="1280" height="720">
           <source src="demo.mp4" type="video/mp4">
@@ -69,10 +74,11 @@ FINISH: unreviewed and undocumented is unfinished; this build ends with the fini
   </header>
 
   <div class="wrap" id="demo">
-    <p class="try"><svg class="i"><use href="#i-arrow"/></svg>Try it: accept or reject the agent's edits, and switch the file to see LaTeX, Quarto or Markdown.</p>
+    <h2>Try it. <em>Review the agent's edits.</em></h2>
+    <p class="sub">The agent fixed three verbs. Accept or reject each change, and only what you accept reaches the preview. Switch the file to see LaTeX, Quarto or Markdown.</p>
     <figure class="demo" aria-label="A small copy of Quire: review the agent's edits">
       <div class="d-top">
-        <div class="d-title">The Quiet Science of Bread<small id="d-series">Typst series · main.typ</small></div>
+        <div class="d-title">The Quiet Science of Bread<small id="d-series">Typst · main.typ</small></div>
         <div class="d-files" role="group" aria-label="Kind of document">
           <button type="button" data-lang="typ" aria-pressed="true">main.typ</button>
           <button type="button" data-lang="tex" aria-pressed="false">main.tex</button>
@@ -127,11 +133,11 @@ FINISH: unreviewed and undocumented is unfinished; this build ends with the fini
 
   <section id="ask">
     <div class="wrap">
-      <h2>Ask the way that fits the moment</h2>
+      <h2>Ask the way <em>that fits the moment.</em></h2>
       <p class="sub">Three ways to ask, and all three end the same way: as changes you can accept, reject, or edit before you accept.</p>
       <div class="ways">
         <div class="way">
-          <div><h3>Chat</h3><div class="keys"><kbd>Chat bar</kbd></div></div>
+          <div><h3>Chat</h3></div>
           <p>Ask the agent to write or change things anywhere in your folder: a new section, a fix across chapters, a table from your notes. If a turn goes wrong, "Restore files to before this message" undoes all of it.</p>
           <div class="sample" aria-hidden="true">
             <div class="chips"><span class="chip">chapters/</span><span class="chip">refs.bib</span></div>
@@ -160,46 +166,59 @@ FINISH: unreviewed and undocumented is unfinished; this build ends with the fini
   </section>
 
   <section class="agents-sec">
-    <div class="wrap agents">
-      <div>
-        <h2>Use the agent you already have</h2>
-        <p class="sub">Quire talks to agents through the Agent Client Protocol. Pick Claude, Codex, Gemini or any other agent in the ACP registry, and switch agent or model whenever you like.</p>
-        <p class="sub">The agent runs on your Mac with your own login and your own subscription. Quire has no account and no key of its own.</p>
-      </div>
-      <ul class="names" aria-label="Some of the agents in the ACP registry">
-        <li>Amp</li><li>Auggie CLI</li><li>Claude Agent</li><li>Cline</li><li>Codex</li><li>Cursor</li><li>Devin</li><li>Factory Droid</li><li>Gemini CLI</li><li>GitHub Copilot</li><li>goose</li><li>Junie</li><li>Kimi CLI</li><li>Mistral Vibe</li><li>OpenCode</li><li>Qwen Code</li><li class="more">and the rest of the registry</li>
-      </ul>
+    <div class="wrap center">
+      <h2>Use the agent <em>you already have.</em></h2>
+      <p class="sub">Quire talks to agents through the Agent Client Protocol. Pick Claude, Codex, Gemini or any other agent in the ACP registry, and switch agent or model whenever you like.</p>
+      <p class="sub">The agent runs on your Mac with your own login and your own subscription. Quire has no account and no key of its own.</p>
+    </div>
+    <ul class="sr" id="agent-names" aria-label="The agents in the ACP registry"><li>Agoragentic</li><li>Amp</li><li>Google Antigravity</li><li>Auggie CLI</li><li>Autohand Code</li><li>Claude Agent</li><li>Cline</li><li>Codebuddy Code</li><li>Codex</li><li>Cortex Code</li><li>Corust Agent</li><li>crow-cli</li><li>Cursor</li><li>DeepAgents</li><li>Devin</li><li>DimCode</li><li>Dirac</li><li>Factory Droid</li><li>fast-agent</li><li>Gemini CLI</li><li>GitHub Copilot</li><li>GLM Agent</li><li>goose</li><li>Grok Build</li><li>Harn</li><li>Junie</li><li>Kilo</li><li>Kimchi</li><li>Kimi CLI</li><li>MiniMax Code</li><li>Minion Code</li><li>Mistral Vibe</li><li>Nova</li><li>OpenCode</li><li>pi ACP</li><li>Poolside</li><li>Qoder CLI</li><li>Qwen Code</li><li>siGit Code</li><li>Stakpak</li><li>VT Code</li></ul>
+    <div class="names" aria-hidden="true"></div>
+    <div class="wrap agents-note">
+      <span class="pill"><svg class="i"><use href="#i-check"/></svg>Your own login</span>
+      <span class="pill"><svg class="i"><use href="#i-check"/></svg>Your own plan</span>
+      <span class="pill"><svg class="i"><use href="#i-check"/></svg>Switch any time</span>
     </div>
   </section>
 
   <section class="kinds-sec">
     <div class="wrap">
-      <h2>See the page while you write</h2>
+      <h2>See the page <em>while you write.</em></h2>
       <p class="sub">A live preview sits next to the editor, made by the tool each kind of document already uses.</p>
       <table class="kinds">
-        <tr style="--c:#23439b"><th scope="row">Typst</th><td>The preview comes from tinymist. Click text in the preview to jump to it in the editor; the preview follows the caret.</td><td>Ships inside the app. Nothing to install.</td></tr>
-        <tr style="--c:#2d6a3e"><th scope="row">LaTeX</th><td>The PDF, compiled on every save. Chapters with <code>% !TEX root = main.tex</code> show the main file.</td><td>Uses your own TeX: latexmk from MacTeX or TeX Live, or Tectonic.</td></tr>
-        <tr style="--c:#a62b63"><th scope="row">Quarto</th><td><code>quarto preview</code>, which renders again on every save.</td><td>Uses your own Quarto.</td></tr>
-        <tr style="--c:#b5461a"><th scope="row">Markdown</th><td>Drawn as you type, with math.</td><td>Nothing to install.</td></tr>
+        <tr style="--c:var(--blue)"><th scope="row">Typst</th><td>The preview comes from tinymist. Click text in the preview to jump to it in the editor; the preview follows the caret.</td><td>Ships inside the app. Nothing to install.</td></tr>
+        <tr style="--c:var(--green)"><th scope="row">LaTeX</th><td>The PDF, compiled on every save. Chapters with <code>% !TEX root = main.tex</code> show the main file.</td><td>Uses your own TeX: latexmk from MacTeX or TeX Live, or Tectonic.</td></tr>
+        <tr style="--c:var(--pink)"><th scope="row">Quarto</th><td><code>quarto preview</code>, which renders again on every save.</td><td>Uses your own Quarto.</td></tr>
+        <tr style="--c:var(--orange)"><th scope="row">Markdown</th><td>Drawn as you type, with math.</td><td>Nothing to install.</td></tr>
       </table>
-      <p class="export">Export the whole document as PDF or Word, or as OpenDocument, web page, e-book, Markdown, LaTeX or Typst. Citations become formatted references, and build files stay out of your project.</p>
+      <p class="export">Export the whole document as PDF or Word, or as OpenDocument, web page, e&#8209;book, Markdown, LaTeX or Typst. Citations become formatted references, and build files stay out of your project.</p>
     </div>
   </section>
 
   <section class="themes">
-    <div class="wrap">
-      <h2>One layout, six looks</h2>
-      <p class="sub">VS Code Dark Modern and Light Modern, and Quire's own Series, Galley, Coupon and Slate. A theme changes the look; every panel stays where your hands expect it.</p>
-      <figure>
-        <img src="themes.webp" width="2000" height="1250" loading="lazy" alt="The same Quire window in four themes: Series with blue bands, Galley like a printer's proof, Coupon in navy with ticket-style labels, and Slate like a chalkboard.">
-        <figcaption>Series, Galley, Coupon and Slate, with the same document and the same change waiting for review.</figcaption>
-      </figure>
+    <div class="wrap center">
+      <h2>One layout. <em>Make it yours.</em></h2>
+      <p class="sub">Quire has a theme system with several looks built in, from VS Code's Dark Modern and Light Modern to its own book covers, printer's proof and chalkboard. A theme changes the look; every panel stays where your hands expect it.</p>
+      <div class="switch" role="group" aria-label="Show a theme">
+        <button type="button" aria-pressed="true" data-shot="0">Dark Modern</button>
+        <button type="button" aria-pressed="false" data-shot="1">Series</button>
+        <button type="button" aria-pressed="false" data-shot="2">Galley</button>
+        <button type="button" aria-pressed="false" data-shot="3">Coupon</button>
+        <button type="button" aria-pressed="false" data-shot="4">Slate</button>
+      </div>
+      <div class="shots">
+        <img class="on wide" src="theme-dark.webp" width="2000" height="1168" alt="Quire in Dark Modern: the editor with the document, and its preview beside it." data-note="&lt;b&gt;Dark Modern&lt;/b&gt;, VS Code's own dark theme.">
+        <img src="theme-series.webp" width="1000" height="624" loading="lazy" alt="Quire in Series: white pages and blue bands, like a book cover." data-note="&lt;b&gt;Series&lt;/b&gt;: book covers, one colour for each kind of file.">
+        <img src="theme-galley.webp" width="1000" height="624" loading="lazy" alt="Quire in Galley: a printer's proof, with the agent's change in red ink." data-note="&lt;b&gt;Galley&lt;/b&gt;: a printer's proof, with the agent's changes in red ink.">
+        <img src="theme-coupon.webp" width="1000" height="624" loading="lazy" alt="Quire in Coupon: navy panels with ticket-style labels." data-note="&lt;b&gt;Coupon&lt;/b&gt;: a ticket wallet.">
+        <img src="theme-slate.webp" width="1000" height="624" loading="lazy" alt="Quire in Slate: chalk on a green blackboard." data-note="&lt;b&gt;Slate&lt;/b&gt;: chalk on a blackboard.">
+      </div>
+      <p class="shot-note" aria-live="polite"><b>Dark Modern</b>, VS Code's own dark theme.</p>
     </div>
   </section>
 
   <section class="desk-sec">
     <div class="wrap">
-      <h2>Made for long documents</h2>
+      <h2>Made for <em>long documents.</em></h2>
       <div class="desk">
         <div><h3>Grammarly and spellcheck work</h3><p>The editor is a plain text field, so the macOS spellchecker and the Grammarly for Mac app work in it.</p></div>
         <div><h3>Labels</h3><p>Every label in the project, how often it is used, and which ones nothing refers to. Click one to go to it.</p></div>
@@ -211,10 +230,29 @@ FINISH: unreviewed and undocumented is unfinished; this build ends with the fini
     </div>
   </section>
 
+  <section class="compare-sec">
+    <div class="wrap">
+      <h2>Built for documents. <em>Not for code.</em></h2>
+      <p class="sub">Why not just use VS Code, Cursor or Claude Code? They are great tools, and they are built for code. Here is what each one does out of the box.</p>
+      <table class="compare">
+        <thead><tr><td></td><th scope="col" class="q"><img src="icon.png" alt="" width="26" height="26">Quire</th><th scope="col">VS Code</th><th scope="col">Cursor</th><th scope="col">Claude Code<small>in a terminal</small></th></tr></thead>
+        <tbody>
+          <tr><th scope="row">Made for writing, not for code</th><td class="q"><span class="c-yes"><svg class="i"><use href="#i-check"/></svg><span class="sr">Yes</span></span></td><td><span class="c-no"><svg class="i"><use href="#i-x"/></svg><span class="sr">No</span></span></td><td><span class="c-no"><svg class="i"><use href="#i-x"/></svg><span class="sr">No</span></span></td><td><span class="c-no"><svg class="i"><use href="#i-x"/></svg><span class="sr">No</span></span></td></tr>
+          <tr><th scope="row">Typst, LaTeX and Quarto preview, no setup</th><td class="q"><span class="c-yes"><svg class="i"><use href="#i-check"/></svg><span class="sr">Yes</span></span></td><td><span class="part">extensions</span></td><td><span class="part">extensions</span></td><td><span class="c-no"><svg class="i"><use href="#i-x"/></svg><span class="sr">No</span></span></td></tr>
+          <tr><th scope="row">Grammarly and macOS spellcheck</th><td class="q"><span class="c-yes"><svg class="i"><use href="#i-check"/></svg><span class="sr">Yes</span></span></td><td><span class="c-no"><svg class="i"><use href="#i-x"/></svg><span class="sr">No</span></span></td><td><span class="c-no"><svg class="i"><use href="#i-x"/></svg><span class="sr">No</span></span></td><td><span class="c-no"><svg class="i"><use href="#i-x"/></svg><span class="sr">No</span></span></td></tr>
+          <tr><th scope="row">AI edits as tracked changes in your prose</th><td class="q"><span class="c-yes"><svg class="i"><use href="#i-check"/></svg><span class="sr">Yes</span></span></td><td><span class="part">code diffs</span></td><td><span class="part">code diffs</span></td><td><span class="part">terminal diffs</span></td></tr>
+          <tr><th scope="row">Cite by DOI, export to Word and e-book</th><td class="q"><span class="c-yes"><svg class="i"><use href="#i-check"/></svg><span class="sr">Yes</span></span></td><td><span class="part">extensions</span></td><td><span class="part">extensions</span></td><td><span class="c-no"><svg class="i"><use href="#i-x"/></svg><span class="sr">No</span></span></td></tr>
+        </tbody>
+      </table>
+      <p class="keep">Already use Claude Code? Keep it. Quire runs the same Claude agent with your login, <span>and adds the page, the preview and the review.</span></p>
+      <p class="footnote">What each tool does out of the box, without extensions. October 2026.</p>
+    </div>
+  </section>
+
   <section class="privacy" id="privacy">
     <div class="wrap cols">
       <div>
-        <h2>No account. No telemetry. No server of its own.</h2>
+        <h2><span>No account.</span> <span>No telemetry.</span> <span><em>No server of its own.</em></span></h2>
         <p class="sub">Your files stay on your Mac. Quire goes online only for these, and nothing else.</p>
       </div>
       <div>
@@ -231,7 +269,7 @@ FINISH: unreviewed and undocumented is unfinished; this build ends with the fini
 
   <section id="install">
     <div class="wrap">
-      <h2>Get Quire</h2>
+      <h2>Get <em>Quire.</em></h2>
       <div class="get">
         <div>
           <h3>Mac</h3>
@@ -316,7 +354,7 @@ function render() {
   $("pv").innerHTML = `In the oven, the water inside the loaf ${word(0)} to steam and the crust ${word(1)} through the Maillard reaction. <b>Timing ${word(2)} more than temperature</b>, and <i>patience</i> is the most important ingredient of all.`;
 
   $("d-file").textContent = $("d-tool").textContent = L.file;
-  $("d-series").textContent = `${L.kind} series · ${L.file}`;
+  $("d-series").textContent = `${L.kind} · ${L.file}`;
   $("sb-kind").textContent = L.kind;
   $("sb-count").textContent = left.length ? `${left.indexOf(cur) + 1} of ${left.length}` : "No changes";
   $("plan-wait").classList.toggle("done", !left.length);
@@ -369,6 +407,26 @@ const film = $("film"), play = document.querySelector(".film-play");
 film.controls = false;
 play.hidden = false;
 play.addEventListener("click", () => { play.remove(); film.controls = true; film.play(); film.focus(); });
+
+// Themes: one screenshot at a time, the one whose button is pressed.
+const shots = [...document.querySelectorAll(".shots img")], note = document.querySelector(".shot-note");
+document.querySelector(".switch").addEventListener("click", (e) => {
+  const b = e.target.closest("button");
+  if (!b) return;
+  document.querySelectorAll(".switch button").forEach((x) => x.setAttribute("aria-pressed", x === b));
+  shots.forEach((img, i) => img.classList.toggle("on", i === +b.dataset.shot));
+  note.innerHTML = shots[+b.dataset.shot].dataset.note;
+});
+
+// The registry streams past in three rows, drawn from the list that screen readers get.
+const NAMES = [...document.querySelectorAll("#agent-names li")].map((li) => li.textContent);
+const HUES = ["var(--blue)", "var(--green)", "var(--pink)", "var(--orange)", "#a78bfa", "#22d3ee"];
+const KNOWN = new Set(["Claude Agent", "Codex", "Gemini CLI", "GitHub Copilot", "Cursor", "goose", "OpenCode"]);
+const pill = (n) => `<span class="agent${KNOWN.has(n) ? " hi" : ""}" data-l="${n[0].toUpperCase()}" style="--c:${HUES[[...n].reduce((a, c) => a + c.charCodeAt(0), 0) % HUES.length]}">${n}</span>`;
+document.querySelector(".names").innerHTML = [0, 1, 2].map((r) => {
+  const row = NAMES.filter((_, i) => i % 3 === r);
+  return `<div class="row">${[...row, ...row].map(pill).join("")}</div>`;
+}).join("");
 </script>
 </body>
 </html>

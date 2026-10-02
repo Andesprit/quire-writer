@@ -5,28 +5,30 @@
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>Troubleshooting: Quire Writer</title>
 <meta name="description" content="What to do when the agent in Quire Writer does not start, or a preview or export says a tool is missing: the messages you may see and how to fix each one.">
-<meta name="theme-color" content="#23439b">
+<meta name="theme-color" content="#060709">
 <link rel="icon" href="icon.png">
 <link rel="stylesheet" href="style.css">
 <style>
-.help { padding-top: 56px; padding-bottom: 96px; }
-.help h1 { font-size: clamp(38px, 4.8vw, 64px); line-height: 1.02; letter-spacing: -0.02em; }
-.issues { margin-top: 44px; max-width: 52em; border-bottom: 1px solid var(--ink); }
-.issue { padding: 28px 0; border-top: 1px solid var(--ink); scroll-margin-top: 16px; }
-.issue h2 { font-size: 24px; line-height: 1.25; letter-spacing: -0.01em; }
-.issue p, .issue ul { margin: 12px 0 0; }
+.help { padding-top: clamp(56px, 8vw, 104px); padding-bottom: 120px; }
+.help h1 { font-size: clamp(44px, 6.4vw, 84px); line-height: 1; letter-spacing: -0.045em; font-weight: 700; }
+.issues { margin-top: 56px; max-width: 52em; border-bottom: 1px solid var(--line); }
+.issue { padding: 32px 0; border-top: 1px solid var(--line); scroll-margin-top: 84px; }
+.issue h2 { font-size: 25px; line-height: 1.25; letter-spacing: -0.025em; }
+.issue p, .issue ul { margin: 12px 0 0; color: var(--muted); max-width: 40em; }
+.issue b { color: var(--text); font-weight: 600; }
 .issue ul { padding-left: 20px; }
 .issue li + li { margin-top: 10px; }
-.said { font: 15px/1.5 var(--ui); color: var(--muted); }
-.issue code { overflow-wrap: anywhere; }
-.said code { color: var(--series-deep); }
+.said { font-size: 15.5px; color: var(--faint); }
+.issue code { overflow-wrap: anywhere; color: var(--text); }
+.said code { color: #f2b8b8; }
 </style>
 </head>
 <body>
+<div class="stage" aria-hidden="true"><i></i><i></i><i></i><i></i></div>
 
 <div class="band">
   <div class="wrap top">
-    <a class="brand" href="./"><img src="icon.png" alt="" width="36" height="36">Quire Writer<small>Typst · LaTeX · Quarto · Markdown</small></a>
+    <a class="brand" href="./"><img src="icon.png" alt="" width="32" height="32">Quire Writer<small>Typst · LaTeX · Quarto · Markdown</small></a>
     <nav aria-label="Main">
       <a href="./#ask">Features</a>
       <a href="./#install">Install</a>
@@ -36,7 +38,7 @@
 </div>
 
 <main class="wrap help">
-  <h1>Troubleshooting</h1>
+  <h1>Troubleshooting<em>, step by step.</em></h1>
   <p class="sub">Most problems come from a tool that Quire uses and that is missing or too old. Start with Check Setup in the app. Then find the message you see below.</p>
 
   <div class="issues">
