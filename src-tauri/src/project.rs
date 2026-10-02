@@ -1149,7 +1149,6 @@ async fn export(rel: &str, to: &str) -> Result<Option<PathBuf>, String> {
     send(json!({"type": "exporting", "name": dest.file_name().map(|n| n.to_string_lossy())}));
     // One folder per document, outside the project. LaTeX reuses its build files there.
     let tmp = std::env::temp_dir().join(format!("quire-export-{:x}", hash(&file)));
-    fs::create_dir_all(&tmp).map_err(err)?;
     let made = tmp.join(format!("{}.{to}", file.file_stem().unwrap().to_string_lossy()));
     let _ = fs::remove_file(&made); // never hand over an older export
     convert(&file, &root, to, bib, &tmp).await?;
@@ -1171,6 +1170,7 @@ async fn export(rel: &str, to: &str) -> Result<Option<PathBuf>, String> {
 /// for Typst PDF and web page, the writer's TeX for LaTeX PDF, Quarto for Quarto and Markdown,
 /// Pandoc for the rest.
 async fn convert(file: &Path, root: &Path, to: &str, bib: Option<PathBuf>, tmp: &Path) -> Result<(), String> {
+    fs::create_dir_all(tmp).map_err(err)?; // a document's first build
     let (_, writer, quarto_format) = FORMATS.iter().copied().find(|f| f.0 == to).unwrap();
     let lang = lang_of(&file.to_string_lossy());
     let name = file.file_name().unwrap();
@@ -1792,6 +1792,19 @@ mod tests {
         fs::write(dir.join("main.typ"), "mine").unwrap();
         assert!(write_template(d, TEMPLATES[0]).is_err());
         assert_eq!(fs::read_to_string(dir.join("main.typ")).unwrap(), "mine");
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[tokio::test]
+    async fn convert_into_a_new_folder() {
+        // A document never built before: its build folder does not exist yet.
+        let dir = std::env::temp_dir().join(format!("quire-convert-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&dir);
+        fs::create_dir_all(&dir).unwrap();
+        fs::write(dir.join("main.typ"), "= Hello").unwrap();
+        let out = dir.join("never-made");
+        convert(&dir.join("main.typ"), &dir, "html", None, &out).await.unwrap();
+        assert!(fs::read_to_string(out.join("main.html")).unwrap().contains("Hello"));
         let _ = fs::remove_dir_all(&dir);
     }
 
