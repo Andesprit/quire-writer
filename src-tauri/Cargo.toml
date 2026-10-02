@@ -1,7 +1,7 @@
 [package]
 name = "quire"
 # The app's version (tauri.conf.json has none). A release is the git tag v<version>.
-version = "0.2.3"
+version = "0.2.4"
 edition = "2021"
 license = "GPL-3.0-or-later"
 
