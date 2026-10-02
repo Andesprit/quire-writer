@@ -14,7 +14,9 @@ use std::sync::{Mutex, MutexGuard};
 use serde_json::Value;
 #[cfg(target_os = "macos")]
 use tauri::menu::{Menu, MenuItem, MenuItemKind};
-use tauri::{Manager, RunEvent, WebviewUrl, WebviewWindowBuilder};
+use tauri::webview::WebviewBuilder;
+use tauri::window::WindowBuilder;
+use tauri::{LogicalPosition, LogicalSize, Manager, Rect, RunEvent, WebviewUrl};
 use tokio::signal::unix::{signal, SignalKind};
 
 /// A lock whose holder panicked still holds good data here: use it rather than fail every
@@ -37,8 +39,29 @@ const PREVIEW_SCROLLBARS: &str = r#"if (window !== top) document.documentElement
 fn message(app: tauri::AppHandle, msg: Value) {
     match msg["type"].as_str() {
         Some("restart") => app.request_restart(), // to open an installed update; the page saved first
+        Some("preview_frame") => place_preview(&app, &msg),
         _ => project::receive(msg),
     }
+}
+
+/// The preview is a web view of its own, with its own process: a long document drawing there
+/// never holds up typing in the page. The page says where its preview panel is and how tall
+/// the page shows, in window points, and its zoom; no "w" hides it (no preview, or a dialog or
+/// menu over the panel).
+fn place_preview(app: &tauri::AppHandle, msg: &Value) {
+    let (Some(view), Some(page)) = (app.get_webview("preview"), app.get_webview("main")) else { return };
+    let n = |k: &str| msg[k].as_f64();
+    // The page's web view fills the window, title bar included, and WebKit starts the page
+    // below the title bar: what the page does not show is the title bar's height.
+    let full = page.size().map_or(0.0, |s| s.to_logical::<f64>(page.window().scale_factor().unwrap_or(1.0)).height);
+    let top = n("shown").map_or(0.0, |shown| (full - shown).max(0.0));
+    let _ = match (n("x"), n("y"), n("w"), n("h"), n("zoom")) {
+        (Some(x), Some(y), Some(w), Some(h), Some(zoom)) => view
+            .set_zoom(zoom)
+            .and_then(|_| view.set_bounds(Rect { position: LogicalPosition::new(x, top + y).into(), size: LogicalSize::new(w, h).into() }))
+            .and_then(|_| view.show()),
+        _ => view.hide(),
+    };
 }
 
 fn main() {
@@ -92,11 +115,12 @@ fn main() {
             });
 
             let name = app.package_info().name.clone(); // productName in tauri.conf.json
-            WebviewWindowBuilder::new(app, "main", WebviewUrl::App("index.html".into()))
-                .title(&name)
-                .inner_size(1400.0, 900.0)
-                .initialization_script_for_all_frames(PREVIEW_SCROLLBARS)
-                .build()?;
+            let window = WindowBuilder::new(app, "main").title(&name).inner_size(1400.0, 900.0).build()?;
+            let size = window.inner_size()?.to_logical::<f64>(window.scale_factor()?);
+            window.add_child(WebviewBuilder::new("main", WebviewUrl::App("index.html".into())).auto_resize(), LogicalPosition::new(0.0, 0.0), size)?;
+            // The preview's own web view, on top of the page; hidden until the page places it.
+            let preview = WebviewBuilder::new("preview", WebviewUrl::App("preview.html".into())).initialization_script_for_all_frames(PREVIEW_SCROLLBARS);
+            window.add_child(preview, LogicalPosition::new(0.0, 0.0), LogicalSize::new(0.0, 0.0))?.hide()?;
 
             // The built-in Quit ends the app without asking the page about unsaved changes.
             // This one closes the window, which asks first. Linux gets no menu bar: closing the
@@ -117,7 +141,7 @@ fn main() {
         })
         .on_menu_event(|app, e| match e.id().as_ref() {
             "quit" => {
-                if let Some(w) = app.get_webview_window("main") {
+                if let Some(w) = app.get_window("main") {
                     let _ = w.close();
                 }
             }

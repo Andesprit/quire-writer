@@ -171,7 +171,6 @@ button { cursor: pointer; }
 }
 .sash:hover::before, .sash.dragging::before { background: var(--focus); }
 body.resizing { cursor: ew-resize; user-select: none; }
-body.resizing iframe { pointer-events: none; }
 
 /* ---------- title bar ---------- */
 
@@ -605,9 +604,9 @@ kbd {
 
 /* ---------- preview ---------- */
 
-#preview { flex: 1; width: 100%; border: 0; background: var(--preview-bg); }
-#preview:not([src]) { display: none; }
-#preview[src] + #preview-empty { display: none; }
+#preview { flex: 1; width: 100%; background: var(--preview-bg); }
+#preview:not([data-url]) { display: none; }
+#preview[data-url] + #preview-empty { display: none; }
 
 /* ---------- chat (Cursor-style composer) ---------- */
 
@@ -893,13 +892,13 @@ details.thought div { white-space: pre-wrap; margin-top: 4px; padding-left: 18px
 
 #toasts {
   position: fixed;
-  right: 12px;
+  right: var(--toasts-right, 12px); /* left of the preview's own web view, which would cover them */
   bottom: 34px;
   z-index: 40;
   display: flex;
   flex-direction: column;
   gap: 8px;
-  width: min(450px, calc(100vw - 24px));
+  width: min(450px, calc(100vw - var(--toasts-right, 12px) - 12px));
 }
 .toast {
   display: flex;

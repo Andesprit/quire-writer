@@ -1106,6 +1106,10 @@ async fn follow(mut incoming: impl Stream<Item = Result<tungstenite::Message, tu
         if let Some(rel) = w.root.as_ref().and_then(|root| p.strip_prefix(root).ok()) {
             // Not text inside a package.
             send(json!({"type": "jump", "path": rel.to_string_lossy(), "line": msg["start"][0], "col": msg["start"][1]}));
+            // The click went to the preview's own web view: the keys go back to the editor.
+            if let Some(page) = APP.get().and_then(|app| app.get_webview("main")) {
+                let _ = page.set_focus();
+            }
         }
     }
 }

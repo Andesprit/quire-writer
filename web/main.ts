@@ -970,7 +970,7 @@ function resetForFolder(newRoot: string) {
   closeFile()
   previewing = null
   previewKind = ""
-  $("preview").removeAttribute("src")
+  showPreview("")
   selected = null
   naming = null
   collapsed.clear()
@@ -1493,11 +1493,52 @@ for (const b of document.querySelectorAll<HTMLElement>("[data-as]")) {
 // The document in the format the preview shows, made again by the export.
 $("export-preview").onclick = () => exportAs(previewAs(langOf(previewing ?? current ?? "")))
 renderPreviewAs()
-function toPreview(msg: object) {
-  const frame = $<HTMLIFrameElement>("preview")
-  const url = frame.src && new URL(frame.src) // quire://localhost has no URL.origin, so build it
-  if (url) frame.contentWindow?.postMessage(msg, `${url.protocol}//${url.host}`)
+// ---------- the preview's own web view (preview.ts): a long document drawing there never holds up typing here ----------
+
+const toPreview = (msg: object) => tauri.event.emit("to-preview", msg)
+let previewUrl = ""
+function showPreview(url: string) {
+  if (url === previewUrl) return
+  previewUrl = url
+  if (url) $("preview").dataset.url = url
+  else delete $("preview").dataset.url
+  toPreview({ src: url })
 }
+// The web view sits over #preview. A native view covers whatever the page floats over it, so
+// it steps aside while a dialog or menu would sit under it, and notices go to its left.
+const floating = ["ask", "new-project-ask", "setup", "ac-menu", "inline-box", "ctx-menu", "toasts", "sidebar", "chat"].map((id) => $(id))
+let placing = 0
+let placed = "" // the place last sent
+let bgSent = "" // the theme's preview background last sent: the web view shows it while a preview loads
+function placePreview() {
+  cancelAnimationFrame(placing)
+  placing = requestAnimationFrame(() => {
+    const el = $("preview")
+    const r = el.getBoundingClientRect()
+    const right = r.width && r.left > 240 ? `${innerWidth - r.left + 12}px` : ""
+    if ($("toasts").style.getPropertyValue("--toasts-right") !== right) $("toasts").style.setProperty("--toasts-right", right)
+    const over = (o: DOMRect) => o.left < r.right - 1 && o.right > r.left + 1 && o.top < r.bottom - 1 && o.bottom > r.top + 1
+    const shown = r.width > 0 && r.height > 0 && !floating.some((f) => over(f.getBoundingClientRect()))
+    // In window points: the page's pixels are zoomed.
+    const frame = shown ? { x: r.left * zoom, y: r.top * zoom, w: r.width * zoom, h: r.height * zoom, shown: innerHeight * zoom, zoom } : {}
+    const bg = getComputedStyle(el).backgroundColor
+    if (bg !== bgSent) toPreview({ bg: (bgSent = bg) })
+    if (JSON.stringify(frame) === placed) return
+    placed = JSON.stringify(frame)
+    send({ type: "preview_frame", ...frame })
+  })
+}
+new ResizeObserver(placePreview).observe($("preview"))
+addEventListener("resize", placePreview)
+const watched = { attributes: true, attributeFilter: ["open", "hidden", "class", "style", "data-theme", "data-url"], childList: true }
+for (const el of [document.documentElement, app, $("preview"), ...floating]) new MutationObserver(placePreview).observe(el, watched)
+tauri.event.listen("from-preview", ({ payload }: { payload: string }) => {
+  if (payload === "ready") return sendMarkdown()
+  // The web view (re)started: it knows nothing yet.
+  toPreview({ src: previewUrl })
+  placed = bgSent = ""
+  placePreview()
+})
 let markdownTimer = 0
 function sendMarkdown() {
   clearTimeout(markdownTimer)
@@ -1518,10 +1559,6 @@ function sendTyped() {
     send({ type: "typed", path: current, content: ta.value })
   }, 50)
 }
-// The viewer asks for the text once it has loaded.
-window.addEventListener("message", (e) => {
-  if (e.source === $<HTMLIFrameElement>("preview").contentWindow && e.data === "ready") sendMarkdown()
-})
 
 // ---------- preview sync: a click in the preview shows that text; the preview follows the caret ----------
 
@@ -1691,8 +1728,7 @@ function onMessage(msg: any) {
       $("preview-name").textContent = `Preview ${baseName(msg.path)}`
       renderPreviewAs()
       // The Markdown and PDF viewers stay loaded (and keep their scroll) from file to file.
-      const url = new URL(msg.url).href
-      if ($<HTMLIFrameElement>("preview").src !== url) $<HTMLIFrameElement>("preview").src = url
+      showPreview(new URL(msg.url).href)
       if (previewKind === "markdown") sendMarkdown()
       typedSent = "" // a new preview knows only the disk
       sendTyped()
@@ -1742,7 +1778,7 @@ function onMessage(msg: any) {
       if (current && within(current, msg.path)) closeFile(`${baseName(msg.path)} was moved to the Trash.`)
       if (previewing && within(previewing, msg.path)) {
         previewing = null
-        $("preview").removeAttribute("src")
+        showPreview("")
       }
       if (selected && within(selected, msg.path)) selected = null
       renderTree()
