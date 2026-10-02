@@ -1,0 +1,8 @@
+node_modules/
+build/
+out/
+# These three sounds came with video-vox and their license is not known, so they stay out of
+# the repository. Copy them from video-vox/public/sfx/ to render.
+public/sfx/whoosh.mp3
+public/sfx/pop.mp3
+public/sfx/riser.mp3

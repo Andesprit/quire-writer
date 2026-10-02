@@ -1,0 +1,109 @@
+{
+  "scenes": [
+    {
+      "key": "hook", "lead": 6, "tail": 30,
+      "beats": [
+        {"id": "h1", "text": "Writing a document with AI?"},
+        {"id": "h2", "text": "Today, that means copying and pasting between a chat and your draft,"},
+        {"id": "h3", "text": "a code editor where Grammarly can't follow,"},
+        {"id": "h4", "text": "or an agent that changes files you never see."},
+        {"id": "h5", "text": "There's a better way to write.", "pause": 14}
+      ]
+    },
+    {
+      "key": "reveal", "lead": 14, "tail": 90,
+      "beats": [
+        {"id": "r1", "text": "Meet Quire."},
+        {"id": "r2", "text": "A writing app for Typst, LaTeX, Quarto and Markdown, with your AI agent built in."}
+      ]
+    },
+    {
+      "key": "preview", "lead": 16, "tail": 30,
+      "beats": [
+        {"id": "p1", "text": "Write on one side, and see the finished page on the other."},
+        {"id": "p2", "text": "It updates as you write. Click the page, and you jump to the line."}
+      ]
+    },
+    {
+      "key": "ask", "lead": 14, "tail": 30,
+      "beats": [
+        {"id": "a1", "text": "Need help? Ask the agent in plain words."},
+        {"id": "a2", "text": "Draft a section, fix the grammar, or tighten your abstract."}
+      ]
+    },
+    {
+      "key": "review", "lead": 8, "tail": 40,
+      "beats": [
+        {"id": "v1", "text": "Now, the most important part."},
+        {"id": "v2", "text": "Nothing the agent writes lands without your say."},
+        {"id": "v3", "text": "Every change waits for you. Accept it, reject it, or edit it first.", "pause": 16},
+        {"id": "v4", "text": "And if a whole turn goes wrong, undo it with one click.", "pause": 14}
+      ]
+    },
+    {
+      "key": "cmdk", "lead": 12, "tail": 36,
+      "beats": [
+        {"id": "k1", "text": "To change just one sentence, select it and press Command K."},
+        {"id": "k2", "text": "Say what you want. The agent changes only that part.", "pause": 6}
+      ]
+    },
+    {
+      "key": "autocomplete", "lead": 10, "tail": 30,
+      "beats": [
+        {"id": "c1", "text": "Pause while you type, and grey text suggests how the sentence goes on."},
+        {"id": "c2", "text": "Like it? Press Tab."}
+      ]
+    },
+    {
+      "key": "agents", "lead": 10, "tail": 30,
+      "beats": [
+        {"id": "g1", "text": "Bring the AI you already pay for."},
+        {"id": "g2", "text": "Claude, Codex, Gemini, or more than forty other agents, with your own login and your own plan."},
+        {"id": "g3", "text": "Quire has no account of its own."}
+      ]
+    },
+    {
+      "key": "spelling", "lead": 14, "tail": 36,
+      "beats": [
+        {"id": "s1", "text": "And because the editor is a real text field, Grammarly and the Mac spellchecker just work."}
+      ]
+    },
+    {
+      "key": "builtin", "lead": 8, "tail": 40,
+      "beats": [
+        {"id": "b1", "text": "Everything a document needs is built in."},
+        {"id": "b2", "text": "Cite by DOI, export to Word or PDF, find unused labels, and format in your own markup.", "say": "Cite by D-O-I, export to Word or PDF, find unused labels, and format in your own markup."}
+      ]
+    },
+    {
+      "key": "themes", "lead": 8, "tail": 30,
+      "beats": [
+        {"id": "t1", "text": "Make it yours with themes."},
+        {"id": "t2", "text": "Quire has a theme system, with several looks built in, from VS Code's dark and light to book covers and a chalkboard."}
+      ]
+    },
+    {
+      "key": "compare", "lead": 6, "tail": 60,
+      "beats": [
+        {"id": "x1", "text": "So why not just use VS Code, Cursor, or Claude Code?"},
+        {"id": "x2", "text": "They're great tools, but they're built for code.", "pause": 8},
+        {"id": "x3", "text": "Quire is built for documents. Previews with no setup. Grammarly that works. And every AI edit shown as a tracked change in your text."},
+        {"id": "x4", "text": "Already use Claude Code? Keep it. Quire runs the same Claude agent, with your login.", "pause": 14}
+      ]
+    },
+    {
+      "key": "trust", "lead": 8, "tail": 30,
+      "beats": [
+        {"id": "u1", "text": "Your files stay on your Mac. No account. No telemetry."},
+        {"id": "u2", "text": "And Quire is free and open source."}
+      ]
+    },
+    {
+      "key": "outro", "lead": 10, "tail": 75,
+      "beats": [
+        {"id": "o1", "text": "Quire. Write with AI, and keep the final say."},
+        {"id": "o2", "text": "Download it free for your Mac.", "pause": 6}
+      ]
+    }
+  ]
+}
