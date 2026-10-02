@@ -1547,17 +1547,14 @@ function sendMarkdown() {
   }, 150)
 }
 // The live Typst preview shows the text as typed: it need not wait for auto save to write it.
-let typedTimer = 0
+// It goes at once, as in VS Code; tinymist takes the keys that come while it compiles together.
 let typedSent = "" // path and text last sent
 function sendTyped() {
-  clearTimeout(typedTimer)
-  typedTimer = window.setTimeout(() => {
-    if (previewKind !== "live" || !previewing?.endsWith(".typ") || !current) return
-    const key = `${current}\n${ta.value}`
-    if (key === typedSent) return
-    typedSent = key
-    send({ type: "typed", path: current, content: ta.value })
-  }, 50)
+  if (previewKind !== "live" || !previewing?.endsWith(".typ") || !current) return
+  const key = `${current}\n${ta.value}`
+  if (key === typedSent) return
+  typedSent = key
+  send({ type: "typed", path: current, content: ta.value })
 }
 
 // ---------- preview sync: a click in the preview shows that text; the preview follows the caret ----------

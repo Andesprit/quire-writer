@@ -42,16 +42,19 @@ async function load() {
   const inView = old.flatMap((r, i) => (r.bottom > 0 && r.top < innerHeight ? [i] : []))
   const canvases: HTMLCanvasElement[] = []
   const later: [pdfjs.PDFPageProxy, HTMLCanvasElement][] = []
-  for (let n = 1; n <= doc.numPages; n++) {
-    const page = await doc.getPage(n)
+  const drawn: Promise<void>[] = []
+  // All pages asked for at once: one by one, each waits for the worker's answer to the last.
+  const all = await Promise.all(Array.from({ length: doc.numPages }, (_, i) => doc.getPage(i + 1)))
+  for (const [i, page] of all.entries()) {
     const canvas = document.createElement("canvas")
     const vp = page.getViewport({ scale: 1 })
     canvas.style.width = `${width}px`
     canvas.style.aspectRatio = `${vp.width} / ${vp.height}`
     canvases.push(canvas)
-    if (inView.includes(n - 1) || (!old.length && n <= 2)) await draw(page, canvas, width)
+    if (inView.includes(i) || (!old.length && i < 2)) drawn.push(draw(page, canvas, width))
     else later.push([page, canvas])
   }
+  await Promise.all(drawn)
   if (id !== latest) return doc.loadingTask.destroy()
   const y = scrollY
   pages.replaceChildren(...canvases)

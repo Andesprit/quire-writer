@@ -27,10 +27,11 @@ typst-html = "0.15.1"
 typst-kit = { version = "0.15.1", features = ["embedded-fonts", "scan-fonts", "system-files", "system-downloader", "datetime", "emit-diagnostics"] }
 typst-layout = "0.15.1"
 
-# Smaller app binary (Tauri's size guide). No panic = "abort": a bug in one request must
-# not close the window with the writer's text in it.
+# Smaller app binary (Tauri's size guide), but built for speed (opt-level 3, not "s"): the first
+# Typst build after the app starts takes 2.5 s instead of 3 s, for a program 5 MB larger. No
+# panic = "abort": a bug in one request must not close the window with the writer's text in it.
 [profile.release]
 codegen-units = 1
 lto = true
-opt-level = "s"
+opt-level = 3
 strip = true

@@ -34,6 +34,18 @@ const PREVIEW_SCROLLBARS: &str = r#"if (window !== top) document.documentElement
 ::-webkit-scrollbar-thumb:hover { background-color: rgb(140 140 140 / 0.95); }
 ::-webkit-scrollbar-track, ::-webkit-scrollbar-corner { background: transparent; }` }))"#;
 
+/// tinymist's preview draws only the pages in view. It shows the other pages as canvases
+/// inside its SVG, which WebKit paints at the wrong place, over the first pages: hide them (a
+/// page is blank until it scrolls into view). And draw the pages that scroll in at once:
+/// tinymist waits half a second after a scroll, but draws as soon as the window resizes.
+const TINYMIST_PARTIAL: &str = r#"if (window !== top) {
+  document.documentElement.append(Object.assign(document.createElement("style"), { textContent: ".typst-svg-mixin-canvas { display: none !important; }" }))
+  let queued = 0
+  addEventListener("scroll", (e) => {
+    if (e.target.id === "typst-container-main" && !queued) queued = setTimeout(() => { queued = 0; dispatchEvent(new Event("resize")) }, 50)
+  }, true)
+}"#;
+
 /// Every message from the page comes through here.
 #[tauri::command]
 fn message(app: tauri::AppHandle, msg: Value) {
@@ -119,7 +131,9 @@ fn main() {
             let size = window.inner_size()?.to_logical::<f64>(window.scale_factor()?);
             window.add_child(WebviewBuilder::new("main", WebviewUrl::App("index.html".into())).auto_resize(), LogicalPosition::new(0.0, 0.0), size)?;
             // The preview's own web view, on top of the page; hidden until the page places it.
-            let preview = WebviewBuilder::new("preview", WebviewUrl::App("preview.html".into())).initialization_script_for_all_frames(PREVIEW_SCROLLBARS);
+            let preview = WebviewBuilder::new("preview", WebviewUrl::App("preview.html".into()))
+                .initialization_script_for_all_frames(PREVIEW_SCROLLBARS)
+                .initialization_script_for_all_frames(TINYMIST_PARTIAL);
             window.add_child(preview, LogicalPosition::new(0.0, 0.0), LogicalSize::new(0.0, 0.0))?.hide()?;
 
             // The built-in Quit ends the app without asking the page about unsaved changes.
