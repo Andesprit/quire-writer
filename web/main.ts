@@ -3,10 +3,9 @@ import "@fontsource/ia-writer-quattro/400.css"
 import "@fontsource/ia-writer-quattro/400-italic.css"
 import "@fontsource/ia-writer-quattro/700.css"
 import "@fontsource/ia-writer-quattro/700-italic.css"
-import { Text } from "@codemirror/state"
 import { Chunk } from "@codemirror/merge"
 import { highlightHTML, highlightLine, langOf, startState, sameState, type Lang, type State } from "./highlight"
-import { minimalChange, rebase } from "./merge"
+import { diff, minimalChange, rebase, type Diff } from "./merge"
 import { $, ask, esc, fileIcon, icon, toast } from "./ui"
 import { FORMAT_KEYS, buildFormatBar, connectEditor, insertAt, select, setHeading, syntaxOf } from "./format"
 import { add, connectChat, onFolderOpened, onPermission, onTurnEnd, onTurnStart, onUpdate, renderChips, running, setAgentReady } from "./chat"
@@ -169,6 +168,7 @@ let lang: Lang = "text" // the language of the open file
 const syntax = () => syntaxOf(lang) // its markup; none for plain text
 let baseline: string | null = null // the text before unreviewed changes
 let chunks: readonly Chunk[] = []
+let diffed: Diff | null = null // what `chunks` was worked out from
 let mode: "edit" | "review" = "edit"
 let focusChunk = 0
 let lineStarts: number[] = [0]
@@ -248,7 +248,7 @@ function render() {
     lineStarts[k] = at
     at += next[k].length + 1
   }
-  chunks = baseline == null ? [] : Chunk.build(Text.of(baseline.split("\n")), Text.of(next))
+  chunks = baseline == null ? [] : (diffed = diff(baseline, text, diffed)).chunks
   if (baseline != null && chunks.length === 0) {
     // Every change was accepted or rejected.
     baseline = null

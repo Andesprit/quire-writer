@@ -88,10 +88,14 @@ pub fn language_name(path: &str) -> &'static str {
     }
 }
 
-/// The file as text, with \r\n and \r turned into \n as the editor's text field does anyway.
+/// The file as text, with \r\n and \r turned into \n as the editor's text field does anyway,
+/// and without a byte order mark at the start: an invisible mark that makes WebKit measure the
+/// whole text field again on every key, three times slower in a long chapter. A save writes
+/// the file without it.
 fn read_text(p: &Path) -> Result<String, String> {
     let text = String::from_utf8(fs::read(p).map_err(err)?).map_err(|_| format!("{} is not UTF-8 text.", p.display()))?;
-    Ok(if text.contains('\r') { text.replace("\r\n", "\n").replace('\r', "\n") } else { text })
+    let text = text.strip_prefix('\u{feff}').unwrap_or(&text);
+    Ok(if text.contains('\r') { text.replace("\r\n", "\n").replace('\r', "\n") } else { text.into() })
 }
 
 /// Like Python's Path.resolve(): an absolute path with symlinks followed in the parts that exist.
@@ -1793,6 +1797,14 @@ mod tests {
         assert!(write_template(d, TEMPLATES[0]).is_err());
         assert_eq!(fs::read_to_string(dir.join("main.typ")).unwrap(), "mine");
         let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn read_text() {
+        let p = std::env::temp_dir().join(format!("quire-bom-{}.typ", std::process::id()));
+        fs::write(&p, "\u{feff}= Title\r\nText \u{feff}kept\r").unwrap();
+        assert_eq!(super::read_text(&p).unwrap(), "= Title\nText \u{feff}kept\n");
+        let _ = fs::remove_file(&p);
     }
 
     #[tokio::test]
