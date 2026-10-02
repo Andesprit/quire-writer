@@ -37,10 +37,10 @@ autocomplete, your own agent, Grammarly, themes, and how Quire compares with VS 
 - Cite by DOI or arXiv ID (formatting bar): adds the paper to your `.bib` file and the
   citation at the cursor (`@key`, `\cite{key}` or `[@key]`). Needs the internet (doi.org).
 - Export (button at the right of the file tab): the whole document as PDF or Word, or as
-  OpenDocument, web page, e-book, Markdown, LaTeX or Typst. PDF comes from tinymist (Typst),
-  your TeX (LaTeX) or Quarto (Quarto, Markdown); Quarto documents get the other formats from
-  Quarto, the rest from Pandoc (or the copy inside Quarto). Citations become formatted
-  references. Build files stay out of the project.
+  OpenDocument, web page, e-book, Markdown, LaTeX or Typst. PDF comes from Typst built into
+  the app (Typst), your TeX (LaTeX) or Quarto (Quarto, Markdown); Quarto documents get the
+  other formats from Quarto, the rest from Pandoc (or the copy inside Quarto). Citations
+  become formatted references. Build files stay out of the project.
 - One look for documents: web pages and Word files from Typst, LaTeX and Markdown, and the
   Markdown preview, set the text in a book face with clean headings, tinted tables, quotes
   and code. Quarto documents keep Quarto's look and their own settings.
@@ -179,3 +179,6 @@ GPL-3.0-or-later. See `LICENSE`.
 - Markdown: [marked](https://github.com/markedjs/marked), MIT. Math: [KaTeX](https://katex.org), MIT.
 - PDF: [pdf.js](https://github.com/mozilla/pdf.js) by Mozilla, Apache 2.0.
 - Typst preview: [tinymist](https://github.com/Myriad-Dreamin/tinymist), Apache 2.0, bundled with the app.
+- Typst PDF, Word and web page: [Typst](https://github.com/typst/typst), Apache 2.0, built into
+  the app, with its fonts Libertinus, New Computer Modern and DejaVu Sans Mono (their own free
+  licenses).

@@ -31,4 +31,5 @@ jobs:
           [ "$open" != 0 ] && exit 0
           gh issue create --title "$title" --body "Quire ships tinymist $pinned, and $latest is out: https://github.com/Myriad-Dreamin/tinymist/releases/tag/$latest
 
-          Change TINYMIST in .github/workflows/release.yml, check the Typst preview, then release."
+          Change TINYMIST in .github/workflows/release.yml, check the Typst preview, then release.
+          When this tinymist moves to a newer Typst, move the typst crates in src-tauri/Cargo.toml to it too: the app builds PDF, Word and web page with them."

@@ -23,6 +23,7 @@ use tokio_tungstenite::tungstenite::{self, protocol::WebSocketConfig};
 use unicode_normalization::UnicodeNormalization;
 
 use crate::agent::{find_agent, registry, BRIDGE};
+use crate::engine;
 use crate::lock;
 
 const TEXT_EXT: [&str; 14] = ["typ", "tex", "qmd", "md", "bib", "sty", "cls", "yml", "yaml", "toml", "txt", "csv", "json", "xml"];
@@ -292,6 +293,7 @@ pub struct Workspace {
     watcher: Option<(RecommendedWatcher, JoinHandle<()>)>,
     preview_proc: Option<Child>,
     control: Option<UnboundedSender<String>>, // tinymist's editor connection
+    shadowed: BTreeSet<String>,               // files tinymist reads from the editor's text, not the disk
     preview_shown: bool,
     preview_id: u64, // which preview is the current one
     asked: u64,      // the newest preview the page asked for: an older request that finishes later must not replace it
@@ -389,6 +391,11 @@ impl Workspace {
     }
 
     fn forget(&mut self, rel: &str, to: Option<&str>) {
+        let under = format!("{rel}/");
+        let moved: Vec<String> = self.shadowed.iter().filter(|k| *k == rel || k.starts_with(&under)).cloned().collect();
+        for k in moved {
+            self.unshadow(&k);
+        }
         move_keys(&mut self.known, rel, to);
         move_keys(&mut self.baseline, rel, to);
         for d in self.checkpoints.values_mut() {
@@ -528,6 +535,7 @@ impl Workspace {
         if old.as_ref() == Some(&new) {
             return;
         }
+        self.unshadow(rel);
         self.known.insert(rel.into(), new.clone());
         let base = self.baseline.entry(rel.into()).or_insert_with(|| old.clone().unwrap_or_default()).clone();
         if self.turn > 0 {
@@ -543,6 +551,7 @@ impl Workspace {
         let under = format!("{rel}/");
         let files: Vec<String> = self.known.keys().filter(|k| *k == rel || k.starts_with(&under)).cloned().collect();
         for f in files {
+            self.unshadow(&f);
             let old = self.known.remove(&f);
             self.baseline.remove(&f);
             if self.turn > 0 {
@@ -593,6 +602,7 @@ impl Workspace {
             }
         }
         (self.control, self.preview_shown, self.built) = (None, false, None);
+        self.shadowed.clear();
         self.preview_id += 1;
         self.preview_id
     }
@@ -668,6 +678,27 @@ impl Workspace {
             let _ = control.send(json!({"event": "panelScrollTo", "filepath": file, "line": line, "character": col}).to_string());
         }
         Ok(())
+    }
+
+    /// The editor's text of a Typst file: the live preview shows it as typed, before auto save
+    /// writes it, and keeps showing it until the file changes on disk some other way.
+    fn typed(&mut self, rel: &str, content: &str) -> Result<(), String> {
+        if let Some(control) = &self.control {
+            let file = self.path(rel)?.to_string_lossy().into_owned();
+            let _ = control.send(json!({"event": "updateMemoryFiles", "files": {file: content}}).to_string());
+            self.shadowed.insert(rel.into());
+        }
+        Ok(())
+    }
+
+    /// The live preview reads `rel` from the disk again.
+    fn unshadow(&mut self, rel: &str) {
+        if !self.shadowed.remove(rel) {
+            return;
+        }
+        if let (Some(control), Ok(file)) = (&self.control, self.path(rel)) {
+            let _ = control.send(json!({"event": "removeMemoryFiles", "files": [file.to_string_lossy()]}).to_string());
+        }
     }
 
     /// The .bib file new citations from `from` go to, and whether a file in its language
@@ -1132,28 +1163,29 @@ async fn export(rel: &str, to: &str) -> Result<Option<PathBuf>, String> {
     Ok(Some(dest))
 }
 
-/// Write `file` as `to` into `tmp`, with the tool that suits the language: tinymist for
-/// Typst PDF, the writer's TeX for LaTeX PDF, Quarto for Quarto and Markdown, Pandoc for the rest.
+/// Write `file` as `to` into `tmp`, with the tool that suits the language: the app's own Typst
+/// for Typst PDF and web page, the writer's TeX for LaTeX PDF, Quarto for Quarto and Markdown,
+/// Pandoc for the rest.
 async fn convert(file: &Path, root: &Path, to: &str, bib: Option<PathBuf>, tmp: &Path) -> Result<(), String> {
     let (_, writer, quarto_format) = FORMATS.iter().copied().find(|f| f.0 == to).unwrap();
     let lang = lang_of(&file.to_string_lossy());
     let name = file.file_name().unwrap();
     let out = tmp.join(file.with_extension(to).file_name().unwrap());
     let mut cmd = match (lang, to) {
-        (Lang::Typst, "pdf" | "html") => {
-            let mut cmd = Command::new("tinymist");
-            cmd.arg("compile").arg(file).arg(&out).arg("--root").arg(root);
-            cmd
+        (Lang::Typst, "pdf") => return engine::build(file, root, &out).await.map_err(|e| why(&e)),
+        (Lang::Typst, "html") => {
+            engine::build(file, root, &out).await.map_err(|e| why(&e))?;
+            // Typst's web page comes with no style: give it the app's.
+            let html = fs::read_to_string(&out).map_err(err)?;
+            return fs::write(&out, html.replacen("</head>", &format!("<style>{DOCUMENT_CSS}</style></head>"), 1)).map_err(err);
         }
         (Lang::Latex, "pdf") => return run_latex(file, tmp).await,
         (Lang::Typst, "docx") => {
             // Pandoc reads Typst only in part: it fails on packages such as cetz. Typst
             // writes the document as HTML, and Pandoc turns that into Word.
             let html = out.with_extension("html");
-            let o = Command::new("tinymist").arg("compile").arg(file).arg(&html).arg("--root").arg(root).stdin(Stdio::null()).output().await.map_err(err)?;
-            if !o.status.success() {
-                return Err(why(&String::from_utf8_lossy(&o.stderr)));
-            }
+            engine::build(file, root, &html).await.map_err(|e| why(&e))?;
+            picture_files(&html)?;
             let mut cmd = pandoc()?;
             // Typst's web page keeps <h1> for the title: its = headings are <h2>.
             cmd.args(["-f", "html", "-t", "docx", "--shift-heading-level-by=-1"]).arg(&html).arg("-o").arg(&out);
@@ -1211,12 +1243,46 @@ async fn convert(file: &Path, root: &Path, to: &str, bib: Option<PathBuf>, tmp: 
     if !o.status.success() {
         return Err(why(&(String::from_utf8_lossy(&o.stdout).into_owned() + &String::from_utf8_lossy(&o.stderr))));
     }
-    if (lang, to) == (Lang::Typst, "html") {
-        // Typst's web page comes with no style: give it the app's.
-        let html = fs::read_to_string(&out).map_err(err)?;
-        fs::write(&out, html.replacen("</head>", &format!("<style>{DOCUMENT_CSS}</style></head>"), 1)).map_err(err)?;
-    }
     Ok(())
+}
+
+/// Typst's web page holds its pictures as base64 text, and Pandoc takes seconds over each large
+/// one: write them to files next to the page, which Pandoc reads at once.
+fn picture_files(html: &Path) -> Result<(), String> {
+    let text = fs::read_to_string(html).map_err(err)?;
+    let mut n = 0;
+    let text = re(r#"src="data:image/([\w+]+);base64,([^"]*)""#).replace_all(&text, |c: &regex::Captures| {
+        n += 1;
+        let file = html.with_extension(format!("{n}.{}", c[1].trim_end_matches("+xml")));
+        match unbase64(&c[2]).map(|bytes| fs::write(&file, bytes)) {
+            Some(Ok(())) => format!("src=\"{}\"", file.display()),
+            _ => c[0].to_string(), // left as it was: slower, still right
+        }
+    });
+    fs::write(html, text.as_bytes()).map_err(err)
+}
+
+/// Standard base64, as in a data: URL. None when it is not base64.
+fn unbase64(s: &str) -> Option<Vec<u8>> {
+    let mut out = Vec::with_capacity(s.len() / 4 * 3);
+    let (mut acc, mut bits) = (0u32, 0);
+    for c in s.trim_end_matches('=').bytes() {
+        let v = match c {
+            b'A'..=b'Z' => c - b'A',
+            b'a'..=b'z' => c - b'a' + 26,
+            b'0'..=b'9' => c - b'0' + 52,
+            b'+' => 62,
+            b'/' => 63,
+            _ => return None,
+        };
+        acc = (acc << 6 | v as u32) & 0xffff;
+        bits += 6;
+        if bits >= 8 {
+            bits -= 8;
+            out.push((acc >> bits) as u8);
+        }
+    }
+    Some(out)
 }
 
 /// How a document looks: as a web page (the Markdown preview's look too) and in Word.
@@ -1289,12 +1355,24 @@ fn pandoc() -> Result<Command, String> {
     if on_path("pandoc") {
         return Ok(Command::new("pandoc"));
     }
+    if let Some(inside) = quarto_pandoc() {
+        return Ok(Command::new(inside));
+    }
     if on_path("quarto") {
         let mut cmd = Command::new("quarto");
         cmd.arg("pandoc");
         return Ok(cmd);
     }
     Err("Export to Word and other formats needs Pandoc (brew install pandoc) or Quarto (quarto.org).".into())
+}
+
+/// The Pandoc inside Quarto, run directly: `quarto pandoc` takes half a second to start it.
+/// Quarto keeps it in tools/<arch>/ next to its own launcher.
+fn quarto_pandoc() -> Option<PathBuf> {
+    let paths = std::env::var_os("PATH")?;
+    let quarto = std::env::split_paths(&paths).map(|d| d.join("quarto")).find(|p| p.is_file())?;
+    let p = quarto.canonicalize().ok()?.parent()?.join("tools").join(std::env::consts::ARCH).join("pandoc");
+    p.is_file().then_some(p)
 }
 
 /// The macOS save dialog. None: cancelled.
@@ -1420,7 +1498,7 @@ async fn chat(text: &str, path: Option<&str>, selection: Option<&str>) {
 
 // Messages that read or write files. Each carries the folder the page is showing, so a
 // page still showing another folder can never write into this one.
-const FILE_OPS: [&str; 10] = ["open_file", "save", "review", "create", "rename", "delete", "preview", "restore", "cite", "export"];
+const FILE_OPS: [&str; 11] = ["open_file", "save", "typed", "review", "create", "rename", "delete", "preview", "restore", "cite", "export"];
 
 fn field<'a>(msg: &'a Value, key: &str) -> Result<&'a str, String> {
     msg[key].as_str().ok_or_else(|| format!("'{key}' is missing"))
@@ -1471,6 +1549,7 @@ async fn handle(msg: &Value) -> Result<(), String> {
             send(json!({"type": "file", "path": rel, "content": content, "baseline": w.baseline.get(rel)}));
         }
         "save" => ws().save(f("path")?, f("content")?, opt("baseline").map(String::from))?,
+        "typed" => ws().typed(f("path")?, f("content")?)?,
         "review" => {
             // Review decisions (accept/reject) while the text itself is not saved yet.
             let mut w = ws();
@@ -1581,8 +1660,8 @@ pub fn start(app: AppHandle, folder: Option<String>) {
                 w.asked += 1;
                 msg["asked"] = w.asked.into();
             }
-            if matches!(msg["type"].as_str(), Some("save" | "review")) {
-                safe(msg).await; // in order, so an older save never lands after a newer one
+            if matches!(msg["type"].as_str(), Some("save" | "review" | "typed")) {
+                safe(msg).await; // in order, so an older save or text never lands after a newer one
             } else {
                 tokio::spawn(safe(msg));
             }
@@ -1660,6 +1739,39 @@ mod tests {
         }
         drop(rendering);
         assert!(super::quarto_output(Path::new("/q/report.typ"))); // still, for a moment
+    }
+
+    #[test]
+    fn picture_files() {
+        assert_eq!(unbase64("aGVsbG8gd29ybGQ="), Some(b"hello world".to_vec()));
+        assert_eq!((unbase64("TWE="), unbase64("TQ=="), unbase64("")), (Some(b"Ma".to_vec()), Some(b"M".to_vec()), Some(vec![])));
+        assert_eq!(unbase64("a$b"), None);
+        let dir = std::env::temp_dir().join(format!("quire-pictures-{}", std::process::id()));
+        fs::create_dir_all(&dir).unwrap();
+        let html = dir.join("main.html");
+        fs::write(&html, r#"<img src="data:image/png;base64,aGk="><img src="data:image/svg+xml;base64,PHN2Zz4="><img src="a.png">"#).unwrap();
+        super::picture_files(&html).unwrap();
+        let (png, svg) = (dir.join("main.1.png"), dir.join("main.2.svg"));
+        let want = format!(r#"<img src="{}"><img src="{}"><img src="a.png">"#, png.display(), svg.display());
+        assert_eq!(fs::read_to_string(&html).unwrap(), want);
+        assert_eq!((fs::read(&png).unwrap(), fs::read_to_string(&svg).unwrap()), (b"hi".to_vec(), "<svg>".into()));
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn typed() {
+        let root = std::env::temp_dir().canonicalize().unwrap();
+        let (tx, mut rx) = unbounded_channel();
+        let mut w = Workspace { root: Some(root.clone()), known: map(&[("a.typ", "disk".to_string())]), control: Some(tx), ..Default::default() };
+        let file = root.join("a.typ").to_string_lossy().into_owned();
+        w.typed("a.typ", "typed").unwrap();
+        assert_eq!(rx.try_recv().unwrap(), json!({"event": "updateMemoryFiles", "files": {&file: "typed"}}).to_string());
+        w.external("a.typ", "disk".into()); // the disk as the editor last saved it: the typed text stays
+        assert!(rx.try_recv().is_err());
+        w.external("a.typ", "agent".into()); // someone else wrote it: the preview reads the disk
+        assert_eq!(rx.try_recv().unwrap(), json!({"event": "removeMemoryFiles", "files": [&file]}).to_string());
+        w.external("a.typ", "agent again".into());
+        assert!(rx.try_recv().is_err()); // it already does
     }
 
     #[test]

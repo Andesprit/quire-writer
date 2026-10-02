@@ -21,6 +21,11 @@ regex = "1.13.1"
 unicode-normalization = "0.1.25"
 serde_json = "1.0.151"
 percent-encoding = "2"
+typst = "0.15.1"
+typst-pdf = "0.15.1"
+typst-html = "0.15.1"
+typst-kit = { version = "0.15.1", features = ["embedded-fonts", "scan-fonts", "system-files", "system-downloader", "datetime", "emit-diagnostics"] }
+typst-layout = "0.15.1"
 
 # Smaller app binary (Tauri's size guide). No panic = "abort": a bug in one request must
 # not close the window with the writer's text in it.

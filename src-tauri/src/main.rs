@@ -3,6 +3,7 @@
 //! through Tauri's own messages.
 
 mod agent;
+mod engine;
 mod project;
 
 use std::fs::File;

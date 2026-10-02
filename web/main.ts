@@ -265,6 +265,7 @@ function render() {
   hl.scrollTop = ta.scrollTop
   placeGhost()
   if (previewKind === "markdown") sendMarkdown()
+  sendTyped()
   if (mode === "review") renderReview()
   updateReviewUI()
   updateInfo()
@@ -1504,6 +1505,19 @@ function sendMarkdown() {
     if (previewKind === "markdown" && current && current === previewing) toPreview({ markdown: ta.value, dir: parentOf(current) })
   }, 150)
 }
+// The live Typst preview shows the text as typed: it need not wait for auto save to write it.
+let typedTimer = 0
+let typedSent = "" // path and text last sent
+function sendTyped() {
+  clearTimeout(typedTimer)
+  typedTimer = window.setTimeout(() => {
+    if (previewKind !== "live" || !previewing?.endsWith(".typ") || !current) return
+    const key = `${current}\n${ta.value}`
+    if (key === typedSent) return
+    typedSent = key
+    send({ type: "typed", path: current, content: ta.value })
+  }, 50)
+}
 // The viewer asks for the text once it has loaded.
 window.addEventListener("message", (e) => {
   if (e.source === $<HTMLIFrameElement>("preview").contentWindow && e.data === "ready") sendMarkdown()
@@ -1680,6 +1694,8 @@ function onMessage(msg: any) {
       const url = new URL(msg.url).href
       if ($<HTMLIFrameElement>("preview").src !== url) $<HTMLIFrameElement>("preview").src = url
       if (previewKind === "markdown") sendMarkdown()
+      typedSent = "" // a new preview knows only the disk
+      sendTyped()
       break
     }
     case "build":
