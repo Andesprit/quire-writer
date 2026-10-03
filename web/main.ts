@@ -1199,7 +1199,14 @@ function renderOptions(target: HTMLElement, kind: string, options: any[], only?:
   )
 }
 
-$<HTMLSelectElement>("agent").onchange = (e) => send({ type: "set_agent", id: (e.target as HTMLSelectElement).value })
+// The agent is chosen in the chat or in the autocomplete settings: there is one agent for both.
+const agentSelects = [$<HTMLSelectElement>("agent"), $<HTMLSelectElement>("ac-agent")]
+for (const sel of agentSelects) {
+  sel.onchange = () => {
+    for (const other of agentSelects) other.value = sel.value
+    send({ type: "set_agent", id: sel.value })
+  }
+}
 
 // ---------- autocomplete (grey text after the caret) ----------
 
@@ -1207,14 +1214,61 @@ const acToggle = $<HTMLInputElement>("ac-toggle")
 acToggle.checked = store.get("autocomplete") !== "off"
 let acModel = ""
 let acBusy = false
+let acError = ""
 let ghost: { pos: number; text: string } | null = null
+
+// Suggestions come from the agent (ACP), or much faster from an API that talks like OpenAI's
+// (Groq, Ollama, ...) or like Anthropic's.
+const acSources = [...document.querySelectorAll<HTMLInputElement>("input[name=ac-source]")]
+const acFields = {
+  kind: $<HTMLSelectElement>("ac-kind"),
+  url: $<HTMLInputElement>("ac-url"),
+  key: $<HTMLInputElement>("ac-key"),
+  model: $<HTMLInputElement>("ac-model"),
+}
+
+/** The API to ask, or null for the agent. */
+function acApi() {
+  if (store.get("ac.source") !== "api") return null
+  const { kind, url, key, model } = acFields
+  return { kind: kind.value, url: url.value.trim(), key: key.value.trim(), model: model.value.trim() }
+}
 
 function renderAcStatus() {
   const on = acToggle.checked
+  const api = acApi()
+  const model = api ? api.model : acModel
+  const error = api && !api.url ? "Fill in the address." : api && !api.model ? "Fill in the model." : acError
   $("sb-ac").innerHTML =
-    `${icon(acBusy ? "loading" : "sparkle", acBusy ? "codicon-modifier-spin" : "")} ` +
-    `<span>${on ? `Autocomplete${acModel ? ` · ${esc(acModel)}` : ""}` : "Autocomplete off"}</span>`
+    `${icon(acBusy ? "loading" : on && error ? "warning" : "sparkle", acBusy ? "codicon-modifier-spin" : "")} ` +
+    `<span>${on ? `Autocomplete${model ? ` · ${esc(model)}` : ""}` : "Autocomplete off"}</span>`
   $("sb-ac").style.opacity = on ? "" : "0.75"
+  $("ac-error").textContent = error
+  $("ac-error").hidden = !error
+}
+
+function renderAcSource() {
+  const api = !!acApi()
+  for (const r of acSources) r.checked = (r.value === "api") === api
+  $("ac-acp").hidden = api
+  $("ac-api").hidden = !api
+  acFields.url.placeholder = acFields.kind.value === "anthropic" ? "https://api.anthropic.com" : "https://api.groq.com/openai/v1"
+  acError = ""
+  renderAcStatus()
+}
+for (const [name, field] of Object.entries(acFields)) {
+  field.value = store.get(`ac.${name}`) ?? field.value
+  field.oninput = () => {
+    store.set(`ac.${name}`, field.value.trim())
+    renderAcSource()
+  }
+}
+for (const r of acSources) {
+  r.onchange = () => {
+    store.set("ac.source", r.value)
+    clearGhost()
+    renderAcSource()
+  }
 }
 
 // The suggestion is drawn in the colored layer as a copy of the caret's line with the grey
@@ -1247,16 +1301,7 @@ acToggle.onchange = () => {
   else clearGhost()
   renderAcStatus()
 }
-$("sb-ac").onclick = (e) => {
-  e.stopPropagation()
-  $("ac-menu").hidden = !$("ac-menu").hidden
-}
-document.addEventListener("click", (e) => {
-  if (!$("ac-menu").hidden && !$("ac-menu").contains(e.target as Node)) $("ac-menu").hidden = true
-})
-document.addEventListener("keydown", (e) => {
-  if (e.key === "Escape" && !$("ac-menu").hidden) $("ac-menu").hidden = true
-})
+$("sb-ac").onclick = () => $<HTMLDialogElement>("ac-settings").showModal()
 
 let acTimer = 0
 let reqSeq = 0 // shared by autocomplete and inline, so errors reach the right place
@@ -1264,21 +1309,25 @@ let acWant: { req: number; pos: number; version: number } | null = null
 
 function scheduleComplete() {
   clearTimeout(acTimer)
-  if (!acToggle.checked || agentState === "none" || agentState === "starting") return
+  const api = acApi()
+  if (!acToggle.checked || (api ? !(api.url && api.model) : agentState === "none" || agentState === "starting")) return
   acTimer = window.setTimeout(() => {
     if (ta.selectionStart !== ta.selectionEnd || mode !== "edit") return
     const pos = ta.selectionStart
     const doc = ta.value
     acWant = { req: ++reqSeq, pos, version: docVersion }
-    send({ type: "complete", req: acWant.req, path: current, before: doc.slice(Math.max(0, pos - 2000), pos), after: doc.slice(pos, pos + 500) })
+    send({ type: "complete", req: acWant.req, path: current, before: doc.slice(Math.max(0, pos - 2000), pos), after: doc.slice(pos, pos + 500), ...api })
     acBusy = true
     renderAcStatus()
-  }, 600)
+    // An API answers in a fraction of a second, so it is asked after a shorter pause. Every
+    // pause is a request: a shorter one reaches a free plan's limit sooner.
+  }, api ? 300 : 600)
 }
 
 function showCompletion(req: number, text: string) {
   if (!acWant || req !== acWant.req) return
   acBusy = false
+  acError = ""
   renderAcStatus()
   const w = acWant
   acWant = null
@@ -1506,7 +1555,7 @@ function showPreview(url: string) {
 }
 // The web view sits over #preview. A native view covers whatever the page floats over it, so
 // it steps aside while a dialog or menu would sit under it, and notices go to its left.
-const floating = ["ask", "new-project-ask", "setup", "ac-menu", "inline-box", "ctx-menu", "toasts", "sidebar", "chat"].map((id) => $(id))
+const floating = ["ask", "new-project-ask", "setup", "ac-settings", "inline-box", "ctx-menu", "toasts", "sidebar", "chat"].map((id) => $(id))
 let placing = 0
 let placed = "" // the place last sent
 let bgSent = "" // the theme's preview background last sent: the web view shows it while a preview loads
@@ -1661,7 +1710,7 @@ renderTree()
 renderLabels()
 renderTab()
 renderAgentStatus()
-renderAcStatus()
+renderAcSource()
 
 // ---------- messages from the app ----------
 
@@ -1673,8 +1722,10 @@ function onMessage(msg: any) {
     case "hello":
       agents = msg.agents
       agentId = msg.agent
-      $<HTMLSelectElement>("agent").replaceChildren(...agents.map((a) => new Option(a.name, a.id)))
-      $<HTMLSelectElement>("agent").value = agentId
+      for (const sel of agentSelects) {
+        sel.replaceChildren(...agents.map((a) => new Option(a.name, a.id)))
+        sel.value = agentId
+      }
       if (acToggle.checked) send({ type: "warm", kind: "complete" })
       renderAgentStatus()
       break
@@ -1782,7 +1833,7 @@ function onMessage(msg: any) {
       break
     case "agent":
       agentId = msg.id
-      $<HTMLSelectElement>("agent").value = msg.id
+      for (const sel of agentSelects) sel.value = msg.id
       agentState = msg.ready ? "ready" : "none"
       agentError = msg.error ?? ""
       renderAgentStatus(msg.error && "Agent failed to start")
@@ -1848,7 +1899,11 @@ function onMessage(msg: any) {
       else if (msg.req && acWant?.req === msg.req) {
         acWant = null
         acBusy = false
+        // A wrong key or model would fail on every pause: say it once, in the autocomplete settings.
+        if (acApi()) acError = msg.message.replace(/^complete: /, "")
         renderAcStatus()
+      } else if (msg.op === "complete") {
+        // A suggestion nobody waits for any more: its error is not news.
       } else {
         // The agent's own errors (no op) go to the chat too, as when it stopped and starts again.
         if (running || !msg.op) add("chat-error", `${icon("error")}<span>${esc(msg.message)}</span>`)

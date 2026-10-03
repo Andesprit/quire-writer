@@ -22,7 +22,7 @@ use tokio::task::JoinHandle;
 use tokio_tungstenite::tungstenite::{self, protocol::WebSocketConfig};
 use unicode_normalization::UnicodeNormalization;
 
-use crate::agent::{find_agent, registry, BRIDGE};
+use crate::agent::{complete_api, find_agent, registry, BRIDGE};
 use crate::engine;
 use crate::lock;
 
@@ -1593,7 +1593,11 @@ async fn handle(msg: &Value) -> Result<(), String> {
             send(json!({"type": "inline_result", "req": msg["req"], "text": text}));
         }
         "complete" => {
-            let text = BRIDGE.complete(opt("path").unwrap_or(""), f("before")?, f("after")?).await?;
+            let (path, before, after) = (opt("path").unwrap_or(""), f("before")?, f("after")?);
+            let text = match opt("url") {
+                Some(url) => complete_api(f("kind")?, url, f("model")?, opt("key").unwrap_or(""), path, before, after).await?,
+                None => BRIDGE.complete(path, before, after).await?,
+            };
             send(json!({"type": "complete_result", "req": msg["req"], "text": text}));
         }
         "warm" => {

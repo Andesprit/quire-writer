@@ -4,6 +4,8 @@
 //! - inline:   select-and-edit. Replies with replacement text only.
 //! - complete: autocomplete. Replies with the next few words only.
 //!
+//! Autocomplete can skip the agent: `complete_api` asks an OpenAI- or Anthropic-compatible API instead.
+//!
 //! Agents are started from agents.json, a copy of the ACP registry, so any agent listed
 //! there (Claude, Codex, Gemini, ...) works by id. ACP is JSON-RPC, one message per line on
 //! the agent's stdin and stdout.
@@ -18,7 +20,7 @@ use std::time::{Duration, Instant};
 use serde_json::{json, Map, Value};
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 use tokio::process::{Child, ChildStderr, ChildStdin, ChildStdout, Command};
-use tokio::sync::oneshot;
+use tokio::sync::{oneshot, Notify};
 
 use crate::lock;
 use crate::project::{language_name, restart_agent, send, why};
@@ -581,9 +583,7 @@ impl Bridge {
             self.st().sessions.remove("complete");
         }
         let (_, reply) = self.prompt("complete", &complete_prompt(path, before, after)).await?;
-        let reply = strip_fences(&reply).trim_end_matches('\n').to_string();
-        // A suggestion is one short line. Anything else is chatter or an error message.
-        Ok(if reply.contains('\n') || reply.chars().count() > 300 { String::new() } else { reply })
+        Ok(suggestion(&reply))
     }
 
     fn resolve_permissions(&self, option_id: Option<String>) {
@@ -662,6 +662,86 @@ impl Bridge {
     }
 }
 
+/// A suggestion is one short line. Anything else is chatter or an error message.
+fn suggestion(reply: &str) -> String {
+    // A model that thinks aloud puts its answer after the thoughts.
+    let reply = reply.rsplit_once("</think>").map_or(reply, |(_, answer)| answer);
+    let reply = strip_fences(reply).trim_end_matches('\n').to_string();
+    if reply.contains('\n') || reply.chars().count() > 300 { String::new() } else { reply }
+}
+
+/// What curl reads on stdin to post `body` to `url`.
+fn curl_config(url: &str, headers: &[String], body: &Value) -> Result<String, String> {
+    // Each setting is one line, and curl opens any kind of address: keep both as meant.
+    if !(url.starts_with("http://") || url.starts_with("https://")) || url.chars().chain(headers.iter().flat_map(|h| h.chars())).any(char::is_control) {
+        return Err("The API address must start with http:// or https://, and the key must be one line.".into());
+    }
+    let quoted = |s: &str| format!("\"{}\"", s.replace('\\', "\\\\").replace('"', "\\\""));
+    let mut config = format!("url = {}\nheader = \"Content-Type: application/json\"\ndata-raw = {}\n", quoted(url), quoted(&body.to_string()));
+    for header in headers {
+        config += &format!("header = {}\n", quoted(header));
+    }
+    Ok(config)
+}
+
+/// Autocomplete without the agent: one request to an API that talks like OpenAI's (Groq,
+/// Ollama, ...) or like Anthropic's. No session and no tools, so the answer comes in well
+/// under a second.
+// ponytail: a new curl, so a new TLS handshake (about 150 ms to Groq), for every suggestion.
+// A kept connection (reqwest is already in the build, for the updater) if that matters.
+pub async fn complete_api(kind: &str, url: &str, model: &str, key: &str, path: &str, before: &str, after: &str) -> Result<String, String> {
+    static NEWER: Notify = Notify::const_new();
+    NEWER.notify_waiters(); // a newer keystroke wins: the request still waiting ends, and its curl with it
+    let (anthropic, base) = (kind == "anthropic", url.trim_end_matches('/'));
+    // The two kinds differ in the address, the name of the limit and the key's header. The
+    // limit leaves room for a model that thinks first; the prompt keeps the answer short.
+    // No temperature: the newer models of both refuse one.
+    let (url, limit, mut headers) = if anthropic {
+        // Their base address has no /v1, but people paste it with one.
+        (format!("{}/v1/messages", base.trim_end_matches("/v1")), "max_tokens", vec!["anthropic-version: 2023-06-01".to_string()])
+    } else {
+        (format!("{base}/chat/completions"), "max_completion_tokens", vec![])
+    };
+    if !key.is_empty() {
+        headers.push(if anthropic { format!("x-api-key: {key}") } else { format!("Authorization: Bearer {key}") });
+    }
+    let body = json!({"model": model, "messages": [{"role": "user", "content": complete_prompt(path, before, after)}], limit: 1024});
+    // The key and the text go in on stdin: other programs can read a command's arguments.
+    let config = curl_config(&url, &headers, &body)?;
+    let mut child = Command::new("curl")
+        .args(["-sS", "--max-time", "15", "--config", "-"])
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .kill_on_drop(true)
+        .spawn()
+        .map_err(|e| format!("Could not run curl: {e}"))?;
+    let mut stdin = child.stdin.take().unwrap();
+    stdin.write_all(config.as_bytes()).await.map_err(|e| e.to_string())?;
+    drop(stdin); // curl reads to the end of it
+    let out = tokio::select! {
+        out = child.wait_with_output() => out.map_err(|e| e.to_string())?,
+        _ = NEWER.notified() => return Ok(String::new()),
+    };
+    if !out.status.success() {
+        let why = String::from_utf8_lossy(&out.stderr);
+        let why = why.trim().split_once(") ").map_or(why.trim(), |(_, w)| w); // drop "curl: (7) "
+        return Err(format!("Could not reach {url} ({why})."));
+    }
+    let kind = if anthropic { "Anthropic" } else { "OpenAI" };
+    let answer: Value = serde_json::from_slice(&out.stdout).map_err(|_| format!("{url} did not answer like an {kind}-compatible API."))?;
+    if let Some(e) = answer["error"]["message"].as_str().or(answer["error"].as_str()) {
+        return Err(e.into());
+    }
+    let reply: String = if anthropic {
+        // The answer is the text blocks; thoughts come in blocks of their own.
+        answer["content"].as_array().into_iter().flatten().filter(|b| b["type"] == "text").filter_map(|b| b["text"].as_str()).collect()
+    } else {
+        answer["choices"][0]["message"]["content"].as_str().unwrap_or("").into()
+    };
+    Ok(suggestion(&reply))
+}
+
 fn strip_fences(text: &str) -> String {
     let t = text.trim_matches('\n');
     if !(t.starts_with("```") && t.ends_with("```")) {
@@ -676,6 +756,7 @@ fn strip_fences(text: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use tokio::io::AsyncReadExt;
 
     #[test]
     fn launch_commands() {
@@ -700,6 +781,62 @@ mod tests {
         assert!(list(Some(&bundled["agents"])).filter_map(launch).any(|a| a.id == "claude-acp"));
         assert_eq!(strip_fences("```typst\nhello\n```\n"), "hello");
         assert_eq!(strip_fences(" hello"), " hello");
+        assert_eq!(suggestion("<think>\nhmm\n</think>\n\nand so on.\n"), "and so on.");
+        assert_eq!(suggestion("Sure! Here it is:\nand so on."), "");
+        assert!(curl_config("file:///etc/passwd", &[], &json!({})).is_err());
+        assert!(curl_config("https://api.groq.com/openai/v1", &["x-api-key: key\nurl = \"file:///etc/passwd\"".into()], &json!({})).is_err());
+    }
+
+    /// A stand-in for an API: it answers one request with `answer` and gives back what curl sent.
+    async fn api(answer: Value) -> (String, tokio::task::JoinHandle<(String, Value)>) {
+        let server = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let url = format!("http://{}", server.local_addr().unwrap());
+        let asked = tokio::spawn(async move {
+            let (mut conn, _) = server.accept().await.unwrap();
+            let (mut request, mut buf) = (Vec::new(), [0; 4096]);
+            let (head, body) = loop {
+                let n = conn.read(&mut buf).await.unwrap();
+                request.extend_from_slice(&buf[..n]);
+                let text = String::from_utf8_lossy(&request).into_owned();
+                let Some((head, body)) = text.split_once("\r\n\r\n") else { continue };
+                let length = head.lines().find_map(|l| l.to_lowercase().strip_prefix("content-length: ")?.parse().ok());
+                if length == Some(body.len()) {
+                    break (head.to_string(), body.to_string());
+                }
+            };
+            let answer = answer.to_string();
+            let reply = format!("HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{answer}", answer.len());
+            conn.write_all(reply.as_bytes()).await.unwrap();
+            (head, serde_json::from_str::<Value>(&body).unwrap())
+        });
+        (url, asked)
+    }
+
+    #[tokio::test]
+    async fn completes_from_an_api() {
+        // Quotes, a backslash and a new line: curl must send them as they are.
+        let before = "She said \"hi\" \\ then\nleft";
+        let (url, asked) = api(json!({"choices": [{"message": {"role": "assistant", "content": "```\nand so on.\n```"}}]})).await;
+        assert_eq!(complete_api("openai", &format!("{url}/v1/"), "m", "k\"y", "a.typ", before, "").await.unwrap(), "and so on.");
+        let (head, body) = asked.await.unwrap();
+        assert!(head.starts_with("POST /v1/chat/completions "), "{head}");
+        assert!(head.contains("Authorization: Bearer k\"y\r\n"), "{head}");
+        assert_eq!((&body["model"], &body["max_completion_tokens"]), (&json!("m"), &json!(1024)));
+        assert!(body["messages"][0]["content"].as_str().unwrap().ends_with(&format!("{before}<CURSOR>")));
+
+        // Anthropic's way: another address, header and limit; the answer comes after the thoughts.
+        let (url, asked) = api(json!({"content": [{"type": "thinking", "thinking": "hm"}, {"type": "text", "text": "and so on."}]})).await;
+        assert_eq!(complete_api("anthropic", &format!("{url}/v1"), "m", "key", "a.typ", before, "").await.unwrap(), "and so on.");
+        let (head, body) = asked.await.unwrap();
+        assert!(head.starts_with("POST /v1/messages "), "{head}");
+        assert!(head.contains("x-api-key: key\r\n") && head.contains("anthropic-version: 2023-06-01\r\n"), "{head}");
+        assert_eq!((&body["max_tokens"], &body["temperature"]), (&json!(1024), &Value::Null));
+
+        // What the API says is wrong reaches the writer, in either shape.
+        let (url, _asked) = api(json!({"type": "error", "error": {"type": "authentication_error", "message": "invalid x-api-key"}})).await;
+        assert_eq!(complete_api("anthropic", &url, "m", "key", "a.typ", "x", "").await.unwrap_err(), "invalid x-api-key");
+        // Nothing listens there (Ollama not started): said plainly.
+        assert!(complete_api("openai", "http://127.0.0.1:1/v1", "m", "", "a.typ", "x", "").await.unwrap_err().starts_with("Could not reach"));
     }
 
     #[tokio::test]

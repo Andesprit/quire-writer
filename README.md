@@ -17,6 +17,8 @@ autocomplete, your own agent, Grammarly, themes, and how Quire compares with VS 
 - Chat bar: ask the agent to write or change things in your folder.
 - Cmd+K on selected text: ask for an edit of just that part.
 - Autocomplete: grey text after you pause typing, Tab to accept. Toggle in the top bar.
+  It asks your agent or, much faster, an API of your choice (OpenAI-compatible, such as
+  Groq or Ollama, or Anthropic-compatible): click Autocomplete in the status bar.
 - Track changes: every change the agent makes shows as a change to review.
   Accept or reject each one, edit it before you accept, or use
   "Restore files to before this message" in the chat to undo a whole turn.
@@ -79,6 +81,9 @@ It goes online only for these:
 - Your agent: it runs on your Mac with your own login. For chat, Cmd+K and autocomplete it
   sends your request and the parts of your project it reads to its provider. That
   provider's terms apply.
+- Autocomplete from an API, if you choose one: the text around the cursor goes to the
+  address you give, and that provider's terms apply. With a local one (Ollama) it stays on
+  your Mac. The API key is kept with the app's settings on your Mac, not encrypted.
 - Starting an agent the first time: `npx` or `uvx` download it from npm or PyPI.
 - Citations by DOI or arXiv ID: one request to doi.org.
 - Updates: a check on GitHub at start, once a day and when you choose Check for Updates, then
@@ -150,7 +155,8 @@ The workflow needs these repository secrets:
   temporary folder, not into the project. The preview loads from `quire://localhost`, an
   address only the app has: the Markdown and PDF viewers, the project's images, the PDF.
 - `src-tauri/src/agent.rs`: talks ACP to one agent process with three sessions: chat, inline edits,
-  autocomplete (smallest model the agent offers). Agents come from `agents.json`, a copy
+  autocomplete (smallest model the agent offers; or no agent at all: one curl request to an
+  OpenAI- or Anthropic-compatible API). Agents come from `agents.json`, a copy
   of the ACP registry. With flow-atelier installed, `atelier harness sync` writes a newer
   copy that the app uses instead. An agent that quits on its own is started again, unless it
   quits within 30 seconds of starting; then a click on it in the status bar starts it.

@@ -154,12 +154,6 @@
     </footer>
   </div>
 
-  <div id="ac-menu" class="menu" hidden>
-    <label class="check"><input type="checkbox" id="ac-toggle" /> Suggest while I type</label>
-    <p class="muted">Grey text appears when you pause. Tab accepts, Esc dismisses.</p>
-    <div id="complete-options" class="options stacked"></div>
-  </div>
-
   <div id="inline-box" hidden>
     <div class="inline-row">
       <i class="codicon codicon-sparkle" id="inline-icon"></i>
@@ -202,6 +196,36 @@
       <p class="muted setup-help">Still stuck? See <a href="#" id="setup-troubleshooting">Troubleshooting</a>. <span id="setup-log"></span></p>
       <div class="ask-actions">
         <button type="button" class="btn secondary" id="setup-again">Check Again</button>
+        <button value="done" class="btn primary">Done</button>
+      </div>
+    </form>
+  </dialog>
+  <dialog id="ac-settings" class="ask settings" aria-labelledby="ac-title">
+    <form method="dialog">
+      <p class="ask-title" id="ac-title">Autocomplete</p>
+      <label class="check"><input type="checkbox" id="ac-toggle" /> Suggest while I type</label>
+      <p class="muted">Grey text appears when you pause. Tab accepts, Esc dismisses.</p>
+      <div class="source" role="radiogroup" aria-label="Where suggestions come from">
+        <label class="check"><input type="radio" name="ac-source" value="acp" /> Your agent (ACP)</label>
+        <label class="check"><input type="radio" name="ac-source" value="api" /> An API</label>
+      </div>
+      <div id="ac-acp" class="options stacked">
+        <label>Agent <select id="ac-agent" title="The same agent as the chat"></select></label>
+        <div id="complete-options" class="options stacked"></div>
+      </div>
+      <div id="ac-api" class="options stacked" hidden>
+        <label>Kind
+          <select id="ac-kind">
+            <option value="openai">OpenAI-compatible</option>
+            <option value="anthropic">Anthropic-compatible</option>
+          </select>
+        </label>
+        <label>Address <input id="ac-url" spellcheck="false" /></label>
+        <label>API key <input id="ac-key" type="password" /></label>
+        <label>Model <input id="ac-model" spellcheck="false" /></label>
+      </div>
+      <p id="ac-error" hidden></p>
+      <div class="ask-actions">
         <button value="done" class="btn primary">Done</button>
       </div>
     </form>
