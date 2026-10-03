@@ -22,7 +22,7 @@ use tokio::task::JoinHandle;
 use tokio_tungstenite::tungstenite::{self, protocol::WebSocketConfig};
 use unicode_normalization::UnicodeNormalization;
 
-use crate::agent::{complete_api, find_agent, registry, BRIDGE};
+use crate::agent::{complete_api, complete_prompt, find_agent, registry, BRIDGE};
 use crate::engine;
 use crate::lock;
 
@@ -960,7 +960,7 @@ fn row(label: &str, status: &str, detail: String, fix: &str) -> Value {
 }
 
 /// Check Setup: what the chosen agent needs to start, then the tools each preview and export
-/// needs. The page adds whether the agent itself runs.
+/// needs, and which agents can start here. The page adds whether the agent itself runs.
 async fn setup() -> Result<Value, String> {
     let agent = find_agent(&BRIDGE.agent_id().unwrap_or(DEFAULT_AGENT.into()))?;
     let mut rows = vec![match agent.program() {
@@ -993,7 +993,10 @@ async fn setup() -> Result<Value, String> {
         });
     }
     let log = APP.get().and_then(|a| a.path().app_log_dir().ok()).map(|d| d.join("agent.log"));
-    Ok(json!({"type": "setup", "rows": rows, "log": log}))
+    // The agents whose starter (npx, uvx or their own program) is on this computer.
+    let mut ready: Vec<String> = registry().into_iter().filter(|a| on_path(a.program())).map(|a| a.name).collect();
+    ready.sort_by_key(|name| name.to_lowercase());
+    Ok(json!({"type": "setup", "rows": rows, "log": log, "ready": ready}))
 }
 
 /// Compile with the writer's own TeX: latexmk (MacTeX, TeX Live) or else Tectonic. On failure,
@@ -1583,7 +1586,11 @@ async fn handle(msg: &Value) -> Result<(), String> {
         "cancel" => BRIDGE.cancel("chat").await,
         "permission" => BRIDGE.answer_permission(f("id")?, opt("option").map(String::from)),
         "set_agent" => start_agent(f("id")?).await?,
-        "check_setup" => send(setup().await?),
+        "check_setup" => {
+            let mut found = setup().await?;
+            found["quiet"] = msg["quiet"].clone(); // the start page asks, and wants no dialog
+            send(found);
+        }
         "troubleshooting" => {
             Command::new(if cfg!(target_os = "macos") { "open" } else { "xdg-open" }).arg(TROUBLESHOOTING).spawn().map_err(err)?;
         }
@@ -1593,10 +1600,10 @@ async fn handle(msg: &Value) -> Result<(), String> {
             send(json!({"type": "inline_result", "req": msg["req"], "text": text}));
         }
         "complete" => {
-            let (path, before, after) = (opt("path").unwrap_or(""), f("before")?, f("after")?);
+            let prompt = complete_prompt(f("prompt")?, opt("path").unwrap_or(""), f("before")?, f("after")?);
             let text = match opt("url") {
-                Some(url) => complete_api(f("kind")?, url, f("model")?, opt("key").unwrap_or(""), path, before, after).await?,
-                None => BRIDGE.complete(path, before, after).await?,
+                Some(url) => complete_api(f("kind")?, url, f("model")?, opt("key").unwrap_or(""), &prompt).await?,
+                None => BRIDGE.complete(&prompt).await?,
             };
             send(json!({"type": "complete_result", "req": msg["req"], "text": text}));
         }

@@ -50,14 +50,10 @@ fn inline_prompt(path: &str, instruction: &str, selected: &str, before: &str, af
     )
 }
 
-fn complete_prompt(path: &str, before: &str, after: &str) -> String {
-    format!(
-        "You are the autocomplete of a {} editor. Continue the text at <CURSOR>.\n\
-         Reply with ONLY the text to insert: a few words, at most one sentence. Start with a space if one is needed.\n\
-         No explanation, no quotes, no code fences. Do not use any tools.\n\n\
-         {before}<CURSOR>{after}",
-        language_name(path)
-    )
+/// What autocomplete asks: the writer's instructions (the page has the default ones), then the
+/// text around the cursor.
+pub fn complete_prompt(instructions: &str, path: &str, before: &str, after: &str) -> String {
+    format!("{}\n\n{before}<CURSOR>{after}", instructions.replace("{language}", language_name(path)))
 }
 
 pub struct Agent {
@@ -568,7 +564,7 @@ impl Bridge {
         Ok(strip_fences(&reply))
     }
 
-    pub async fn complete(&self, path: &str, before: &str, after: &str) -> Result<String, String> {
+    pub async fn complete(&self, prompt: &str) -> Result<String, String> {
         let me = self.newest_completion.fetch_add(1, Relaxed) + 1;
         if self.complete_lock.try_lock().is_err() {
             self.cancel("complete").await; // a newer keystroke wins
@@ -582,7 +578,7 @@ impl Bridge {
         if self.completions.fetch_add(1, Relaxed) % 20 == 19 {
             self.st().sessions.remove("complete");
         }
-        let (_, reply) = self.prompt("complete", &complete_prompt(path, before, after)).await?;
+        let (_, reply) = self.prompt("complete", prompt).await?;
         Ok(suggestion(&reply))
     }
 
@@ -689,12 +685,12 @@ fn curl_config(url: &str, headers: &[String], body: &Value) -> Result<String, St
 /// under a second.
 // ponytail: a new curl, so a new TLS handshake (about 150 ms to Groq), for every suggestion.
 // A kept connection (reqwest is already in the build, for the updater) if that matters.
-pub async fn complete_api(kind: &str, url: &str, model: &str, key: &str, path: &str, before: &str, after: &str) -> Result<String, String> {
+pub async fn complete_api(kind: &str, url: &str, model: &str, key: &str, prompt: &str) -> Result<String, String> {
     static NEWER: Notify = Notify::const_new();
     NEWER.notify_waiters(); // a newer keystroke wins: the request still waiting ends, and its curl with it
     let (anthropic, base) = (kind == "anthropic", url.trim_end_matches('/'));
     // The two kinds differ in the address, the name of the limit and the key's header. The
-    // limit leaves room for a model that thinks first; the prompt keeps the answer short.
+    // limit leaves room for a model that thinks first; the instructions keep the answer short.
     // No temperature: the newer models of both refuse one.
     let (url, limit, mut headers) = if anthropic {
         // Their base address has no /v1, but people paste it with one.
@@ -705,7 +701,7 @@ pub async fn complete_api(kind: &str, url: &str, model: &str, key: &str, path: &
     if !key.is_empty() {
         headers.push(if anthropic { format!("x-api-key: {key}") } else { format!("Authorization: Bearer {key}") });
     }
-    let body = json!({"model": model, "messages": [{"role": "user", "content": complete_prompt(path, before, after)}], limit: 1024});
+    let body = json!({"model": model, "messages": [{"role": "user", "content": prompt}], limit: 1024});
     // The key and the text go in on stdin: other programs can read a command's arguments.
     let config = curl_config(&url, &headers, &body)?;
     let mut child = Command::new("curl")
@@ -815,18 +811,19 @@ mod tests {
     #[tokio::test]
     async fn completes_from_an_api() {
         // Quotes, a backslash and a new line: curl must send them as they are.
-        let before = "She said \"hi\" \\ then\nleft";
+        let prompt = complete_prompt("Continue this {language} text.", "a.typ", "She said \"hi\" \\ then\nleft", " now");
+        assert_eq!(prompt, "Continue this Typst text.\n\nShe said \"hi\" \\ then\nleft<CURSOR> now");
         let (url, asked) = api(json!({"choices": [{"message": {"role": "assistant", "content": "```\nand so on.\n```"}}]})).await;
-        assert_eq!(complete_api("openai", &format!("{url}/v1/"), "m", "k\"y", "a.typ", before, "").await.unwrap(), "and so on.");
+        assert_eq!(complete_api("openai", &format!("{url}/v1/"), "m", "k\"y", &prompt).await.unwrap(), "and so on.");
         let (head, body) = asked.await.unwrap();
         assert!(head.starts_with("POST /v1/chat/completions "), "{head}");
         assert!(head.contains("Authorization: Bearer k\"y\r\n"), "{head}");
         assert_eq!((&body["model"], &body["max_completion_tokens"]), (&json!("m"), &json!(1024)));
-        assert!(body["messages"][0]["content"].as_str().unwrap().ends_with(&format!("{before}<CURSOR>")));
+        assert_eq!(body["messages"][0]["content"], prompt);
 
         // Anthropic's way: another address, header and limit; the answer comes after the thoughts.
         let (url, asked) = api(json!({"content": [{"type": "thinking", "thinking": "hm"}, {"type": "text", "text": "and so on."}]})).await;
-        assert_eq!(complete_api("anthropic", &format!("{url}/v1"), "m", "key", "a.typ", before, "").await.unwrap(), "and so on.");
+        assert_eq!(complete_api("anthropic", &format!("{url}/v1"), "m", "key", &prompt).await.unwrap(), "and so on.");
         let (head, body) = asked.await.unwrap();
         assert!(head.starts_with("POST /v1/messages "), "{head}");
         assert!(head.contains("x-api-key: key\r\n") && head.contains("anthropic-version: 2023-06-01\r\n"), "{head}");
@@ -834,9 +831,9 @@ mod tests {
 
         // What the API says is wrong reaches the writer, in either shape.
         let (url, _asked) = api(json!({"type": "error", "error": {"type": "authentication_error", "message": "invalid x-api-key"}})).await;
-        assert_eq!(complete_api("anthropic", &url, "m", "key", "a.typ", "x", "").await.unwrap_err(), "invalid x-api-key");
+        assert_eq!(complete_api("anthropic", &url, "m", "key", "x").await.unwrap_err(), "invalid x-api-key");
         // Nothing listens there (Ollama not started): said plainly.
-        assert!(complete_api("openai", "http://127.0.0.1:1/v1", "m", "", "a.typ", "x", "").await.unwrap_err().starts_with("Could not reach"));
+        assert!(complete_api("openai", "http://127.0.0.1:1/v1", "m", "", "x").await.unwrap_err().starts_with("Could not reach"));
     }
 
     #[tokio::test]

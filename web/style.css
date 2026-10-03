@@ -562,6 +562,49 @@ body.resizing { cursor: ew-resize; user-select: none; }
   color: var(--fg);
   opacity: 0.14;
 }
+/* Start page: what the editor shows while no project is open, as VS Code's Welcome page.
+   The preview has nothing to show yet, so it gives its room to the page. */
+#app.starting { --preview-col: 0px; }
+#app.starting #preview-group, #app.starting [data-sash="preview"] { display: none; }
+/* From the top, not centered: opening the list of agents must not move the page. */
+#app.starting .welcome { display: block; place-content: normal; padding: 56px 40px 40px; overflow: auto; user-select: text; }
+.start { max-width: 800px; margin: 0 auto; }
+.start header { margin-bottom: 40px; }
+.start h1 { margin: 0; font: 700 30px/1.2 var(--manuscript); letter-spacing: -0.02em; color: var(--fg-strong); }
+.start header p { margin: 6px 0 0; font-size: 15px; color: var(--muted); }
+/* To do on the left, to know on the right; one column when the pane is narrow. */
+.start-cols { display: grid; grid-template-columns: repeat(auto-fit, minmax(min(260px, 100%), 1fr)); gap: 36px 64px; }
+.start-cols > div { display: grid; align-content: start; gap: 32px; min-width: 0; }
+.start h2 { margin: 0 0 10px; font-size: 16px; font-weight: 400; color: var(--fg-strong); }
+.start ul { margin: 0; padding: 0; list-style: none; }
+.start section { min-width: 0; }
+.start section > p { margin: 0; }
+.start-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  width: calc(100% + 16px);
+  margin: 0 -8px;
+  padding: 5px 8px;
+  border: 0;
+  border-radius: 4px;
+  background: none;
+  color: var(--fg-strong);
+  text-align: left;
+}
+.start-row:hover { background: var(--hover-strong); }
+.start-row .codicon { flex: none; color: var(--icon-inactive); }
+.start-row:hover .codicon { color: var(--fg); }
+/* The name gives way only when the row is narrower than it; the place takes what is left. */
+.start-row b, .start-row span { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.start-row b { font-weight: 400; }
+.start-row span { flex: 1 1 0; color: var(--muted); font-size: 12px; }
+.start .setup-rows { gap: 9px; margin: 0; }
+.start .btn.sm { margin-left: 6px; vertical-align: middle; }
+.start details { margin-top: 9px; padding-left: 26px; }
+.start summary { color: var(--muted); cursor: pointer; }
+.start summary:hover { color: var(--fg); }
+.start details p { margin: 6px 0 0; line-height: 1.5; }
 .shortcuts { display: grid; grid-template-columns: auto auto; gap: 9px 12px; margin: 0; align-items: center; }
 .shortcuts dt { text-align: right; color: var(--muted); }
 .shortcuts dd { margin: 0; display: flex; gap: 3px; }
@@ -852,10 +895,12 @@ details.thought div { white-space: pre-wrap; margin-top: 4px; padding-left: 18px
 .settings .muted { margin: 6px 0 14px 22px; font-size: 12px; line-height: 1.45; }
 .settings .source { display: flex; gap: 20px; margin-bottom: 12px; }
 .settings .ask-actions { margin-top: 16px; }
+.settings .prompt { display: grid; gap: 6px; margin-top: 12px; color: var(--muted); }
+.settings .hint { margin: 6px 0 0; }
 .options.stacked { display: grid; gap: 6px; }
 .options.stacked label { display: grid; grid-template-columns: 70px 1fr; align-items: center; gap: 8px; color: var(--muted); }
 #ac-error { margin: 8px 0 0; color: var(--danger); overflow-wrap: anywhere; }
-.options.stacked select, .options.stacked input {
+.options.stacked select, .options.stacked input, .settings textarea {
   min-width: 0;
   height: 26px;
   padding: 0 6px;
@@ -864,6 +909,7 @@ details.thought div { white-space: pre-wrap; margin-top: 4px; padding-left: 18px
   background: var(--input);
   color: var(--fg);
 }
+.settings textarea { height: auto; padding: 6px; font: inherit; font-size: 12px; line-height: 1.45; resize: vertical; }
 
 #inline-box {
   position: fixed;

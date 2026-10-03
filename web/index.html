@@ -77,13 +77,52 @@
         <div id="review-view" class="layer review" hidden aria-label="Changes to review"></div>
         <div id="welcome" class="welcome">
           <div class="welcome-mark" id="welcome-mark" aria-hidden="true"></div>
-          <dl class="shortcuts">
+          <dl class="shortcuts" id="shortcuts">
             <dt>Edit selection with AI</dt><dd><kbd>&#8984;</kbd><kbd>K</kbd></dd>
             <dt>Toggle chat</dt><dd><kbd>&#8984;</kbd><kbd>J</kbd></dd>
             <dt>Accept suggestion</dt><dd><kbd>Tab</kbd></dd>
             <dt>Toggle preview</dt><dd><kbd>&#8984;</kbd><kbd>\</kbd></dd>
             <dt>Toggle explorer</dt><dd><kbd>&#8679;</kbd><kbd>&#8984;</kbd><kbd>E</kbd></dd>
           </dl>
+          <div id="start" class="start" hidden>
+            <header>
+              <h1 id="start-title"></h1>
+              <p>Open a project to start writing.</p>
+            </header>
+            <div class="start-cols">
+              <div>
+                <section aria-labelledby="start-h-start">
+                  <h2 id="start-h-start">Start</h2>
+                  <ul>
+                    <li><button type="button" class="start-row" id="start-new"><i class="codicon codicon-repo-create"></i><b>New Project</b></button></li>
+                    <li><button type="button" class="start-row" id="start-open"><i class="codicon codicon-folder-opened"></i><b>Open Project</b></button></li>
+                  </ul>
+                </section>
+                <section aria-labelledby="start-h-recent">
+                  <h2 id="start-h-recent">Recent</h2>
+                  <ul id="recent"></ul>
+                  <p class="muted" id="recent-none">The projects you open appear here.</p>
+                </section>
+              </div>
+              <div>
+                <section aria-labelledby="start-h-computer">
+                  <h2 id="start-h-computer">This computer</h2>
+                  <ul class="setup-rows" id="start-rows"></ul>
+                  <details id="start-agents" hidden>
+                    <summary></summary>
+                    <p class="muted"></p>
+                  </details>
+                </section>
+                <section aria-labelledby="start-h-ac">
+                  <h2 id="start-h-ac">Autocomplete</h2>
+                  <div class="setup-row">
+                    <i class="codicon codicon-sparkle"></i>
+                    <div><span id="start-ac"></span> <button type="button" class="btn secondary sm" id="start-ac-settings">Settings</button></div>
+                  </div>
+                </section>
+              </div>
+            </div>
+          </div>
         </div>
         <div id="review-bar" role="toolbar" aria-label="Review changes" hidden>
           <button class="icon-btn" id="prev-change" title="Previous change"><i class="codicon codicon-chevron-up"></i></button>
@@ -224,6 +263,10 @@
         <label>API key <input id="ac-key" type="password" /></label>
         <label>Model <input id="ac-model" spellcheck="false" /></label>
       </div>
+      <label class="prompt">Instructions
+        <textarea id="ac-prompt" rows="6" spellcheck="false"></textarea>
+      </label>
+      <p class="muted hint">What the model is told before your text. {language} becomes the kind of document. A suggestion is always one line. Empty it to get the default back.</p>
       <p id="ac-error" hidden></p>
       <div class="ask-actions">
         <button value="done" class="btn primary">Done</button>

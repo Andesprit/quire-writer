@@ -14,11 +14,15 @@ autocomplete, your own agent, Grammarly, themes, and how Quire compares with VS 
 - New project: pick Typst, LaTeX, Quarto or Markdown, then a folder. It gets a starter file
   (`main.typ`, `main.tex`, `index.qmd` or `main.md`) that shows how that kind of document
   looks. A file already there is never replaced. "Open project" opens an existing folder.
+- Start page, while no project is open: the projects you opened last (click one to open it),
+  what this computer has for the previews, the exports and the agent, which agents can start
+  here, and where autocomplete comes from.
 - Chat bar: ask the agent to write or change things in your folder.
 - Cmd+K on selected text: ask for an edit of just that part.
 - Autocomplete: grey text after you pause typing, Tab to accept. Toggle in the top bar.
   It asks your agent or, much faster, an API of your choice (OpenAI-compatible, such as
-  Groq or Ollama, or Anthropic-compatible): click Autocomplete in the status bar.
+  Groq or Ollama, or Anthropic-compatible): click Autocomplete in the status bar. The
+  instructions the model follows can be changed there too.
 - Track changes: every change the agent makes shows as a change to review.
   Accept or reject each one, edit it before you accept, or use
   "Restore files to before this message" in the chat to undo a whole turn.

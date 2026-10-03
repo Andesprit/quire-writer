@@ -950,19 +950,46 @@ $("labels").onclick = (e) => {
   if (l) goTo(l.path, l.line, l.col)
 }
 
-$("open-folder").onclick = $("open-folder-2").onclick = async () => {
+$("open-folder").onclick = $("open-folder-2").onclick = $("start-open").onclick = async () => {
   // Unsaved typing belongs to the folder that is open now.
   if (await leaveCurrent()) send({ type: "open_folder" })
 }
 
 // New project: the kind here, then the app asks for the folder and puts a starter file in it.
-$("new-project").onclick = $("new-project-2").onclick = async () => {
+$("new-project").onclick = $("new-project-2").onclick = $("start-new").onclick = async () => {
   const d = $<HTMLDialogElement>("new-project-ask")
   d.returnValue = ""
   d.showModal()
   const kind = await new Promise<string>((done) => d.addEventListener("close", () => done(d.returnValue), { once: true }))
   if (kind && (await leaveCurrent())) send({ type: "new_project", kind })
 }
+
+// ---------- start page: the projects opened last ----------
+
+const recent = (): string[] => {
+  try {
+    return JSON.parse(store.get("recent") ?? "[]")
+  } catch {
+    return []
+  }
+}
+let opening = "" // the recent project being opened: forgotten if it cannot be opened
+function renderRecent(list = recent()) {
+  store.set("recent", JSON.stringify(list))
+  $("recent-none").hidden = !!list.length
+  // The folder's name, then where it is: two projects may share a name.
+  $("recent").innerHTML = list
+    .map(
+      (p) =>
+        `<li><button type="button" class="start-row" data-open="${esc(p)}" title="${esc(p)}">${icon("folder")}<b>${esc(baseName(p))}</b><span>${esc(p.slice(0, p.lastIndexOf("/")))}</span></button></li>`,
+    )
+    .join("")
+}
+$("recent").onclick = async (e) => {
+  const path = (e.target as HTMLElement).closest<HTMLElement>("[data-open]")?.dataset.open
+  if (path && (await leaveCurrent())) send({ type: "open_folder", path: (opening = path) })
+}
+renderRecent()
 
 // Another folder was opened: nothing from the previous one may stay on screen.
 function resetForFolder(newRoot: string) {
@@ -982,6 +1009,10 @@ function renderTab() {
   const has = !!current
   $("tab").hidden = !has
   $("welcome").hidden = has
+  // No project yet: the start page in place of the watermark, and no preview next to it.
+  app.classList.toggle("starting", !root)
+  $("start").hidden = !!root
+  $("welcome-mark").hidden = $("shortcuts").hidden = !root
   $("breadcrumbs").hidden = !has
   buildFormatBar(lang, mode === "review")
   $("format-bar").hidden = !has || !syntax()
@@ -1096,7 +1127,7 @@ function renderAgentStatus(text?: string) {
   $("sb-agent").innerHTML = `${icon(busy ? "loading" : "hubot", busy ? "codicon-modifier-spin" : "")} <span>${esc(label)}</span>`
   $("sb-agent").title = root && agentState === "none" ? "Start the agent" : "Open chat"
   setAgentReady(agentState === "ready" || agentState === "working")
-  if ($<HTMLDialogElement>("setup").open) renderSetup()
+  if ($<HTMLDialogElement>("setup").open || !root) renderSetup()
   renderAgentNote(name, label)
 }
 
@@ -1132,6 +1163,7 @@ $("agent-note").onclick = (e) => {
 
 let agentError = "" // why the agent last failed to start
 let setupRows: { label: string; status: string; detail: string; fix: string }[] = []
+let readyAgents: string[] = [] // the agents whose starter is on this computer
 const SETUP_ICONS: Record<string, string> = { ok: "pass", warn: "warning", error: "error", off: "circle-slash", busy: "loading codicon-modifier-spin" }
 
 function renderSetup() {
@@ -1145,7 +1177,8 @@ function renderSetup() {
           ? { status: "off", detail: "It starts when you open a project." }
           : { status: agentError ? "error" : "off", detail: agentError || "Not running.", start: true }
   const rows = [{ label: name, fix: "", ...agent }, ...setupRows]
-  $("setup-rows").innerHTML = rows
+  // The same lines in the Check Setup dialog and on the start page.
+  $("setup-rows").innerHTML = $("start-rows").innerHTML = rows
     .map((r: any) => {
       const detail = r.detail.includes("\n") ? `<pre class="setup-said">${esc(r.detail)}</pre>` : `<span>${esc(r.detail)}</span>`
       const fix = r.fix ? `<div class="setup-fix"><code>${esc(r.fix)}</code><button type="button" class="btn secondary sm" data-copy="${esc(r.fix)}">Copy</button></div>` : ""
@@ -1153,8 +1186,18 @@ function renderSetup() {
       return `<li class="setup-row ${r.status}">${icon(SETUP_ICONS[r.status])}<div><b>${esc(r.label)}</b> ${detail}${fix}${start}</div></li>`
     })
     .join("")
+  const n = readyAgents.length
+  $("start-agents").hidden = !setupRows.length // not looked up yet
+  $("start-agents").querySelector("summary")!.textContent = n ? `${n} agent${n === 1 ? "" : "s"} can start on this computer` : "No agent can start on this computer yet"
+  $("start-agents").querySelector("p")!.textContent = readyAgents.join(", ")
 }
-$("setup-rows").onclick = (e) => {
+// The start page shows what this computer has: looked up when it shows, and again when the
+// writer comes back to the window (from installing something, say).
+const checkForStart = () => {
+  if (!root) send({ type: "check_setup", quiet: true })
+}
+addEventListener("focus", checkForStart)
+$("setup-rows").onclick = $("start-rows").onclick = (e) => {
   const b = (e.target as HTMLElement).closest("button")
   if (b?.dataset.copy) navigator.clipboard.writeText(b.dataset.copy).then(() => (b.textContent = "Copied"))
   else if (b?.hasAttribute("data-start")) send({ type: "set_agent", id: agentId })
@@ -1227,6 +1270,23 @@ const acFields = {
   model: $<HTMLInputElement>("ac-model"),
 }
 
+// What the model is told before the text around the cursor. The writer may change it; only a
+// changed one is kept, so the others get a better default when one comes.
+const AC_PROMPT =
+  "You are the autocomplete of a {language} editor. Continue the text at <CURSOR>.\n" +
+  "Reply with ONLY the text to insert: a few words, at most one sentence. Start with a space if one is needed.\n" +
+  "No explanation, no quotes, no code fences. Do not use any tools."
+const acPrompt = $<HTMLTextAreaElement>("ac-prompt")
+acPrompt.value = store.get("ac.prompt") ?? AC_PROMPT
+acPrompt.oninput = () => {
+  const text = acPrompt.value.trim()
+  if (text && text !== AC_PROMPT) store.set("ac.prompt", text)
+  else store.del("ac.prompt")
+}
+acPrompt.onchange = () => {
+  if (!acPrompt.value.trim()) acPrompt.value = AC_PROMPT
+}
+
 /** The API to ask, or null for the agent. */
 function acApi() {
   if (store.get("ac.source") !== "api") return null
@@ -1245,6 +1305,8 @@ function renderAcStatus() {
   $("sb-ac").style.opacity = on ? "" : "0.75"
   $("ac-error").textContent = error
   $("ac-error").hidden = !error
+  const from = api ? `An API (${api.kind === "anthropic" ? "Anthropic" : "OpenAI"}-compatible)` : "Your agent (ACP)"
+  $("start-ac").textContent = on ? `${from}${model ? ` · ${model}` : ""}` : "Off"
 }
 
 function renderAcSource() {
@@ -1301,7 +1363,7 @@ acToggle.onchange = () => {
   else clearGhost()
   renderAcStatus()
 }
-$("sb-ac").onclick = () => $<HTMLDialogElement>("ac-settings").showModal()
+$("sb-ac").onclick = $("start-ac-settings").onclick = () => $<HTMLDialogElement>("ac-settings").showModal()
 
 let acTimer = 0
 let reqSeq = 0 // shared by autocomplete and inline, so errors reach the right place
@@ -1316,7 +1378,7 @@ function scheduleComplete() {
     const pos = ta.selectionStart
     const doc = ta.value
     acWant = { req: ++reqSeq, pos, version: docVersion }
-    send({ type: "complete", req: acWant.req, path: current, before: doc.slice(Math.max(0, pos - 2000), pos), after: doc.slice(pos, pos + 500), ...api })
+    send({ type: "complete", req: acWant.req, path: current, before: doc.slice(Math.max(0, pos - 2000), pos), after: doc.slice(pos, pos + 500), prompt: acPrompt.value.trim() || AC_PROMPT, ...api })
     acBusy = true
     renderAcStatus()
     // An API answers in a fraction of a second, so it is asked after a shorter pause. Every
@@ -1671,7 +1733,7 @@ for (const k of ["sidebar-w", "chat-w", "preview-fr"]) {
   if (v) app.style.setProperty(`--${k}`, v)
 }
 $("app-name").textContent = APP_NAME
-$("welcome-mark").textContent = APP_NAME
+$("welcome-mark").textContent = $("start-title").textContent = APP_NAME
 function renderAutosave() {
   $("sb-autosave").innerHTML = `${icon("save")} <span>${autosave ? "Auto save" : "Auto save off"}</span>`
   $("sb-autosave").style.opacity = autosave ? "" : "0.75"
@@ -1731,7 +1793,10 @@ function onMessage(msg: any) {
       break
     case "folder":
       if (root && msg.root && msg.root !== root) resetForFolder(msg.root)
+      if (msg.root && msg.root !== root) renderRecent([msg.root, ...recent().filter((p) => p !== msg.root)].slice(0, 8))
+      if (msg.root) opening = ""
       root = msg.root
+      checkForStart()
       files = msg.files
       dirs = msg.dirs ?? []
       changed = new Set(msg.changed)
@@ -1837,14 +1902,16 @@ function onMessage(msg: any) {
       agentState = msg.ready ? "ready" : "none"
       agentError = msg.error ?? ""
       renderAgentStatus(msg.error && "Agent failed to start")
+      checkForStart() // another agent may need another starter
       if (msg.ready && acToggle.checked) send({ type: "warm", kind: "complete" })
       break
     case "setup": {
       setupRows = msg.rows
+      readyAgents = msg.ready ?? []
       $("setup-log").textContent = msg.log ? `The full log is in ${msg.log}.` : ""
       renderSetup()
       const d = $<HTMLDialogElement>("setup")
-      if (!d.open) d.showModal()
+      if (!msg.quiet && !d.open) d.showModal()
       break
     }
     case "options":
@@ -1892,6 +1959,11 @@ function onMessage(msg: any) {
       break
     case "error":
       if (msg.op === "export") exporting?.remove()
+      if (msg.op === "open_folder" && opening) {
+        // A recent project that is gone or cannot be read: do not offer it again.
+        renderRecent(recent().filter((p) => p !== opening))
+        opening = ""
+      }
       if (msg.op === "warm") {
         // Autocomplete could not start yet: say so where it lives, without a notice.
         $("sb-ac").title = `Autocomplete is not ready: ${msg.message}`
