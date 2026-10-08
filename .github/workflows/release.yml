@@ -1,134 +1,17 @@
 # Push a tag v<version> (the version in src-tauri/Cargo.toml) to build Quire for Apple Silicon
-# Macs and, experimentally, for Linux (x86_64). The result is a draft GitHub release: publish
-# it, and installed apps update themselves.
+# Macs and, experimentally, for Linux and Windows (x86_64). The result is a draft GitHub
+# release: publish it, and installed apps update themselves.
 name: Release
 
 on:
   push:
     tags: ["v*"]
 
-env:
-  TINYMIST: v0.15.8 # bundled with the app for the Typst preview
-
 jobs:
   build:
-    strategy:
-      fail-fast: false
-      max-parallel: 1 # one build at a time adds its system to the release's latest.json
-      matrix:
-        include:
-          - os: macos-latest # Apple Silicon
-            bundles: app,dmg
-          - os: ubuntu-22.04 # x86_64. The oldest Ubuntu we build on: the AppImage runs on newer systems, not older.
-            bundles: appimage,deb
-    runs-on: ${{ matrix.os }}
+    uses: ./.github/workflows/build.yml
+    with:
+      publish: true
+    secrets: inherit
     permissions:
       contents: write
-    steps:
-      - uses: actions/checkout@v7
-
-      - name: The tag matches the app version
-        run: |
-          version=$(sed -n 's/^version = "\(.*\)"$/\1/p' src-tauri/Cargo.toml | head -1)
-          if [ "v$version" != "$GITHUB_REF_NAME" ]; then
-            echo "::error::Tag $GITHUB_REF_NAME does not match version $version in src-tauri/Cargo.toml"
-            exit 1
-          fi
-
-      - name: Linux libraries
-        if: runner.os == 'Linux'
-        run: |
-          sudo apt-get update
-          sudo apt-get install -y libwebkit2gtk-4.1-dev libappindicator3-dev librsvg2-dev patchelf
-
-      - uses: actions/setup-node@v7
-        with:
-          node-version: lts/*
-          cache: npm
-          cache-dependency-path: web/package-lock.json
-
-      - name: Build the page
-        working-directory: web
-        run: npm ci && npm run build
-
-      - uses: dtolnay/rust-toolchain@stable
-
-      - uses: Swatinem/rust-cache@v2
-        with:
-          workspaces: src-tauri
-
-      - name: Get tinymist
-        run: |
-          target=$(rustc -vV | sed -n 's/^host: //p')
-          mkdir -p build/bin && cd build/bin
-          file=tinymist-$target.tar.gz
-          curl -fsSLO "https://github.com/Myriad-Dreamin/tinymist/releases/download/$TINYMIST/$file"
-          curl -fsSLO "https://github.com/Myriad-Dreamin/tinymist/releases/download/$TINYMIST/$file.sha256"
-          shasum -a 256 -c "$file.sha256"
-          tar xzf "$file" --strip-components 1
-          mv tinymist "tinymist-$target" # the sidecar name Tauri expects
-          rm "$file" "$file.sha256"
-
-      - name: Apple signing
-        if: runner.os == 'macOS'
-        env:
-          APPLE_CERTIFICATE: ${{ secrets.APPLE_CERTIFICATE }}
-          APPLE_CERTIFICATE_PASSWORD: ${{ secrets.APPLE_CERTIFICATE_PASSWORD }}
-          APPLE_SIGNING_IDENTITY: ${{ secrets.APPLE_SIGNING_IDENTITY }}
-          APPLE_ID: ${{ secrets.APPLE_ID }}
-          APPLE_PASSWORD: ${{ secrets.APPLE_PASSWORD }}
-          APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
-        run: |
-          # Tauri signs and notarizes when these are set. Without them it signs ad hoc: the app
-          # runs, but macOS warns on first open.
-          if [ -z "$APPLE_CERTIFICATE" ]; then
-            echo "::warning::No Apple secrets: this release is not notarized, and macOS will warn on first open."
-            echo "APPLE_SIGNING_IDENTITY=-" >> "$GITHUB_ENV"
-            exit 0
-          fi
-          # Our own keychain rather than Tauri's import: the .p12 may hold more identities than
-          # the one we sign with, and Tauri refuses that. codesign picks it by name.
-          keychain="$RUNNER_TEMP/signing.keychain-db"
-          keychain_password=$(openssl rand -base64 24)
-          echo "$APPLE_CERTIFICATE" | base64 --decode > "$RUNNER_TEMP/certificate.p12"
-          security create-keychain -p "$keychain_password" "$keychain"
-          security set-keychain-settings -lut 21600 "$keychain"
-          security unlock-keychain -p "$keychain_password" "$keychain"
-          security import "$RUNNER_TEMP/certificate.p12" -k "$keychain" -P "$APPLE_CERTIFICATE_PASSWORD" -T /usr/bin/codesign
-          security set-key-partition-list -S apple-tool:,apple:,codesign: -s -k "$keychain_password" "$keychain" > /dev/null
-          security list-keychains -d user -s "$keychain" $(security list-keychains -d user | tr -d '"')
-          rm "$RUNNER_TEMP/certificate.p12"
-          security find-identity -v -p codesigning "$keychain"
-          for v in APPLE_SIGNING_IDENTITY APPLE_ID APPLE_PASSWORD APPLE_TEAM_ID; do
-            printf '%s<<END_%s\n%s\nEND_%s\n' "$v" "$v" "${!v}" "$v" >> "$GITHUB_ENV"
-          done
-
-      - uses: tauri-apps/tauri-action@v1
-        env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-          # Signs the update files; installed apps only accept updates signed with this key.
-          TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
-          TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
-        with:
-          tagName: ${{ github.ref_name }}
-          releaseName: Quire ${{ github.ref_name }}
-          releaseBody: |
-            **macOS** (Apple Silicon): download the `.dmg`, open it and drag Quire to Applications.
-
-            **Linux** (x86_64, experimental): the `.AppImage` runs on most systems; the `.deb` is for Debian and Ubuntu. Report what does not work in an issue.
-
-            Installed copies update themselves once this release is published.
-          releaseDraft: true
-          args: --bundles ${{ matrix.bundles }} --config '{"bundle":{"createUpdaterArtifacts":true}}'
-
-      - name: Notarize the disk image
-        if: runner.os == 'macOS' && env.APPLE_ID != ''
-        env:
-          GH_TOKEN: ${{ github.token }}
-          GH_REPO: ${{ github.repository }}
-        run: |
-          # Tauri notarizes the app inside; the .dmg needs its own ticket, or macOS warns when it is opened.
-          dmg=$(ls src-tauri/target/release/bundle/dmg/*.dmg)
-          xcrun notarytool submit "$dmg" --apple-id "$APPLE_ID" --password "$APPLE_PASSWORD" --team-id "$APPLE_TEAM_ID" --wait
-          xcrun stapler staple "$dmg"
-          gh release upload "$GITHUB_REF_NAME" "$dmg" --clobber

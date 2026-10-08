@@ -22,7 +22,9 @@ use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 use tokio::process::{Child, ChildStderr, ChildStdin, ChildStdout, Command};
 use tokio::sync::{oneshot, Notify};
 
-use crate::lock;
+#[cfg(windows)]
+use crate::ProcessGroup;
+use crate::{killpg, lock, SIGKILL, SIGTERM};
 use crate::project::{language_name, restart_agent, send, why};
 
 const AGENTS: &str = include_str!("../../agents.json");
@@ -197,16 +199,16 @@ impl Conn {
             if group <= 0 {
                 return;
             }
-            unsafe { libc::killpg(group, libc::SIGTERM) };
+            killpg(group, SIGTERM);
             let until = Instant::now() + KILL_AFTER;
             loop {
                 // Collect npx once it has ended: until then Linux counts it as running.
                 let _ = lock(&conn.child).try_wait();
-                if unsafe { libc::killpg(group, 0) } != 0 {
+                if killpg(group, 0) != 0 {
                     return; // nothing in the group runs any more
                 }
                 if Instant::now() >= until {
-                    unsafe { libc::killpg(group, libc::SIGKILL) };
+                    killpg(group, SIGKILL);
                     return;
                 }
                 std::thread::sleep(Duration::from_millis(50));
@@ -836,6 +838,7 @@ mod tests {
         assert!(complete_api("openai", "http://127.0.0.1:1/v1", "m", "", "x").await.unwrap_err().starts_with("Could not reach"));
     }
 
+    #[cfg(unix)] // sh and its signals
     #[tokio::test]
     async fn kill_ends_the_group() {
         let start = |script: &str| {
@@ -864,6 +867,6 @@ mod tests {
         assert!(t.elapsed() >= KILL_AFTER);
         std::thread::sleep(Duration::from_millis(200));
         let _ = lock(&npm.child).try_wait();
-        assert_ne!(unsafe { libc::killpg(npm.group, 0) }, 0);
+        assert_ne!(killpg(npm.group, 0), 0);
     }
 }

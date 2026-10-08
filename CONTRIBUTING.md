@@ -28,6 +28,9 @@ cd web && npm run check && cd ..
 cargo test --manifest-path src-tauri/Cargo.toml
 ```
 
+CI also builds the installers for macOS, Linux and Windows, the way a release does: a change
+that breaks one of them fails there.
+
 ## What we look for in a change
 
 - It keeps the promises in [PRODUCT.md](PRODUCT.md): the writer's text comes first, nothing

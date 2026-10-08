@@ -24,7 +24,9 @@ use unicode_normalization::UnicodeNormalization;
 
 use crate::agent::{complete_api, complete_prompt, find_agent, registry, BRIDGE};
 use crate::engine;
-use crate::lock;
+#[cfg(windows)]
+use crate::ProcessGroup;
+use crate::{killpg, lock, SIGTERM};
 
 const TEXT_EXT: [&str; 14] = ["typ", "tex", "qmd", "md", "bib", "sty", "cls", "yml", "yaml", "toml", "txt", "csv", "json", "xml"];
 const MAX_FILE: u64 = 2_000_000;
@@ -602,7 +604,7 @@ impl Workspace {
     fn stop_preview(&mut self) -> u64 {
         if let Some(p) = self.preview_proc.take() {
             if let Some(pid) = p.id() {
-                unsafe { libc::killpg(pid as i32, libc::SIGTERM) }; // Quarto runs helpers of its own
+                killpg(pid as i32, SIGTERM); // Quarto runs helpers of its own
             }
         }
         (self.control, self.preview_shown, self.built) = (None, false, None);
@@ -879,7 +881,7 @@ fn keep_preview(child: Child, id: u64) {
     if w.preview_id == id {
         w.preview_proc = Some(child);
     } else if let Some(pid) = child.id() {
-        unsafe { libc::killpg(pid as i32, libc::SIGTERM) };
+        killpg(pid as i32, SIGTERM);
     }
 }
 

@@ -1,4 +1,4 @@
-# Quire bundles a pinned tinymist (TINYMIST in release.yml). Each week, open an issue when a
+# Quire bundles a pinned tinymist (TINYMIST in build.yml). Each week, open an issue when a
 # newer tinymist is out, so the pin does not fall behind. Dependabot cannot see this pin.
 name: tinymist update
 
@@ -22,7 +22,7 @@ jobs:
           GH_TOKEN: ${{ github.token }}
           GH_REPO: ${{ github.repository }}
         run: |
-          pinned=$(sed -n 's/^  TINYMIST: \(v[^ ]*\).*/\1/p' .github/workflows/release.yml)
+          pinned=$(sed -n 's/^  TINYMIST: \(v[^ ]*\).*/\1/p' .github/workflows/build.yml)
           latest=$(gh release view --repo Myriad-Dreamin/tinymist --json tagName --jq .tagName)
           echo "pinned $pinned, latest $latest"
           [ "$pinned" = "$latest" ] && exit 0
@@ -31,5 +31,5 @@ jobs:
           [ "$open" != 0 ] && exit 0
           gh issue create --title "$title" --body "Quire ships tinymist $pinned, and $latest is out: https://github.com/Myriad-Dreamin/tinymist/releases/tag/$latest
 
-          Change TINYMIST in .github/workflows/release.yml, check the Typst preview, then release.
+          Change TINYMIST in .github/workflows/build.yml, check the Typst preview, then release.
           When this tinymist moves to a newer Typst, move the typst crates in src-tauri/Cargo.toml to it too: the app builds PDF, Word and web page with them."
