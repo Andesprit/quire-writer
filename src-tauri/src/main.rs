@@ -6,7 +6,9 @@ mod agent;
 mod engine;
 mod project;
 
+#[cfg(unix)]
 use std::fs::File;
+#[cfg(unix)]
 use std::os::fd::AsRawFd;
 use std::process::{Command, Stdio};
 use std::sync::{Mutex, MutexGuard};
@@ -17,12 +19,50 @@ use tauri::menu::{Menu, MenuItem, MenuItemKind};
 use tauri::webview::WebviewBuilder;
 use tauri::window::WindowBuilder;
 use tauri::{LogicalPosition, LogicalSize, Manager, Rect, RunEvent, WebviewUrl};
+#[cfg(unix)]
 use tokio::signal::unix::{signal, SignalKind};
 
 /// A lock whose holder panicked still holds good data here: use it rather than fail every
 /// later request.
 fn lock<T>(m: &Mutex<T>) -> MutexGuard<'_, T> {
     m.lock().unwrap_or_else(|e| e.into_inner())
+}
+
+#[cfg(unix)]
+use libc::{SIGKILL, SIGTERM};
+#[cfg(windows)]
+const SIGTERM: i32 = 15;
+#[cfg(windows)]
+const SIGKILL: i32 = 9;
+
+/// A preview or an agent runs in a process group of its own (`process_group(0)`), so that a
+/// signal to the group reaches all it started. Signal 0 only asks whether any of it still
+/// runs: 0 is yes.
+#[cfg(unix)]
+fn killpg(group: i32, signal: i32) -> i32 {
+    unsafe { libc::killpg(group, signal) }
+}
+
+/// Windows has neither groups nor signals: `taskkill /T` ends a process and all it started,
+/// at once, whatever the signal.
+#[cfg(windows)]
+fn killpg(pid: i32, signal: i32) -> i32 {
+    if signal != 0 {
+        let _ = Command::new("taskkill").args(["/T", "/F", "/PID", &pid.to_string()]).output();
+    }
+    -1 // nothing of it runs any more
+}
+
+/// So that starting a process reads the same on Windows, where this does nothing.
+#[cfg(windows)]
+trait ProcessGroup {
+    fn process_group(&mut self, _: i32) -> &mut Self;
+}
+#[cfg(windows)]
+impl ProcessGroup for tokio::process::Command {
+    fn process_group(&mut self, _: i32) -> &mut Self {
+        self
+    }
 }
 
 /// Scroll bars that stay in view in the previews (tinymist, Quarto, the PDF and Markdown
@@ -80,7 +120,8 @@ fn main() {
     // Set PATH before any thread starts. The bundled tinymist sits next to the app's own
     // program (a signed sidecar), and is found first.
     let bin = std::env::current_exe().ok().and_then(|exe| Some(exe.parent()?.to_path_buf()));
-    std::env::set_var("PATH", format!("{}:{}", bin.unwrap_or_default().display(), shell_path()));
+    let sep = if cfg!(windows) { ';' } else { ':' };
+    std::env::set_var("PATH", format!("{}{sep}{}", bin.unwrap_or_default().display(), shell_path()));
     let folder = std::env::args().nth(1); // a folder to open at start: cargo run -- sample
     tauri::Builder::default()
         .plugin(tauri_plugin_updater::Builder::new().build())
@@ -91,12 +132,16 @@ fn main() {
         })
         .setup(move |app| {
             // Our errors and the agents' logs (their stderr) go to a file: an app has no terminal.
-            let logs = app.path().app_log_dir()?;
-            std::fs::create_dir_all(&logs)?;
-            let log = File::create(logs.join("agent.log"))?;
-            unsafe {
-                libc::dup2(log.as_raw_fd(), 1);
-                libc::dup2(log.as_raw_fd(), 2);
+            // ponytail: not on Windows, where they go to the console the app opens; SetStdHandle would.
+            #[cfg(unix)]
+            {
+                let logs = app.path().app_log_dir()?;
+                std::fs::create_dir_all(&logs)?;
+                let log = File::create(logs.join("agent.log"))?;
+                unsafe {
+                    libc::dup2(log.as_raw_fd(), 1);
+                    libc::dup2(log.as_raw_fd(), 2);
+                }
             }
             project::start(app.handle().clone(), folder.clone());
             #[cfg(not(debug_assertions))] // a dev build has no app bundle to replace
@@ -113,18 +158,21 @@ fn main() {
 
             // Started from a terminal: Ctrl+C, a kill or a closed terminal quits the normal way,
             // which stops the agent and the preview (they run as their own processes) too.
-            let handle = app.handle().clone();
-            tauri::async_runtime::spawn(async move {
-                let mut quit = [SignalKind::interrupt(), SignalKind::terminate(), SignalKind::hangup()]
-                    .map(|kind| signal(kind).expect("could not listen for signals"));
-                let [int, term, hup] = &mut quit;
-                tokio::select! {
-                    _ = int.recv() => {}
-                    _ = term.recv() => {}
-                    _ = hup.recv() => {}
-                }
-                handle.exit(0);
-            });
+            #[cfg(unix)]
+            {
+                let handle = app.handle().clone();
+                tauri::async_runtime::spawn(async move {
+                    let mut quit = [SignalKind::interrupt(), SignalKind::terminate(), SignalKind::hangup()]
+                        .map(|kind| signal(kind).expect("could not listen for signals"));
+                    let [int, term, hup] = &mut quit;
+                    tokio::select! {
+                        _ = int.recv() => {}
+                        _ = term.recv() => {}
+                        _ = hup.recv() => {}
+                    }
+                    handle.exit(0);
+                });
+            }
 
             let name = app.package_info().name.clone(); // productName in tauri.conf.json
             let window = WindowBuilder::new(app, "main").title(&name).inner_size(1400.0, 900.0).build()?;

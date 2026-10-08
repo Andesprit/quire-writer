@@ -33,6 +33,10 @@ jobs:
           mkdir -p build/bin && touch build/bin/tinymist-aarch64-apple-darwin
           cargo test --manifest-path src-tauri/Cargo.toml
 
+  # The installers a release would publish, built the same way and not published.
+  release:
+    uses: ./.github/workflows/build.yml
+
   # Linux builds are experimental: they must compile, pass the tests and start.
   linux:
     runs-on: ubuntu-22.04
