@@ -325,6 +325,7 @@ kbd { transition: transform 0.25s var(--ease), box-shadow 0.25s var(--ease); dis
 .get { display: grid; grid-template-columns: minmax(0, 1fr) minmax(0, 1fr); gap: 48px 80px; margin-top: 56px; }
 .get h3 { font-size: 24px; }
 .get p { margin-top: 12px; color: var(--muted); }
+.get p + h3 { margin-top: 36px; }
 .get .btn { margin-top: 24px; }
 .get .need { margin-top: 36px; padding-top: 24px; border-top: 1px solid var(--line); }
 .get .need h3 { font-size: 19px; }
