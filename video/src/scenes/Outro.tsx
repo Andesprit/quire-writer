@@ -145,7 +145,7 @@ export const Compare: React.FC<SceneProps> = ({t, e}) => {
 // ---------------------------------------------------------------- Privacy
 
 const PROMISES = [
-  {icon: 'lock', text: 'Your files stay on your Mac.', c: C.green},
+  {icon: 'lock', text: 'Your files stay with you.', c: C.green},
   {icon: 'userX', text: 'No account. No telemetry.', c: C.blue},
   {icon: 'heart', text: 'Free and open source.', c: C.pink},
 ];
@@ -185,7 +185,7 @@ export const Trust: React.FC<SceneProps> = ({t, e}) => {
       </div>
       <div style={{position: 'absolute', left: 400, top: 790}}>
         <Body at={e(1) - 6} style={{width: 1100}}>
-          Quire has no server of its own. Your agent runs on your Mac, with your own login.
+          Quire has no server of its own. Your agent runs on your computer, with your own login.
         </Body>
       </div>
       {ats.map((at) => (
@@ -233,12 +233,12 @@ export const Outro: React.FC<SceneProps> = ({t}) => {
           }}
         >
           <Icon name="download" size={38} color="#fff" stroke={2.4} />
-          Download for Mac
+          Download for Mac, Windows and Linux
           <div style={{position: 'absolute', top: 0, bottom: 0, left: `${mix(-30, 130, shine)}%`, width: '22%', background: 'linear-gradient(100deg, transparent, rgba(255,255,255,0.45), transparent)', transform: 'skewX(-20deg)'}} />
         </div>
       </div>
       <div style={{position: 'absolute', left: 0, right: 0, top: 860, textAlign: 'center', fontFamily: MONO, fontSize: 34, color: C.text, opacity: tw(f, btnAt + 12, btnAt + 32)}}>andesprit.com/quire-writer</div>
-      <div style={{position: 'absolute', left: 0, right: 0, top: 920, textAlign: 'center', fontFamily: SANS, fontSize: 24, color: C.dim, opacity: tw(f, btnAt + 22, btnAt + 42)}}>Free · Open source · macOS on Apple Silicon</div>
+      <div style={{position: 'absolute', left: 0, right: 0, top: 920, textAlign: 'center', fontFamily: SANS, fontSize: 24, color: C.dim, opacity: tw(f, btnAt + 22, btnAt + 42)}}>Free · Open source</div>
       <Sfx at={0} src="boom.wav" volume={0.45} />
       <Sfx at={btnAt} src="pop.mp3" volume={0.35} />
     </AbsoluteFill>

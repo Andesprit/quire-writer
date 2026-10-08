@@ -94,7 +94,7 @@
     {
       "key": "trust", "lead": 8, "tail": 30,
       "beats": [
-        {"id": "u1", "text": "Your files stay on your Mac. No account. No telemetry."},
+        {"id": "u1", "text": "Your files stay on your computer. No account. No telemetry."},
         {"id": "u2", "text": "And Quire is free and open source."}
       ]
     },
@@ -102,7 +102,7 @@
       "key": "outro", "lead": 10, "tail": 75,
       "beats": [
         {"id": "o1", "text": "Quire. Write with AI, and keep the final say."},
-        {"id": "o2", "text": "Download it free for your Mac.", "pause": 6}
+        {"id": "o2", "text": "Download it free for Mac, Windows and Linux.", "pause": 6}
       ]
     }
   ]
