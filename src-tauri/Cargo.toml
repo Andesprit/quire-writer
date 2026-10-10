@@ -5,6 +5,14 @@ version = "0.2.9"
 edition = "2021"
 license = "GPL-3.0-or-later"
 
+# The system's folder picker and save dialog, where the app has none of its own:
+# Windows and Linux. (The Mac asks osascript.)
+[target.'cfg(not(target_os = "macos"))'.dependencies]
+tauri-plugin-dialog = "2"
+
+[target."cfg(windows)".dependencies]
+portable-pty = "0.9.0"
+
 [build-dependencies]
 tauri-build = { version = "2", features = [] }
 

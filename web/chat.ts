@@ -97,6 +97,10 @@ function fitChatInput() {
   updateSendState()
 }
 chatInput.oninput = fitChatInput
+// On some WebView2 builds the caret waits for the first keystroke: place it by hand as
+// focus lands, so the box is ready to type into the moment it is clicked. A click then
+// moves it where was clicked, as usual.
+chatInput.onfocus = () => chatInput.setSelectionRange(chatInput.value.length, chatInput.value.length)
 $("composer").onsubmit = (e) => {
   e.preventDefault()
   const text = chatInput.value.trim()

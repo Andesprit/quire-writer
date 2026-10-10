@@ -504,8 +504,9 @@ body.resizing { cursor: ew-resize; user-select: none; }
   border-left-color: var(--danger);
 }
 
-/* Autocomplete: grey text placed after the caret */
-.ghost-line { position: absolute; z-index: 2; white-space: pre-wrap; overflow-wrap: break-word; pointer-events: none; background: var(--editor); }
+/* Autocomplete: grey text placed after the caret. Clipped to its own line: the words it
+   adds can wrap further, and that overflow belongs to no line under it. */
+.ghost-line { position: absolute; z-index: 2; white-space: pre-wrap; overflow-wrap: break-word; overflow: hidden; pointer-events: none; background: var(--editor); }
 .ghost-text { color: var(--muted); font-style: italic; }
 
 /* Review view: changes shown like tracked changes in a word processor */
@@ -567,7 +568,9 @@ body.resizing { cursor: ew-resize; user-select: none; }
 #app.starting { --preview-col: 0px; }
 #app.starting #preview-group, #app.starting [data-sash="preview"] { display: none; }
 /* From the top, not centered: opening the list of agents must not move the page. */
-#app.starting .welcome { display: block; place-content: normal; padding: 56px 40px 40px; overflow: auto; user-select: text; }
+/* z-index over the editor's layers (.review 3, .ghost-line 2, .front 1), or its
+   transparent text field takes every click and shows the text cursor. */
+#app.starting .welcome { z-index: 4; display: block; place-content: normal; padding: 56px 40px 40px; overflow: auto; user-select: text; }
 .start { max-width: 800px; margin: 0 auto; }
 .start header { margin-bottom: 40px; }
 .start h1 { margin: 0; font: 700 30px/1.2 var(--manuscript); letter-spacing: -0.02em; color: var(--fg-strong); }
@@ -601,6 +604,10 @@ body.resizing { cursor: ew-resize; user-select: none; }
 .start-row span { flex: 1 1 0; color: var(--muted); font-size: 12px; }
 .start .setup-rows { gap: 9px; margin: 0; }
 .start .btn.sm { margin-left: 6px; vertical-align: middle; }
+/* The agent picker stands more forward than its ghost in the chat bar. */
+.start #start-agent { height: 26px; max-width: 260px; padding: 0 8px; font-size: 13px; color: var(--fg); border: 1px solid var(--widget-border); border-radius: 6px; background: var(--editor); }
+.start #start-agent:hover { background: var(--hover-strong); }
+#start-agent-note { margin: 6px 0 0; line-height: 1.5; }
 .start details { margin-top: 9px; padding-left: 26px; }
 .start summary { color: var(--muted); cursor: pointer; }
 .start summary:hover { color: var(--fg); }
@@ -765,7 +772,6 @@ details.thought div { white-space: pre-wrap; margin-top: 4px; padding-left: 18px
   border: 1px solid var(--input-border);
   border-radius: 8px;
 }
-#composer:focus-within { border-color: var(--focus); }
 .chips { display: flex; flex-wrap: wrap; gap: 4px; }
 .chips:empty { display: none; }
 .chip {
@@ -793,7 +799,8 @@ details.thought div { white-space: pre-wrap; margin-top: 4px; padding-left: 18px
   border: 0;
   background: transparent;
   resize: none;
-  line-height: 1.5;
+  line-height: 20px; /* whole pixels: a half-pixel line box (13px × 1.5) and WebView2 paints no caret in an empty box */
+  caret-color: var(--caret);
 }
 #chat-input::placeholder, #inline-input::placeholder { color: var(--placeholder); }
 .composer-bar { display: flex; align-items: center; flex-wrap: wrap; gap: 2px; }
@@ -924,7 +931,7 @@ details.thought div { white-space: pre-wrap; margin-top: 4px; padding-left: 18px
 }
 .inline-row { display: flex; align-items: flex-start; gap: 8px; }
 .inline-row .codicon[class] { margin-top: 2px; color: var(--focus); }
-#inline-input { flex: 1; min-height: 22px; max-height: 120px; padding: 2px 0; border: 0; background: transparent; resize: none; line-height: 1.5; }
+#inline-input { flex: 1; min-height: 22px; max-height: 120px; padding: 2px 0; border: 0; background: transparent; resize: none; line-height: 20px; caret-color: var(--caret); }
 .inline-foot { display: flex; justify-content: space-between; gap: 12px; margin-top: 4px; font-size: 11px; }
 #inline-status { display: inline-flex; align-items: center; gap: 4px; color: var(--muted); }
 #inline-status.error { color: var(--danger); }
@@ -968,6 +975,7 @@ details.thought div { white-space: pre-wrap; margin-top: 4px; padding-left: 18px
 .ask::backdrop { background: rgb(0 0 0 / 0.35); }
 .ask-title { margin: 0 0 6px; font-weight: 600; color: var(--fg-strong); }
 .ask-body { margin: 0 0 16px; color: var(--muted); line-height: 1.5; }
+.ask-cmd { margin: -8px 0 16px; padding: 6px 8px; max-height: 140px; overflow: auto; white-space: pre-wrap; overflow-wrap: anywhere; border-radius: 4px; background: var(--editor); border: 1px solid var(--widget-border); font: 12px/1.4 "SF Mono", Menlo, monospace; user-select: text; color: var(--fg); }
 .ask-actions { display: flex; justify-content: flex-end; gap: 8px; }
 .kinds { display: grid; grid-template-columns: 1fr 1fr; gap: 8px; margin-bottom: 16px; }
 .kinds .btn { justify-content: space-between; }
@@ -993,8 +1001,15 @@ details.thought div { white-space: pre-wrap; margin-top: 4px; padding-left: 18px
   font: 12px/1.4 "SF Mono", Menlo, monospace;
   user-select: text;
 }
-.setup-fix code { flex: 1; padding: 3px 6px; }
+.setup-fix code { flex: 1; padding: 3px 6px; white-space: pre-wrap; overflow-wrap: anywhere; }
+.setup-fix .muted { flex: 1; } /* the row's name for a whole install script, in place of the script */
 .setup-said { margin: 6px 0 0; padding: 6px 8px; max-height: 140px; overflow: auto; white-space: pre-wrap; overflow-wrap: anywhere; }
+.setup-run { margin: 6px 0 0; padding: 6px 8px; max-height: 140px; overflow: auto; white-space: pre-wrap; overflow-wrap: anywhere; border-radius: 4px; background: var(--editor); border: 1px solid var(--widget-border); font: 12px/1.4 "SF Mono", Menlo, monospace; user-select: text; color: var(--muted); }
+.setup-run.failed { border-color: var(--danger); color: var(--danger); }
+.setup-in { margin-top: 6px; }
+.setup-input { width: 100%; height: 26px; padding: 0 8px; border: 1px solid var(--input-border); border-radius: 4px; background: var(--input); color: var(--fg); }
+.setup-input:focus { outline: none; border-color: var(--focus); }
+.setup-input::placeholder { color: var(--muted); }
 .setup-help { margin: 0 0 16px; line-height: 1.5; overflow-wrap: anywhere; }
 .setup-help a { color: var(--focus); }
 
