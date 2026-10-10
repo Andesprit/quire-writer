@@ -14,6 +14,7 @@ use futures_util::{SinkExt, Stream, StreamExt};
 use notify::{RecommendedWatcher, RecursiveMode, Watcher};
 use regex::Regex;
 use serde_json::{json, Value};
+use tokio::io::{AsyncBufReadExt, BufReader};
 use tokio::process::{Child, Command};
 use tokio::sync::mpsc::{unbounded_channel, UnboundedSender};
 use tauri::http::Response;
@@ -22,11 +23,11 @@ use tokio::task::JoinHandle;
 use tokio_tungstenite::tungstenite::{self, protocol::WebSocketConfig};
 use unicode_normalization::UnicodeNormalization;
 
-use crate::agent::{complete_api, complete_prompt, find_agent, registry, BRIDGE};
+use crate::agent::{complete_api, complete_prompt, find_agent, registry, Agent, BRIDGE};
 use crate::engine;
 #[cfg(windows)]
 use crate::ProcessGroup;
-use crate::{killpg, lock, SIGTERM};
+use crate::{killpg, lock, NoWindow, SIGKILL, SIGTERM};
 
 const TEXT_EXT: [&str; 14] = ["typ", "tex", "qmd", "md", "bib", "sty", "cls", "yml", "yaml", "toml", "txt", "csv", "json", "xml"];
 const MAX_FILE: u64 = 2_000_000;
@@ -268,7 +269,7 @@ fn quote(s: &str) -> String {
 async fn fetch_bibtex(doi: &str) -> Result<String, String> {
     let url = format!("https://doi.org/{}", quote(doi));
     let accept = "Accept: application/x-bibtex; charset=utf-8";
-    let out = Command::new("curl")
+    let out = Command::new("curl").no_window()
         .args(["-sS", "-L", "--max-time", "20", "-H", accept, "-w", "\n%{http_code}", &url])
         .output()
         .await
@@ -344,13 +345,16 @@ fn walk(root: &Path, dir: &Path, files: &mut Vec<String>, dirs: &mut Vec<String>
         if skipped(Path::new(&e.file_name())) || quarto_output(&p) {
             continue;
         }
-        let rel = p.strip_prefix(root).unwrap_or(&p).to_string_lossy().into_owned();
+        let rel = page(p.strip_prefix(root).unwrap_or(&p));
         if !p.is_dir() {
-            files.push(rel);
+            // The tree lists the documents Quire opens, not every file the folder holds.
+            if !cfg!(windows) || is_text_ext(Path::new(&e.file_name())) {
+                files.push(rel);
+            }
         } else {
             dirs.push(rel);
             if !e.file_type().is_ok_and(|t| t.is_symlink()) {
-                walk(root, &p, files, dirs); // like os.walk: a link to a folder is listed, not entered
+                walk(root, &p, files, dirs); // like os.walk: a link to a folder is not entered
             }
         }
     }
@@ -393,7 +397,7 @@ impl Workspace {
         if p == self.root()? {
             return Err("That is the project folder itself.".into());
         }
-        Ok(p.strip_prefix(self.root()?).unwrap().to_string_lossy().into_owned())
+        Ok(page(p.strip_prefix(self.root()?).unwrap()))
     }
 
     fn forget(&mut self, rel: &str, to: Option<&str>) {
@@ -496,7 +500,7 @@ impl Workspace {
         let (files, dirs) = self.entries().unwrap_or_default();
         json!({
             "type": "folder",
-            "root": self.root.as_ref().map(|r| r.to_string_lossy()),
+            "root": self.root.as_ref().map(|r| page(r)),
             "files": files,
             "dirs": dirs,
             "changed": self.baseline.keys().collect::<Vec<_>>(),
@@ -573,7 +577,7 @@ impl Workspace {
             return false; // the watcher of a folder that is no longer open
         }
         // A file the writer already has stays theirs, even with the name Quarto would use.
-        let known = |p: &Path| p.strip_prefix(root).is_ok_and(|rel| self.known.contains_key(&*rel.to_string_lossy()));
+        let known = |p: &Path| p.strip_prefix(root).is_ok_and(|rel| self.known.contains_key(&*page(rel)));
         let paths: BTreeSet<PathBuf> = paths.into_iter().filter(|p| known(p) || !quarto_output(p)).collect();
         if paths.is_empty() {
             return false;
@@ -582,9 +586,9 @@ impl Workspace {
         for p in paths {
             let Ok(rel) = p.strip_prefix(root) else { continue };
             if !p.exists() {
-                self.gone(&rel.to_string_lossy());
+                self.gone(&page(rel));
             } else if p.is_file() && self.is_text(rel) {
-                let rel = rel.to_string_lossy().into_owned();
+                let rel = page(rel);
                 if let Some(new) = self.read(&rel) {
                     self.external(&rel, new);
                 }
@@ -777,9 +781,15 @@ fn free_port() -> Result<u16, String> {
     Ok(listener.local_addr().map_err(err)?.port())
 }
 
-/// The address of one of the app's own preview pages (see `protocol`).
+/// The address of one of the app's own preview pages (see `protocol`). WebView2 has no
+/// custom schemes: on Windows the app's protocol is a localhost site of its own, and
+/// `quire://localhost` would be an address nothing there knows how to open.
 fn our(page: &str) -> String {
-    format!("quire://localhost/{page}")
+    if cfg!(windows) {
+        format!("http://quire.localhost/{page}")
+    } else {
+        format!("quire://localhost/{page}")
+    }
 }
 
 /// The document as `to` shows it: "pdf", "docx" or "html". Typst's PDF, Quarto's and
@@ -814,7 +824,7 @@ async fn typst_preview(rel: &str, asked: u64) -> Result<(), String> {
     // tinymist opens three servers, two on fixed default ports; give each its own free
     // port so two previews (two copies of the app) can run at once.
     let hosts = [("--host", port), ("--data-plane-host", data), ("--control-plane-host", control)];
-    let child = Command::new("tinymist")
+    let child = Command::new("tinymist").no_window()
         .arg("preview")
         .arg(&file)
         .arg("--root")
@@ -951,14 +961,126 @@ fn compile() {
     });
 }
 
+/// The page splits and joins paths with "/", and shows their parts: what crosses to it from
+/// Windows' own "\" arrives as "/". (Rust reads both the same way, so what comes back needs
+/// no change.)
+fn page(path: &Path) -> String {
+    path.to_string_lossy().replace('\\', "/")
+}
+
 fn on_path(program: &str) -> bool {
-    std::env::var_os("PATH").is_some_and(|p| std::env::split_paths(&p).any(|dir| dir.join(program).is_file()))
+    // Windows runs npx as npx.cmd and node as node.exe: what the terminal finds, PATHEXT
+    // spells out. A name alone finds nothing there.
+    let names: Vec<String> = if cfg!(windows) {
+        std::env::var("PATHEXT")
+            .unwrap_or_else(|_| ".COM;.EXE;.BAT;.CMD".into())
+            .split(';')
+            .map(|ext| format!("{program}{ext}"))
+            .collect()
+    } else {
+        vec![program.into()]
+    };
+    std::env::var_os("PATH").is_some_and(|p| std::env::split_paths(&p).any(|dir| names.iter().any(|n| dir.join(n).is_file())))
+}
+
+/// Whether the agent can answer once it starts. Some sign in first — an env var, or a
+/// credentials file their setup stores under the config directory. An agent we don't know
+/// how to ask counts as signed in: it says so itself when it is not.
+fn signed_in(agent: &Agent) -> bool {
+    let (env_key, dir, field) = match agent.id.as_str() {
+        // glm-acp-agent reads its key the way its credentials.js writes it.
+        "glm-acp-agent" => ("Z_AI_API_KEY", "glm-acp-agent", "z_ai_api_key"),
+        _ => return true,
+    };
+    if std::env::var_os(env_key).is_some_and(|k| !k.is_empty()) {
+        return true;
+    }
+    let config = std::env::var_os("XDG_CONFIG_HOME")
+        .filter(|p| !p.is_empty())
+        .map(PathBuf::from)
+        .unwrap_or_else(|| {
+            let home = std::env::var_os("USERPROFILE").or_else(|| std::env::var_os("HOME")).unwrap_or_default();
+            PathBuf::from(home).join(".config")
+        });
+    std::fs::read_to_string(config.join(dir).join("credentials.json"))
+        .ok()
+        .and_then(|t| serde_json::from_str::<Value>(&t).ok())
+        .and_then(|v| v[field].as_str().map(|k| !k.is_empty()))
+        .unwrap_or(false)
 }
 
 /// One line of Check Setup. Status: ok, warn, error, or off (an optional tool that is not
-/// installed). Fix: a command that installs what is missing.
-fn row(label: &str, status: &str, detail: String, fix: &str) -> Value {
-    json!({"label": label, "status": status, "detail": detail, "fix": fix})
+/// installed). Fix: a command that installs what is missing; `runnable` when Quire can run
+/// that command for the writer, who then gets a Run button beside Copy. On Windows the fix
+/// is a whole install script: `fix_label` is what the row shows of it, as short as the
+/// Mac's `brew install` line, while Copy still hands over the script itself.
+fn row(id: &str, label: &str, status: &str, detail: String, fix: &str) -> Value {
+    let runnable = !fix.is_empty() && (cfg!(target_os = "macos") || cfg!(windows));
+    let fix_label = (cfg!(windows) && !fix.is_empty()).then(|| {
+        format!("Install {}", match id {
+            "node" => "Node.js",
+            "uv" => "uv",
+            "tectonic" => "Tectonic",
+            "quarto" => "Quarto",
+            "pandoc" => "Pandoc",
+            _ => "tinymist",
+        })
+    });
+    json!({"id": id, "label": label, "status": status, "detail": detail, "fix": fix, "fix_label": fix_label, "runnable": runnable})
+}
+
+/// The command that installs `what` on this computer. The page runs one back through
+/// `run_setup`, which asks here again, so what a Run runs is what the row showed.
+async fn install_fix(what: &str) -> String {
+    // An old Node is the one fix that upgrades rather than installs.
+    let old_node = what == "node" && {
+        let out = Command::new("node").arg("--version").no_window().output().await.ok().filter(|o| o.status.success());
+        let major = out
+            .map(|o| String::from_utf8_lossy(&o.stdout).trim().to_string())
+            .and_then(|v| v.trim_start_matches('v').split('.').next()?.parse::<u32>().ok());
+        major.is_some_and(|m| m < 22)
+    };
+    if cfg!(target_os = "macos") {
+        match (what, old_node) {
+            ("quarto", false) => "brew install --cask quarto".into(),
+            (_, true) => format!("brew upgrade {what}"),
+            (_, false) => format!("brew install {what}"),
+        }
+    } else if cfg!(windows) {
+        // Where winget is missing (a stock Windows 10), each fix does the whole install
+        // itself in PowerShell: download the installer, run it, and for the tools that are a
+        // single program, put that program in a folder of its own on the writer's PATH.
+        let winget = |id: &str| format!("winget install {id} -e --accept-source-agreements --accept-package-agreements");
+        let on_user_path = r#"$d="$env:LOCALAPPDATA\Programs\DIR"; $u=[Environment]::GetEnvironmentVariable('Path','User'); if(($u -split ';') -notcontains $d){[Environment]::SetEnvironmentVariable('Path',"$u;$d",'User')}"#;
+        match what {
+            "node" if on_path("winget") => winget("OpenJS.NodeJS"),
+            "uv" if on_path("winget") => winget("astral-sh.uv"),
+            "tinymist" if on_path("winget") => winget("Myriad-Dreamin.Tinymist"),
+            "pandoc" if on_path("winget") => winget("JohnMacFarlane.Pandoc"),
+            // The newest long-term-support release: the list is newest first.
+            "node" => {
+                r#"$v=(irm https://nodejs.org/dist/index.json|?{$_.lts}|select -First 1).version; irm "https://nodejs.org/dist/v$v/node-$v-x64.msi" -OutFile "$env:TEMP\node-install.msi"; exit (Start-Process msiexec -ArgumentList '/i',"$env:TEMP\node-install.msi" -Wait -PassThru).ExitCode"#.into()
+            }
+            "uv" => "irm https://astral.sh/uv/install.ps1|iex".into(),
+            // Tinymist and Tectonic are one program each: the zip holds the .exe at its root.
+            "tinymist" => {
+                format!(r#"$d="$env:LOCALAPPDATA\Programs\tinymist"; irm https://github.com/Myriad-Dreamin/tinymist/releases/latest/download/tinymist-x86_64-pc-windows-msvc.zip -OutFile "$env:TEMP\tinymist-install.zip"; Expand-Archive "$env:TEMP\tinymist-install.zip" $d -Force; {}"#, on_user_path.replace("DIR", "tinymist"))
+            }
+            "tectonic" => {
+                format!(r#"$d="$env:LOCALAPPDATA\Programs\tectonic"; $a=(irm https://api.github.com/repos/tectonic-typesetting/tectonic/releases/latest).assets|?{{$_.name -like '*windows-msvc.zip'}}|select -First 1; irm $a.browser_download_url -OutFile "$env:TEMP\tectonic-install.zip"; Expand-Archive "$env:TEMP\tectonic-install.zip" $d -Force; {}"#, on_user_path.replace("DIR", "tectonic"))
+            }
+            // Quarto and Pandoc have no winget package and versioned installers: ask the
+            // latest release for its .msi, and wait for the installer to be done with it.
+            "quarto" => {
+                r#"$a=(irm https://api.github.com/repos/quarto-dev/quarto-cli/releases/latest).assets|?{$_.name -like '*-win.msi'}|select -First 1; irm $a.browser_download_url -OutFile "$env:TEMP\quarto-install.msi"; exit (Start-Process msiexec -ArgumentList '/i',"$env:TEMP\quarto-install.msi" -Wait -PassThru).ExitCode"#.into()
+            }
+            _ => {
+                r#"$a=(irm https://api.github.com/repos/jgm/pandoc/releases/latest).assets|?{$_.name -like '*windows-x86_64.msi'}|select -First 1; irm $a.browser_download_url -OutFile "$env:TEMP\pandoc-install.msi"; exit (Start-Process msiexec -ArgumentList '/i',"$env:TEMP\pandoc-install.msi" -Wait -PassThru).ExitCode"#.into()
+            }
+        }
+    } else {
+        format!("See the {what} site for how to install it here")
+    }
 }
 
 /// Check Setup: what the chosen agent needs to start, then the tools each preview and export
@@ -967,38 +1089,343 @@ async fn setup() -> Result<Value, String> {
     let agent = find_agent(&BRIDGE.agent_id().unwrap_or(DEFAULT_AGENT.into()))?;
     let mut rows = vec![match agent.program() {
         "npx" => {
-            let out = Command::new("node").arg("--version").output().await.ok().filter(|o| o.status.success());
+            let out = Command::new("node").arg("--version").no_window().output().await.ok().filter(|o| o.status.success());
             let version = out.map(|o| String::from_utf8_lossy(&o.stdout).trim().to_string());
             let major = version.as_deref().and_then(|v| v.trim_start_matches('v').split('.').next()?.parse::<u32>().ok());
             match (version, major) {
-                (Some(v), Some(m)) if m >= 22 => row("Node.js", "ok", v, ""),
+                (Some(v), Some(m)) if m >= 22 => row("node", "Node.js", "ok", v, ""),
                 // Agents ask for different versions (Claude 22, Codex 20): 22 serves them all.
-                (Some(v), _) => row("Node.js", "warn", format!("{v} is old. Some agents need Node.js 22 or newer."), "brew upgrade node"),
-                (None, _) => row("Node.js", "error", format!("Not found. {} starts with npx, which comes with Node.js.", agent.name), "brew install node"),
+                (Some(v), _) => row("node", "Node.js", "warn", format!("{v} is old. Some agents need Node.js 22 or newer."), &install_fix("node").await),
+                (None, _) => row("node", "Node.js", "error", format!("Not found. {} starts with npx, which comes with Node.js.", agent.name), &install_fix("node").await),
             }
         }
-        "uvx" if on_path("uvx") => row("uv", "ok", "Found uvx".into(), ""),
-        "uvx" => row("uv", "error", format!("Not found. {} starts with uvx, which comes with uv.", agent.name), "brew install uv"),
-        program if on_path(program) => row(&agent.name, "ok", format!("Found {program}"), ""),
-        program => row(&agent.name, "error", format!("Not found. Install {} so that {program} is on your PATH.", agent.name), ""),
+        "uvx" if on_path("uvx") => row("uv", "uv", "ok", "Found uvx".into(), ""),
+        "uvx" => row("uv", "uv", "error", format!("Not found. {} starts with uvx, which comes with uv.", agent.name), &install_fix("uv").await),
+        program if on_path(program) => row("agent", &agent.name, "ok", format!("Found {program}"), ""),
+        program => row("agent", &agent.name, "error", format!("Not found. Install {} so that {program} is on your PATH.", agent.name), ""),
     }];
-    let tools: [(&str, &[&str], &str, &str); 4] = [
-        ("Typst preview", &["tinymist"], "Not installed.", "brew install tinymist"),
-        ("LaTeX preview", &["latexmk", "tectonic"], "Not installed. MacTeX (tug.org/mactex) works too.", "brew install tectonic"),
-        ("Quarto preview", &["quarto"], "Not installed.", "brew install --cask quarto"),
-        ("Word and other exports", &["pandoc", "quarto"], "Not installed. Quarto carries its own.", "brew install pandoc"),
+    // A starter on the PATH is not the whole story: some agents sign in before they can
+    // answer. Say so while the writer is still choosing, with their setup to run right there.
+    if !signed_in(&agent) {
+        if let Some(fix) = agent.setup_command() {
+            rows.push(json!({
+                "id": "agent",
+                "label": format!("{} API key", agent.name),
+                "status": "warn",
+                "detail": "Not set. Run the setup to store one, and the agent can answer.",
+                "fix": fix,
+                "fix_label": cfg!(windows).then(|| format!("Set up {}", agent.name)),
+                "runnable": cfg!(windows), // elsewhere the setup runs in the writer's own terminal
+            }));
+        }
+    }
+    // The TeX that is already there counts too: MacTeX on the Mac, MiKTeX on Windows.
+    let tex = if cfg!(windows) { "Not installed. MiKTeX (miktex.org) works too." } else { "Not installed. MacTeX (tug.org/mactex) works too." };
+    let tools: [(&str, &str, &[&str], &str); 4] = [
+        ("tinymist", "Typst preview", &["tinymist"], "Not installed."),
+        ("tectonic", "LaTeX preview", &["latexmk", "tectonic"], tex),
+        ("quarto", "Quarto preview", &["quarto"], "Not installed."),
+        ("pandoc", "Word and other exports", &["pandoc", "quarto"], "Not installed. Quarto carries its own."),
     ];
-    for (label, programs, missing, fix) in tools {
+    for (id, label, programs, missing) in tools {
         rows.push(match programs.iter().find(|p| on_path(p)) {
-            Some(p) => row(label, "ok", format!("Found {p}"), ""),
-            None => row(label, "off", missing.into(), fix),
+            Some(p) => row(id, label, "ok", format!("Found {p}"), ""),
+            None => row(id, label, "off", missing.into(), &install_fix(id).await),
         });
     }
     let log = APP.get().and_then(|a| a.path().app_log_dir().ok()).map(|d| d.join("agent.log"));
-    // The agents whose starter (npx, uvx or their own program) is on this computer.
-    let mut ready: Vec<String> = registry().into_iter().filter(|a| on_path(a.program())).map(|a| a.name).collect();
+    // The agents that can start here: their starter is on this computer, and, where we know
+    // how to ask, they are signed in.
+    let mut ready: Vec<String> = registry().into_iter().filter(|a| on_path(a.program()) && signed_in(&a)).map(|a| a.name).collect();
     ready.sort_by_key(|name| name.to_lowercase());
-    Ok(json!({"type": "setup", "rows": rows, "log": log, "ready": ready}))
+    Ok(json!({"type": "setup", "os": std::env::consts::OS, "rows": rows, "log": log, "ready": ready}))
+}
+
+/// The one install the page is running: its row id, and the process to stop — its pid, which
+/// on unix is also its whole group, where every run is a group of its own.
+static SETUP_RUN: Mutex<Option<(String, u32)>> = Mutex::new(None);
+
+/// What the page types to a setup running in the app (an answer to a prompt of its).
+#[cfg(windows)]
+static SETUP_PTY_IN: Mutex<Option<Box<dyn std::io::Write + Send>>> = Mutex::new(None);
+
+/// Run one of the fixes the page showed: what `install_fix` says for that row, its output
+/// streamed back as it happens, then the fresh state of this computer. The agent's own fix
+/// (`npx … --setup`) asks the writer questions, so it runs in a terminal of its own — in the
+/// app where a terminal can be had, a window where not.
+async fn run_setup(id: &str) -> Result<(), String> {
+    if lock(&SETUP_RUN).is_some() {
+        return Err("An install is already running.".into());
+    }
+    if id == "agent" {
+        // The setup belongs to the agent the page has chosen, or last tried to start: its
+        // own command, derived here — the page never sends one.
+        let agent = find_agent(&BRIDGE.agent_id().unwrap_or(DEFAULT_AGENT.into()))?;
+        let fix = agent.setup_command().ok_or("This agent signs in another way; its own docs say how.")?;
+        #[cfg(windows)]
+        return run_agent_setup(&fix);
+        #[cfg(not(windows))]
+        {
+            let _ = fix;
+            return Err("The agent's setup command runs in a terminal here.".into());
+        }
+    }
+    let command = install_fix(id).await;
+    let mut cmd = if cfg!(windows) {
+        // TLS 1.2 comes first: PowerShell 5.1 on an unupdated Windows 10 does not offer it
+        // alone, and every one of these installs downloads over https.
+        let tls = "try{[Net.ServicePointManager]::SecurityProtocol=[Net.SecurityProtocolType]::Tls12}catch{};";
+        let mut run = Command::new("powershell");
+        run.args(["-NoProfile", "-ExecutionPolicy", "Bypass", "-Command", &format!("{tls}{command}")]);
+        run
+    } else {
+        let mut run = Command::new("sh");
+        run.arg("-c").arg(&command);
+        run
+    };
+    cmd.stdin(Stdio::null()).stdout(Stdio::piped()).stderr(Stdio::piped()).no_window();
+    #[cfg(unix)]
+    cmd.process_group(0);
+    let mut child = cmd.spawn().map_err(err)?;
+    *lock(&SETUP_RUN) = Some((id.into(), child.id().unwrap_or(0)));
+    let (Some(out), Some(said)) = (child.stdout.take(), child.stderr.take()) else {
+        *lock(&SETUP_RUN) = None;
+        return Err("Could not read the installer's output.".into());
+    };
+    let (wait, done) = tokio::sync::oneshot::channel();
+    tokio::spawn(async move {
+        let mut child = child;
+        let _ = wait.send(child.wait().await.ok());
+    });
+    let _ = tokio::join!(pump(id.into(), out), pump(id.into(), said));
+    let ok = done.await.ok().flatten().map_or(false, |s| s.success());
+    *lock(&SETUP_RUN) = None;
+    #[cfg(windows)]
+    refresh_path().await; // what was installed is on the PATH the registry keeps, not ours
+    send(json!({"type": "setup_run_done", "id": id, "ok": ok}));
+    let mut found = setup().await?; // so the rows say what is here now
+    found["quiet"] = true.into();
+    send(found);
+    Ok(())
+}
+
+/// Stream a run's output to the page, the first 400 lines of it.
+async fn pump(id: String, pipe: impl tokio::io::AsyncRead + Unpin) {
+    let mut lines = BufReader::new(pipe).lines();
+    let mut n = 0;
+    while let Ok(Some(line)) = lines.next_line().await {
+        n += 1;
+        if n > 400 {
+            send(json!({"type": "setup_run", "id": id, "text": "… the rest of the output is cut"}));
+            return;
+        }
+        send(json!({"type": "setup_run", "id": id, "text": line}));
+    }
+}
+
+/// Stop the install that is running, whatever it started too.
+fn stop_setup_run() {
+    if let Some((_, pid)) = lock(&SETUP_RUN).as_ref() {
+        let pid = *pid;
+        if pid != 0 {
+            killpg(pid as i32, SIGKILL);
+        }
+    }
+}
+
+/// After an install, read the PATH the registry keeps now (machine first, then the writer's
+/// own), so what it installed is found without a restart of Quire.
+#[cfg(windows)]
+pub(crate) async fn refresh_path() {
+    let out = Command::new("powershell")
+        .args(["-NoProfile", "-Command", "[Environment]::GetEnvironmentVariable('Path','Machine'); [Environment]::GetEnvironmentVariable('Path','User')"])
+        .no_window()
+        .output()
+        .await
+        .ok()
+        .filter(|o| o.status.success());
+    let Some(out) = out else { return };
+    let paths = String::from_utf8_lossy(&out.stdout).lines().map(str::trim).filter(|l| !l.is_empty()).collect::<Vec<_>>().join(";");
+    if !paths.is_empty() {
+        if let Some(dir) = std::env::current_exe().ok().and_then(|e| Some(e.parent()?.display().to_string())) {
+            std::env::set_var("PATH", format!("{dir};{paths}"));
+        }
+    }
+}
+
+/// The agent's setup, run inside the app: a pseudo-terminal gives the setup a console to
+/// prompt into, the page shows what it says and passes back what the writer answers.
+#[cfg(windows)]
+fn run_agent_setup(fix: &str) -> Result<(), String> {
+    if let Err(e) = run_agent_setup_pty(fix) {
+        // No pseudo-terminal to be had (Windows 10 before 1809, say): the old way.
+        send(json!({"type": "setup_run", "id": "agent", "text": format!("Could not run the setup here ({e}); a terminal window opens instead.")}));
+        return open_agent_setup(fix);
+    }
+    Ok(())
+}
+
+/// Spawn the agent's setup on a pseudo-terminal and wire it to the page: what the setup
+/// prints arrives stripped of terminal codes, what the writer types goes to the setup.
+#[cfg(windows)]
+fn run_agent_setup_pty(fix: &str) -> Result<(), String> {
+    use portable_pty::{native_pty_system, CommandBuilder, PtySize};
+    use std::io::Read;
+
+    // The same script the window gets — the command verbatim — so nothing of it has to
+    // survive being quoted into a command line.
+    let script = std::env::temp_dir().join("quire-agent-setup.cmd");
+    fs::write(&script, format!("@echo off\r\n{fix}\r\n")).map_err(err)?;
+
+    let portable_pty::PtyPair { master, slave } = native_pty_system()
+        .openpty(PtySize { rows: 30, cols: 120, pixel_width: 0, pixel_height: 0 })
+        .map_err(|e| e.to_string())?;
+    let mut cmd = CommandBuilder::new("cmd");
+    cmd.arg("/c");
+    cmd.arg(&script);
+    let mut child = slave.spawn_command(cmd).map_err(|e| e.to_string())?;
+    let pid = child.process_id().unwrap_or(0);
+    let mut reader = master.try_clone_reader().map_err(|e| e.to_string())?;
+    let writer = master.take_writer().map_err(|e| e.to_string())?;
+    *lock(&SETUP_PTY_IN) = Some(writer);
+    *lock(&SETUP_RUN) = Some(("agent".into(), pid));
+
+    // What the setup says, as it says it. A prompt does not end its line, so these go to
+    // the page as pieces, not lines.
+    std::thread::spawn(move || {
+        let mut strip = VtStrip::default();
+        let mut buf = [0u8; 8192];
+        loop {
+            match reader.read(&mut buf) {
+                Ok(0) | Err(_) => break,
+                Ok(n) => {
+                    let mut text = String::new();
+                    strip.feed(&buf[..n], &mut text);
+                    if !text.is_empty() {
+                        send(json!({"type": "setup_run", "id": "agent", "partial": true, "text": text}));
+                    }
+                }
+            }
+        }
+    });
+
+    // When the setup ends, say so and look at the computer again, the way an install does.
+    // The master stays here too: a closed pseudo-console takes its setup down with it.
+    tauri::async_runtime::spawn_blocking(move || {
+        let _console = master;
+        let ok = child.wait().map(|s| s.success()).unwrap_or(false);
+        *lock(&SETUP_PTY_IN) = None;
+        if lock(&SETUP_RUN).as_ref().map(|(_, p)| *p) == Some(pid) {
+            *lock(&SETUP_RUN) = None;
+        }
+        send(json!({"type": "setup_run_done", "id": "agent", "ok": ok}));
+        tauri::async_runtime::spawn(async move {
+            if let Ok(mut found) = setup().await {
+                found["quiet"] = true.into();
+                send(found);
+            }
+        });
+    });
+    Ok(())
+}
+
+/// One line the writer typed to the setup running in the app: forward it with the Enter
+/// that ends it. Windows' Enter is \r.
+#[cfg(windows)]
+fn setup_input(text: &str) -> Result<(), String> {
+    use std::io::Write;
+    let mut into = lock(&SETUP_PTY_IN);
+    let Some(say) = into.as_mut() else {
+        return Err("Nothing is running to answer.".into());
+    };
+    say.write_all(text.trim_matches(['\r', '\n']).as_bytes())
+        .and_then(|_| say.write_all(b"\r"))
+        .and_then(|_| say.flush())
+        .map_err(err)
+}
+
+/// Strips the codes a terminal would act on, keeping the text: enough for a setup's
+/// prompts, not a terminal emulator. Stateful, for a code cut in half by a read.
+#[cfg(windows)]
+#[derive(Default)]
+struct VtStrip {
+    esc: bool,     // saw ESC, waiting for what kind of code
+    csi: bool,     // inside ESC [ … until its final byte
+    string: bool,  // inside OSC/DCS/… until BEL or ESC \
+    utf8: Vec<u8>, // the start of a character the last read cut in half
+}
+
+#[cfg(windows)]
+impl VtStrip {
+    fn feed(&mut self, data: &[u8], out: &mut String) {
+        let mut bytes = std::mem::take(&mut self.utf8);
+        bytes.extend_from_slice(data);
+        let mut text: Vec<u8> = Vec::new();
+        let mut i = 0;
+        while i < bytes.len() {
+            let b = bytes[i];
+            i += 1;
+            if self.esc {
+                self.esc = false;
+                match b {
+                    b'[' => self.csi = true,
+                    b']' | b'P' | b'X' | b'^' | b'_' => self.string = true,
+                    0x1b => self.esc = true,
+                    _ => {} // any other two-byte code: gone
+                }
+            } else if self.csi {
+                if (0x40..=0x7e).contains(&b) {
+                    self.csi = false; // the final byte ended it; parameters went before it
+                }
+            } else if self.string {
+                match b {
+                    0x07 => self.string = false,
+                    0x1b => {
+                        self.string = false;
+                        self.esc = true; // ESC \ ends it; the \ is eaten as a two-byte code
+                    }
+                    _ => {}
+                }
+            } else {
+                match b {
+                    0x1b => self.esc = true,
+                    b'\r' => {
+                        if bytes.get(i) == Some(&b'\n') {
+                            i += 1;
+                            text.push(b'\n');
+                        } // a lone \r redraws the line (a spinner, say): dropped
+                    }
+                    b'\n' | b'\t' => text.push(b),
+                    0x00..=0x08 | 0x0b..=0x1f | 0x7f => {} // BEL, backspace and friends: gone
+                    _ => text.push(b),
+                }
+            }
+        }
+        // Decode what gathered, keeping an unfinished character for the next read.
+        match std::str::from_utf8(&text) {
+            Ok(said) => out.push_str(said),
+            Err(e) => {
+                out.push_str(std::str::from_utf8(&text[..e.valid_up_to()]).unwrap_or(""));
+                if e.error_len().is_none() {
+                    self.utf8 = text[e.valid_up_to()..].to_vec(); // cut in half, not broken
+                }
+            }
+        }
+    }
+}
+
+/// The agent's `--setup` asks the writer questions (an API key, say), and when no terminal
+/// can be had in the app, it runs in a console window of its own, left open to read after.
+#[cfg(windows)]
+fn open_agent_setup(fix: &str) -> Result<(), String> {
+    let script = std::env::temp_dir().join("quire-agent-setup.cmd");
+    fs::write(&script, format!("@echo off\r\n{fix}\r\necho.\r\npause\r\n")).map_err(err)?;
+    // The path goes as its own argument, unquoted: `start` reads the first quoted word as the
+    // window title, and quotes inside an argument get escaped once more on the way over.
+    Command::new("cmd").arg("/c").arg("start").arg("Agent setup").arg(&script).no_window().spawn().map_err(err)?;
+    send(json!({"type": "setup_run", "id": "agent", "text": "A terminal window opened: finish the setup there, then come back."}));
+    send(json!({"type": "setup_run_done", "id": "agent", "ok": true, "external": true}));
+    Ok(())
 }
 
 /// Compile with the writer's own TeX: latexmk (MacTeX, TeX Live) or else Tectonic. On failure,
@@ -1013,10 +1440,12 @@ async fn run_latex(file: &Path, out: &Path) -> Result<(), String> {
             _ => "-pdf",
         };
         let mut cmd = Command::new("latexmk");
+        cmd.no_window();
         cmd.args([engine, "-interaction=nonstopmode", "-synctex=1", "-file-line-error"]).arg(format!("-outdir={}", out.display()));
         cmd
     } else if on_path("tectonic") {
         let mut cmd = Command::new("tectonic");
+        cmd.no_window();
         // Keep what TeX wrote for references and contents, and read it back on the next build:
         // TeX then runs once, not three times, unless a reference changed (on 34 pages, 0.6 s
         // instead of 1.3 s). A failed build keeps none of it, so an error cannot stick.
@@ -1024,7 +1453,13 @@ async fn run_latex(file: &Path, out: &Path) -> Result<(), String> {
         cmd.arg("--outdir").arg(out);
         cmd
     } else {
-        return Err("LaTeX preview needs TeX. Install MacTeX (tug.org/mactex) or Tectonic (brew install tectonic).".into());
+        return Err(if cfg!(target_os = "macos") {
+            "LaTeX preview needs TeX. Install MacTeX (tug.org/mactex) or Tectonic (brew install tectonic).".into()
+        } else if cfg!(windows) {
+            "LaTeX preview needs TeX. Install Tectonic or MiKTeX (miktex.org): Check Setup can do it.".into()
+        } else {
+            "LaTeX preview needs TeX. Install Tectonic or your system's TeX.".into()
+        });
     };
     fs::create_dir_all(out).map_err(err)?;
     let o = cmd.arg(file.file_name().unwrap()).current_dir(file.parent().unwrap()).stdin(Stdio::null()).output().await.map_err(err)?;
@@ -1045,7 +1480,7 @@ async fn quarto_preview(rel: &str, asked: u64) -> Result<(), String> {
         (w.path(rel)?, id)
     };
     let port = free_port()?;
-    let mut child = Command::new("quarto")
+    let mut child = Command::new("quarto").no_window()
         .arg("preview")
         .arg(file.file_name().unwrap())
         .args(["--no-browser", "--host", "127.0.0.1", "--port", &port.to_string()])
@@ -1119,7 +1554,7 @@ async fn follow(mut incoming: impl Stream<Item = Result<tungstenite::Message, tu
         let p = p.canonicalize().unwrap_or(p);
         if let Some(rel) = w.root.as_ref().and_then(|root| p.strip_prefix(root).ok()) {
             // Not text inside a package.
-            send(json!({"type": "jump", "path": rel.to_string_lossy(), "line": msg["start"][0], "col": msg["start"][1]}));
+            send(json!({"type": "jump", "path": page(rel), "line": msg["start"][0], "col": msg["start"][1]}));
             // The click went to the preview's own web view: the keys go back to the editor.
             if let Some(page) = APP.get().and_then(|app| app.get_webview("main")) {
                 let _ = page.set_focus();
@@ -1371,13 +1806,18 @@ fn quarto_pdf(text: &str) -> &'static str {
 /// Pandoc on its own, or the copy inside Quarto.
 fn pandoc() -> Result<Command, String> {
     if on_path("pandoc") {
-        return Ok(Command::new("pandoc"));
+        let mut cmd = Command::new("pandoc");
+        cmd.no_window();
+        return Ok(cmd);
     }
     if let Some(inside) = quarto_pandoc() {
-        return Ok(Command::new(inside));
+        let mut cmd = Command::new(inside);
+        cmd.no_window();
+        return Ok(cmd);
     }
     if on_path("quarto") {
         let mut cmd = Command::new("quarto");
+        cmd.no_window();
         cmd.arg("pandoc");
         return Ok(cmd);
     }
@@ -1393,16 +1833,31 @@ fn quarto_pandoc() -> Option<PathBuf> {
     p.is_file().then_some(p)
 }
 
-/// The macOS save dialog. None: cancelled.
+/// The save dialog of an export. None: cancelled.
 async fn save_dialog(dir: &Path, name: &str) -> Option<PathBuf> {
-    let escape = |s: &str| s.replace('\\', "\\\\").replace('"', "\\\"");
-    let script = format!(
-        r#"POSIX path of (choose file name with prompt "Export as" default name "{}" default location (POSIX file "{}"))"#,
-        escape(name),
-        escape(&dir.to_string_lossy())
-    );
-    let out = Command::new("osascript").args(["-e", &script]).stderr(Stdio::null()).output().await.ok()?;
-    Some(PathBuf::from(String::from_utf8_lossy(&out.stdout).trim())).filter(|p| !p.as_os_str().is_empty())
+    #[cfg(target_os = "macos")]
+    {
+        let escape = |s: &str| s.replace('\\', "\\\\").replace('"', "\\\"");
+        let script = format!(
+            r#"POSIX path of (choose file name with prompt "Export as" default name "{}" default location (POSIX file "{}"))"#,
+            escape(name),
+            escape(&dir.to_string_lossy())
+        );
+        let out = Command::new("osascript").args(["-e", &script]).stderr(Stdio::null()).output().await.ok()?;
+        Some(PathBuf::from(String::from_utf8_lossy(&out.stdout).trim())).filter(|p| !p.as_os_str().is_empty())
+    }
+    #[cfg(not(target_os = "macos"))]
+    {
+        use tauri_plugin_dialog::DialogExt;
+        let app = APP.get()?;
+        app.dialog()
+            .file()
+            .set_title("Export As")
+            .set_file_name(name)
+            .set_directory(dir)
+            .blocking_save_file()
+            .and_then(|f| f.into_path().ok())
+    }
 }
 
 /// Add the paper for a DOI or arXiv ID to the .bib file. Returns its key.
@@ -1465,14 +1920,25 @@ pub fn restart_agent(id: &str) {
     tokio::spawn(safe(json!({"type": "set_agent", "id": id})));
 }
 
+/// Where the writer's new work goes: the system's folder picker. On the Mac osascript asks
+/// with the prompt in the dialog's title bar; elsewhere the app's own dialog does.
 async fn pick_folder(prompt: &str) -> Option<String> {
-    let out = Command::new("osascript")
-        .args(["-e", &format!(r#"POSIX path of (choose folder with prompt "{prompt}")"#)])
-        .stderr(Stdio::null())
-        .output()
-        .await
-        .ok()?;
-    Some(String::from_utf8_lossy(&out.stdout).trim().to_string()).filter(|p| !p.is_empty())
+    #[cfg(target_os = "macos")]
+    {
+        let out = Command::new("osascript")
+            .args(["-e", &format!(r#"POSIX path of (choose folder with prompt "{prompt}")"#)])
+            .stderr(Stdio::null())
+            .output()
+            .await
+            .ok()?;
+        Some(String::from_utf8_lossy(&out.stdout).trim().to_string()).filter(|p| !p.is_empty())
+    }
+    #[cfg(not(target_os = "macos"))]
+    {
+        use tauri_plugin_dialog::DialogExt;
+        let app = APP.get()?;
+        app.dialog().file().set_title(prompt).blocking_pick_folder().and_then(|f| f.into_path().ok().map(|p| page(&p)))
+    }
 }
 
 /// The kinds of new project: id, name, starter file and its text.
@@ -1525,7 +1991,7 @@ fn field<'a>(msg: &'a Value, key: &str) -> Result<&'a str, String> {
 async fn handle(msg: &Value) -> Result<(), String> {
     let t = field(msg, "type")?;
     if FILE_OPS.contains(&t) {
-        let root = ws().root.as_ref().map(|r| r.to_string_lossy().into_owned());
+        let root = ws().root.as_ref().map(|r| page(r));
         if root.is_none() || msg["root"].as_str() != root.as_deref() {
             return Err("This page was showing a different folder, so nothing was changed. Reload the page.".into());
         }
@@ -1593,8 +2059,18 @@ async fn handle(msg: &Value) -> Result<(), String> {
             found["quiet"] = msg["quiet"].clone(); // the start page asks, and wants no dialog
             send(found);
         }
+        "run_setup" => run_setup(f("id")?).await?,
+        #[cfg(windows)]
+        "setup_input" => setup_input(f("text")?)?,
+        "stop_setup_run" => stop_setup_run(),
         "troubleshooting" => {
-            Command::new(if cfg!(target_os = "macos") { "open" } else { "xdg-open" }).arg(TROUBLESHOOTING).spawn().map_err(err)?;
+            #[cfg(target_os = "macos")]
+            Command::new("open").arg(TROUBLESHOOTING).no_window().spawn().map_err(err)?;
+            #[cfg(target_os = "linux")]
+            Command::new("xdg-open").arg(TROUBLESHOOTING).no_window().spawn().map_err(err)?;
+            // No browser helper here: cmd starts the one Windows opens links with.
+            #[cfg(windows)]
+            Command::new("cmd").args(["/c", "start", "", TROUBLESHOOTING]).no_window().spawn().map_err(err)?;
         }
         "set_option" => BRIDGE.set_option(f("kind")?, f("id")?, msg["value"].clone()).await?,
         "inline" => {
@@ -1617,7 +2093,7 @@ async fn handle(msg: &Value) -> Result<(), String> {
         "restore" => ws().restore(msg["turn"].as_u64().ok_or("'turn' is missing")?)?,
         "export" => {
             let path = export(f("path")?, f("to")?).await?;
-            send(json!({"type": "exported", "req": msg["req"], "path": path.map(|p| p.to_string_lossy().into_owned())}));
+            send(json!({"type": "exported", "req": msg["req"], "path": path.map(|p| page(&p))}));
         }
         "reveal" => {
             let path = PathBuf::from(f("path")?);
@@ -1626,10 +2102,13 @@ async fn handle(msg: &Value) -> Result<(), String> {
             }
             let finder = msg["finder"].as_bool().unwrap_or(false);
             #[cfg(target_os = "macos")]
-            Command::new("open").args(finder.then_some("-R")).arg(path).spawn().map_err(err)?;
+            Command::new("open").args(finder.then_some("-R")).arg(path).no_window().spawn().map_err(err)?;
             // Linux file managers share no "show this file": open its folder instead.
-            #[cfg(not(target_os = "macos"))]
-            Command::new("xdg-open").arg(if finder { path.parent().unwrap_or(&path) } else { &path }).spawn().map_err(err)?;
+            #[cfg(target_os = "linux")]
+            Command::new("xdg-open").arg(if finder { path.parent().unwrap_or(&path) } else { &path }).no_window().spawn().map_err(err)?;
+            // Explorer opens it, or shows it chosen in its folder.
+            #[cfg(windows)]
+            Command::new("explorer").arg(if finder { format!("/select,{}", path.display()) } else { path.display().to_string() }).spawn().map_err(err)?;
         }
         _ => {}
     }
@@ -1981,5 +2460,80 @@ mod tests {
             assert_eq!(w.latex_main("paper.tex"), "paper.tex");
         }
         let _ = fs::remove_dir_all(&dir);
+    }
+}
+
+#[cfg(all(test, windows))]
+mod vt_tests {
+    use super::*;
+
+    fn strip(said: &str) -> String {
+        let mut out = String::new();
+        VtStrip::default().feed(said.as_bytes(), &mut out);
+        out
+    }
+
+    #[test]
+    fn keeps_text_drops_codes() {
+        assert_eq!(strip("\x1b[2J\x1b[1;31mred\x1b[m plain\x07\x1b]0;title\x07!"), "red plain!");
+        assert_eq!(strip("\x1b]8;;http://x\x1b\\link"), "link");
+        assert_eq!(strip("a\r\nb\rc\rd"), "a\nbcd"); // lone \r redraws are dropped
+        assert_eq!(strip("k\tv\n"), "k\tv\n");
+    }
+
+    #[test]
+    fn codes_cut_by_a_read_still_go() {
+        let mut v = VtStrip::default();
+        let mut out = String::new();
+        v.feed(b"\x1b", &mut out);
+        v.feed(b"[31mred", &mut out);
+        v.feed(b"\x1b]0;ti", &mut out);
+        v.feed(b"tle\x07!", &mut out);
+        assert_eq!(out, "red!");
+    }
+
+    #[test]
+    fn characters_cut_by_a_read_still_come() {
+        let mut v = VtStrip::default();
+        let mut out = String::new();
+        for b in "héllo wörld ✓".bytes() {
+            v.feed(&[b], &mut out);
+        }
+        assert_eq!(out, "héllo wörld ✓");
+    }
+}
+
+#[cfg(all(test, windows))]
+mod pty_tests {
+    // The whole road in miniature: a prompt on a pseudo-terminal, an answer written in,
+    // the answer echoed back — what the embedded setup does, proved without the app.
+    #[test]
+    fn pty_runs_a_prompt() {
+        use portable_pty::{native_pty_system, CommandBuilder, PtySize};
+        use std::io::{Read, Write};
+        let pair = native_pty_system()
+            .openpty(PtySize { rows: 24, cols: 80, pixel_width: 0, pixel_height: 0 })
+            .unwrap();
+        let mut cmd = CommandBuilder::new("cmd");
+        cmd.args(["/v:on", "/c"]);
+        cmd.arg("set /p X=key: & echo got[!X!]");
+        let mut child = pair.slave.spawn_command(cmd).unwrap();
+        let mut killer = child.clone_killer();
+        let mut reader = pair.master.try_clone_reader().unwrap();
+        let mut writer = pair.master.take_writer().unwrap();
+        let _console = pair.master; // a closed console takes its child down with it
+        std::thread::spawn(move || {
+            std::thread::sleep(std::time::Duration::from_secs(15));
+            let _ = killer.kill();
+        });
+        writer.write_all(b"hello\r").unwrap();
+        writer.flush().unwrap();
+        let mut raw = String::new();
+        let _ = reader.read_to_string(&mut raw); // the end comes when the child does
+        let _ = child.wait().unwrap();
+        let mut strip = super::VtStrip::default();
+        let mut text = String::new();
+        strip.feed(raw.as_bytes(), &mut text);
+        assert!(text.contains("got[hello]"), "prompt/answer missing, got {text:?}");
     }
 }

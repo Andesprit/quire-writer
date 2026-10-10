@@ -105,6 +105,16 @@
                 </section>
               </div>
               <div>
+                <section aria-labelledby="start-h-agent">
+                  <h2 id="start-h-agent">Agent</h2>
+                  <div class="setup-row">
+                    <i class="codicon codicon-hubot"></i>
+                    <div>
+                      <select id="start-agent" class="ghost-select" title="The agent that writes with you"></select>
+                      <p class="muted" id="start-agent-note"></p>
+                    </div>
+                  </div>
+                </section>
                 <section aria-labelledby="start-h-computer">
                   <h2 id="start-h-computer">This computer</h2>
                   <ul class="setup-rows" id="start-rows"></ul>
@@ -205,6 +215,7 @@
     <form method="dialog">
       <p class="ask-title" id="ask-title"></p>
       <p class="ask-body"></p>
+      <pre class="ask-cmd" hidden><code></code></pre>
       <div class="ask-actions">
         <button value="cancel" class="btn secondary">Cancel</button>
         <button value="discard" class="btn secondary">Don't Save</button>

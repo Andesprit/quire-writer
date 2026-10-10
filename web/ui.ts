@@ -4,11 +4,15 @@ export const $ = <T extends HTMLElement = HTMLElement>(id: string) => document.g
 export const esc = (s: string) => s.replace(/[&<>"]/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;" })[c]!)
 export const icon = (name: string, extra = "") => `<i class="codicon codicon-${name} ${extra}"></i>`
 
-// With `ok`, a yes/no question whose yes button says `ok` (answer "save").
-export function ask(title: string, body: string, ok?: string): Promise<string> {
+// With `ok`, a yes/no question whose yes button says `ok` (answer "save"). With `command`,
+// the question shows a command of its own, so the writer sees exactly what would run.
+export function ask(title: string, body: string, ok?: string, command?: string): Promise<string> {
   const d = $<HTMLDialogElement>("ask")
   d.querySelector(".ask-title")!.textContent = title
   d.querySelector(".ask-body")!.textContent = body
+  const cmd = d.querySelector<HTMLElement>(".ask-cmd")!
+  cmd.hidden = !command
+  if (command) cmd.querySelector("code")!.textContent = command
   d.querySelector<HTMLElement>('button[value="discard"]')!.hidden = !!ok
   const primary = d.querySelector<HTMLElement>('button[value="save"]')!
   primary.textContent = ok ?? "Save"

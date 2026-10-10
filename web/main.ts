@@ -1137,7 +1137,7 @@ let agentNote = ""
 let slowStart: ReturnType<typeof setTimeout> | undefined
 function renderAgentNote(name: string, label: string) {
   const failed = agentState === "none" && !!agentError
-  const key = agentState === "starting" ? `starting:${label}` : failed ? `failed:${agentError}` : ""
+  const key = agentState === "starting" ? `starting:${label}` : failed ? `failed:${agentError}:${agentFix}` : ""
   if (key === agentNote) return
   agentNote = key
   clearTimeout(slowStart)
@@ -1149,24 +1149,60 @@ function renderAgentNote(name: string, label: string) {
     const hint = `<p>The first start downloads ${esc(name)}. This can take a minute or two.</p>`
     slowStart = setTimeout(() => note.lastElementChild!.insertAdjacentHTML("beforeend", hint), 5000)
   } else if (failed) {
-    note.innerHTML = `${icon("error")}<div><b>${esc(name)} could not start.</b><pre class="setup-said">${esc(agentError)}</pre><div class="actions"><button type="button" class="btn primary sm" data-start>Try Again</button><button type="button" class="btn secondary sm" data-setup>Check Setup</button></div></div>`
+    const fix = agentFix ? `<div class="setup-fix"><code>${esc(agentFix)}</code><button type="button" class="btn secondary sm" data-run="agent">Run</button><button type="button" class="btn secondary sm" data-copy="${esc(agentFix)}">Copy</button></div>` : ""
+    note.innerHTML = `${icon("error")}<div><b>${esc(name)} could not start.</b><pre class="setup-said">${esc(agentError)}</pre>${fix}<div class="actions"><button type="button" class="btn primary sm" data-start>Try Again</button><button type="button" class="btn secondary sm" data-setup>Check Setup</button></div></div>`
     setPanel("chat", true)
   }
 }
 $("agent-note").onclick = (e) => {
   const b = (e.target as HTMLElement).closest("button")
-  if (b?.hasAttribute("data-start")) send({ type: "set_agent", id: agentId })
+  if (b?.dataset.copy)
+    navigator.clipboard.writeText(b.dataset.copy).then(() => {
+      b.textContent = "Copied"
+      setTimeout(() => {
+        if (b.textContent === "Copied") b.textContent = "Copy" // back, unless copied again
+      }, 1500)
+    })
+  else if (b?.dataset.run === "agent") startSetupRun("agent", "", agents.find((a) => a.id === agentId)?.name ?? "Agent")
+  else if (b?.hasAttribute("data-start")) send({ type: "set_agent", id: agentId })
   else if (b?.hasAttribute("data-setup")) send({ type: "check_setup" })
 }
 
 // ---------- Check Setup: what the agent, the previews and the exports need ----------
 
 let agentError = "" // why the agent last failed to start
-let setupRows: { label: string; status: string; detail: string; fix: string }[] = []
+let agentFix = "" // the command that fixes it, when the agent says which one it is
+let setupRows: { id: string; label: string; status: string; detail: string; fix: string; fix_label?: string; runnable?: boolean }[] = []
 let readyAgents: string[] = [] // the agents whose starter is on this computer
+let setupRun: { id: string; text: string; failed: boolean; done: boolean } | null = null // the install the page started, and its output so far
+let setupDraft = "" // what the writer has typed to a setup so far, kept across re-renders
 const SETUP_ICONS: Record<string, string> = { ok: "pass", warn: "warning", error: "error", off: "circle-slash", busy: "loading codicon-modifier-spin" }
 
+// Run one of the fixes on this computer. First the writer sees exactly what would happen —
+// what it installs, and the command itself — and only a yes runs it. Rust knows the command
+// for each row id; the one shown here comes along so the dialog can spell it out.
+const startSetupRun = async (id: string, fix: string, what: string) => {
+  if (setupRun && !setupRun.done) return
+  const agent = id === "agent"
+  const ok = await ask(
+    agent ? `Set up ${what.replace(/ API key$/, "")}?` : `Install ${what}?`,
+    agent
+      ? "Quire runs the agent's setup here in the app: its output appears where you clicked Run, and it asks for the API key in a box there. The key is stored on this computer."
+      : "Quire runs a command on this computer that installs it, in the background. Its output appears where you clicked Run, and this page checks the computer again afterwards.",
+    "Run",
+    fix || undefined,
+  )
+  if (ok !== "save") return
+  setupRun = { id, text: "", failed: false, done: false }
+  send({ type: "run_setup", id })
+  renderSetup()
+}
+
 function renderSetup() {
+  // The answer box keeps what is typed and where the caret is while output re-renders around it.
+  const answering = document.activeElement instanceof HTMLInputElement && document.activeElement.classList.contains("setup-input")
+  const caret = answering ? (document.activeElement as HTMLInputElement).selectionStart : 0
+  const box = answering && (document.activeElement as HTMLElement).closest("#setup-rows") ? "setup-rows" : "start-rows"
   const name = agents.find((a) => a.id === agentId)?.name ?? "Agent"
   const agent =
     agentState === "ready" || agentState === "working"
@@ -1176,20 +1212,45 @@ function renderSetup() {
         : !root
           ? { status: "off", detail: "It starts when you open a project." }
           : { status: agentError ? "error" : "off", detail: agentError || "Not running.", start: true }
-  const rows = [{ label: name, fix: "", ...agent }, ...setupRows]
+  const rows = [{ id: "agent", label: name, fix: agentFix, runnable: !!agentFix, ...agent }, ...setupRows]
   // The same lines in the Check Setup dialog and on the start page.
   $("setup-rows").innerHTML = $("start-rows").innerHTML = rows
     .map((r: any) => {
       const detail = r.detail.includes("\n") ? `<pre class="setup-said">${esc(r.detail)}</pre>` : `<span>${esc(r.detail)}</span>`
-      const fix = r.fix ? `<div class="setup-fix"><code>${esc(r.fix)}</code><button type="button" class="btn secondary sm" data-copy="${esc(r.fix)}">Copy</button></div>` : ""
+      const busy = !!setupRun && !setupRun.done
+      const running = setupRun?.id === r.id && busy
+      const run = !r.runnable
+        ? ""
+        : running
+          ? `<button type="button" class="btn secondary sm" data-stop>Stop</button>`
+          : `<button type="button" class="btn secondary sm" data-run="${esc(r.id)}" data-fix="${esc(r.fix)}"${busy ? " disabled" : ""}>Run</button>`
+      const fix = r.fix
+        ? `<div class="setup-fix">${r.fix_label ? `<span class="muted">${esc(r.fix_label)}</span>` : `<code>${esc(r.fix)}</code>`}${run}<button type="button" class="btn secondary sm" data-copy="${esc(r.fix)}">Copy</button></div>`
+        : ""
+      const out = setupRun != null && setupRun.id === r.id ? `<pre class="setup-run${setupRun.failed ? " failed" : ""}">${esc(setupRun.text ?? "") || (busy ? "…" : "")}</pre>` : ""
+      // The agent's setup runs in the app now: what it asks, the writer answers here.
+      const answer = setupRun?.id === "agent" && busy ? `<div class="setup-in"><input type="text" class="setup-input" value="${esc(setupDraft)}" placeholder="Type your answer and press Enter" autocomplete="off" spellcheck="false"></div>` : ""
       const start = r.start ? `<button type="button" class="btn secondary sm" data-start>${agentError ? "Try Again" : "Start"}</button>` : ""
-      return `<li class="setup-row ${r.status}">${icon(SETUP_ICONS[r.status])}<div><b>${esc(r.label)}</b> ${detail}${fix}${start}</div></li>`
+      return `<li class="setup-row ${r.status}">${icon(SETUP_ICONS[r.status])}<div><b>${esc(r.label)}</b> ${detail}${fix}${out}${answer}${start}</div></li>`
     })
     .join("")
+  if (answering) {
+    const el = $(box).querySelector<HTMLInputElement>(".setup-input")
+    if (el) {
+      el.focus()
+      el.setSelectionRange(caret ?? el.value.length, caret ?? el.value.length)
+    }
+  }
   const n = readyAgents.length
   $("start-agents").hidden = !setupRows.length // not looked up yet
   $("start-agents").querySelector("summary")!.textContent = n ? `${n} agent${n === 1 ? "" : "s"} can start on this computer` : "No agent can start on this computer yet"
   $("start-agents").querySelector("p")!.textContent = readyAgents.join(", ")
+  // What the chosen agent will do, said where it is chosen: on the start page.
+  $("start-agent-note").textContent = !setupRows.length
+    ? `${name} starts when you open a project.`
+    : readyAgents.includes(name)
+      ? `${name} will start when you open a project.`
+      : `${name} can't start on this computer yet — what it needs is below.`
 }
 // The start page shows what this computer has: looked up when it shows, and again when the
 // writer comes back to the window (from installing something, say).
@@ -1199,8 +1260,34 @@ const checkForStart = () => {
 addEventListener("focus", checkForStart)
 $("setup-rows").onclick = $("start-rows").onclick = (e) => {
   const b = (e.target as HTMLElement).closest("button")
-  if (b?.dataset.copy) navigator.clipboard.writeText(b.dataset.copy).then(() => (b.textContent = "Copied"))
+  if (b?.dataset.copy)
+    navigator.clipboard.writeText(b.dataset.copy).then(() => {
+      b.textContent = "Copied"
+      setTimeout(() => {
+        if (b.textContent === "Copied") b.textContent = "Copy" // back, unless copied again or re-rendered
+      }, 1500)
+    })
+  else if (b?.dataset.run)
+    startSetupRun(b.dataset.run, b.dataset.fix ?? "", (b.closest(".setup-row")?.querySelector("b")?.textContent ?? "").trim())
+  else if (b?.hasAttribute("data-stop")) send({ type: "stop_setup_run" })
   else if (b?.hasAttribute("data-start")) send({ type: "set_agent", id: agentId })
+}
+// The answer to a setup's question (an API key, say): kept as it is typed, and Enter sends it.
+const keepDraft = (e: Event) => {
+  if ((e.target as HTMLElement).classList?.contains("setup-input")) setupDraft = (e.target as HTMLInputElement).value
+}
+const answerSetup = (e: KeyboardEvent) => {
+  const el = e.target as HTMLElement
+  if (!el.classList?.contains("setup-input") || e.key !== "Enter" || e.isComposing) return
+  e.preventDefault()
+  const said = setupDraft.trim()
+  if (said) send({ type: "setup_input", text: said })
+  setupDraft = ""
+  renderSetup()
+}
+for (const rows of [$("setup-rows"), $("start-rows")]) {
+  rows.addEventListener("input", keepDraft)
+  rows.addEventListener("keydown", answerSetup)
 }
 $("setup-again").onclick = () => send({ type: "check_setup" })
 $("setup-troubleshooting").onclick = (e) => {
@@ -1242,8 +1329,10 @@ function renderOptions(target: HTMLElement, kind: string, options: any[], only?:
   )
 }
 
-// The agent is chosen in the chat or in the autocomplete settings: there is one agent for both.
-const agentSelects = [$<HTMLSelectElement>("agent"), $<HTMLSelectElement>("ac-agent")]
+// The agent is chosen in the chat, in the autocomplete settings, or on the start page: there
+// is one agent for all three. On the start page the choice is only remembered — it starts
+// when a project opens.
+const agentSelects = [$<HTMLSelectElement>("agent"), $<HTMLSelectElement>("ac-agent"), $<HTMLSelectElement>("start-agent")]
 for (const sel of agentSelects) {
   sel.onchange = () => {
     for (const other of agentSelects) other.value = sel.value
@@ -1334,7 +1423,9 @@ for (const r of acSources) {
 }
 
 // The suggestion is drawn in the colored layer as a copy of the caret's line with the grey
-// text inserted. It covers what lies under it until it is accepted or dismissed.
+// text inserted. It covers that line until it is accepted or dismissed — and never more:
+// the added words can wrap past the line's own height, and uncovered they would hide the
+// lines below it, so what the writer selects there is not what they see.
 function placeGhost() {
   hl.querySelector(".ghost-line")?.remove()
   if (!ghost || mode !== "edit") return
@@ -1348,6 +1439,7 @@ function placeGhost() {
   el.style.top = `${div.offsetTop}px`
   el.style.left = `${div.offsetLeft}px`
   el.style.width = `${div.clientWidth}px`
+  el.style.maxHeight = `${div.offsetHeight}px`
   el.innerHTML = highlightHTML(text.slice(0, col), lang) + `<span class="ghost-text">${esc(ghost.text)}</span>` + highlightHTML(text.slice(col), lang)
   hl.append(el)
 }
@@ -1901,6 +1993,7 @@ function onMessage(msg: any) {
       for (const sel of agentSelects) sel.value = msg.id
       agentState = msg.ready ? "ready" : "none"
       agentError = msg.error ?? ""
+      agentFix = msg.fix ?? ""
       renderAgentStatus(msg.error && "Agent failed to start")
       checkForStart() // another agent may need another starter
       if (msg.ready && acToggle.checked) send({ type: "warm", kind: "complete" })
@@ -1914,6 +2007,31 @@ function onMessage(msg: any) {
       if (!msg.quiet && !d.open) d.showModal()
       break
     }
+    case "setup_run":
+      // A line of what the install says, as it says it. The setup running in the app comes
+      // in pieces of its own (a prompt has no line end), so those join as they are.
+      if (setupRun != null && setupRun.id === msg.id) {
+        const sep = msg.partial ? "" : "\n"
+        const text = `${setupRun.text ?? ""}${setupRun.text ? sep : ""}${msg.text}`.split("\n").slice(-400).join("\n")
+        setupRun.text = text
+        renderSetup()
+      }
+      break
+    case "setup_run_done":
+      if (setupRun != null && setupRun.id === msg.id) {
+        if (msg.ok) {
+          setupRun = null
+          toast(
+            msg.id === "agent" ? (msg.external ? "A terminal window opened: finish the setup there." : "Setup finished. Checking this computer again…") : "Installed. Checking this computer again…",
+            "info",
+          )
+        } else {
+          setupRun.failed = true
+          setupRun.done = true
+          renderSetup()
+        }
+      }
+      break
     case "options":
       if (msg.kind === "chat") {
         renderOptions($("chat-options"), "chat", msg.options)
