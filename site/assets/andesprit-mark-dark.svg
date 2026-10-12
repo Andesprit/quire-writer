@@ -1,0 +1,8 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 64" role="img" aria-labelledby="title desc">
+  <title id="title">Andesprit dark mode logo</title>
+  <desc id="desc">A cream letter A, moss-green Andean peak, and rising route on a dark forest background</desc>
+  <rect width="64" height="64" rx="15" fill="#071f18"/>
+  <path fill="#fbfdf5" d="M7 52 31.5 8 57 52H45.5l-14-25-13 25Z"/>
+  <path fill="#8fbd72" d="m27.5 52 14-18 17 18Z"/>
+  <path d="m31.5 52 7.5-6.5-3.5-4.2 6-7.2" fill="none" stroke="#071f18" stroke-width="4" stroke-linecap="round" stroke-linejoin="round"/>
+</svg>
