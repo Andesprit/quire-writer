@@ -26,7 +26,7 @@ use tokio::sync::{oneshot, Notify};
 
 #[cfg(windows)]
 use crate::ProcessGroup;
-use crate::{killpg, lock, SIGKILL, SIGTERM};
+use crate::{killpg, lock, NoWindow, SIGKILL, SIGTERM};
 use crate::project::{language_name, restart_agent, send, why};
 
 const AGENTS: &str = include_str!("../../agents.json");
@@ -86,6 +86,17 @@ impl Agent {
     /// What starts it: npx, uvx or its own program.
     pub fn program(&self) -> &str {
         &self.argv[0]
+    }
+
+    /// The command that signs the agent in (`npx <package> --setup`), for the ones that start
+    /// with npx. None for the rest: they sign in their own way, or not at all.
+    pub fn setup_command(&self) -> Option<String> {
+        (self.argv[0] == "npx")
+            .then(|| {
+                let pkg = self.argv.iter().skip(1).find(|arg| !arg.starts_with('-'))?;
+                Some(format!("npx {pkg} --setup"))
+            })
+            .flatten()
     }
 }
 
@@ -390,10 +401,20 @@ impl Bridge {
         self.st().error.clone()
     }
 
-    /// It could not start: the page shows why in Check Setup.
+    /// It could not start: the page shows why in Check Setup. On Windows, an agent that says
+    /// to run `--setup` means its npx package (the bare name it prints, no terminal there
+    /// runs): the command to copy comes along with the error.
     pub fn failed(&self, id: &str, error: String) {
-        self.st().error = Some(error.clone());
-        send(json!({"type": "agent", "id": id, "ready": false, "error": error}));
+        {
+            let mut st = self.st();
+            st.agent_id = Some(id.into()); // the page says this one is chosen: a Run opens its setup
+            st.error = Some(error.clone());
+        }
+        #[cfg(windows)]
+        let fix = find_agent(id).ok().and_then(|a| error.contains("--setup").then(|| a.setup_command()).flatten());
+        #[cfg(not(windows))]
+        let fix: Option<String> = None;
+        send(json!({"type": "agent", "id": id, "ready": false, "error": error, "fix": fix}));
     }
 
     pub fn all_options(&self) -> Vec<(String, Value)> {
@@ -412,6 +433,11 @@ impl Bridge {
         self.st().root = Some(root.into()); // set first: nothing may start a session in the previous folder
         self.st().error = None;
         let mut argv = spec.argv;
+        #[cfg(windows)]
+        if argv[0] == "npx" {
+            argv = [Some("cmd".into()), Some("/c".into())].into_iter().flatten().chain(argv).collect();
+        }
+        let program = argv[0].clone();
         let mut cleaned = false;
         let conn = loop {
             let mut child = Command::new(&argv[0])
@@ -422,9 +448,10 @@ impl Bridge {
                 .stdout(Stdio::piped())
                 .stderr(Stdio::piped())
                 .process_group(0)
+                .no_window()
                 .kill_on_drop(true)
                 .spawn()
-                .map_err(|e| format!("Could not start {}: {e}", argv[0]))?;
+                .map_err(|e| format!("Could not start {program}: {e}"))?;
             let (stdin, stdout, stderr) = (child.stdin.take().unwrap(), child.stdout.take().unwrap(), child.stderr.take().unwrap());
             let said = Arc::new(Mutex::new(Vec::new()));
             let stderr = tokio::spawn(keep_stderr(stderr, said.clone()));
@@ -805,7 +832,7 @@ impl Plain {
 /// one still waiting ends, and its program with it.
 async fn run(program: &str, args: &[&str], input: &str, secs: u32, newer: &Notify) -> std::io::Result<Option<std::process::Output>> {
     newer.notify_waiters();
-    let mut child = Command::new(program).args(args).stdin(Stdio::piped()).stdout(Stdio::piped()).stderr(Stdio::piped()).kill_on_drop(true).spawn()?;
+    let mut child = Command::new(program).no_window().args(args).stdin(Stdio::piped()).stdout(Stdio::piped()).stderr(Stdio::piped()).kill_on_drop(true).spawn()?;
     let mut stdin = child.stdin.take().unwrap();
     stdin.write_all(input.as_bytes()).await?;
     drop(stdin); // it reads to the end
@@ -860,7 +887,7 @@ pub fn stop_chat_plain() {
 
 /// Why Apple's model cannot answer on this Mac, or None when it can.
 pub async fn apple_problem() -> Option<String> {
-    match Command::new("quire-apple").arg("--check").output().await {
+    match Command::new("quire-apple").arg("--check").no_window().output().await {
         Ok(out) if out.status.success() => None,
         Ok(out) => Some(Some(String::from_utf8_lossy(&out.stderr).trim().to_string()).filter(|w| !w.is_empty()).unwrap_or("Apple's model needs macOS 26.".into())),
         Err(_) => Some(APPLE_MISSING.into()),

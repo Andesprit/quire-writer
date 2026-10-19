@@ -10,13 +10,19 @@ mod project;
 use std::fs::File;
 #[cfg(unix)]
 use std::os::fd::AsRawFd;
-use std::process::{Command, Stdio};
+use std::process::Command;
+#[cfg(not(windows))] // only shell_path's login shell (Mac, Linux) reads no stdin with it
+use std::process::Stdio;
 use std::sync::{Mutex, MutexGuard};
+#[cfg(windows)]
+use std::time::{Duration, Instant};
 
 use serde_json::Value;
 #[cfg(target_os = "macos")]
 use tauri::menu::{Menu, MenuItem, MenuItemKind};
 use tauri::webview::WebviewBuilder;
+#[cfg(windows)]
+use tauri::window::Color;
 use tauri::window::WindowBuilder;
 use tauri::{LogicalPosition, LogicalSize, Manager, Rect, RunEvent, WebviewUrl};
 #[cfg(unix)]
@@ -65,6 +71,30 @@ impl ProcessGroup for tokio::process::Command {
     }
 }
 
+/// Previews, builds and agents are tools the writer never types at: on Windows each would
+/// open a console window of its own, so the app starts them without one. Elsewhere this
+/// reads as part of the chain and does nothing.
+#[cfg(windows)]
+pub(crate) trait NoWindow {
+    fn no_window(&mut self) -> &mut Self;
+}
+#[cfg(windows)]
+impl NoWindow for tokio::process::Command {
+    fn no_window(&mut self) -> &mut Self {
+        self.creation_flags(0x0800_0000) // CREATE_NO_WINDOW
+    }
+}
+#[cfg(not(windows))]
+pub(crate) trait NoWindow {
+    fn no_window(&mut self) -> &mut Self;
+}
+#[cfg(not(windows))]
+impl NoWindow for tokio::process::Command {
+    fn no_window(&mut self) -> &mut Self {
+        self
+    }
+}
+
 /// Scroll bars that stay in view in the previews (tinymist, Quarto, the PDF and Markdown
 /// pages), as in the editor: macOS hides them until one scrolls. It runs in every frame, at
 /// the start, because WebKit styles a scroll bar only when its box is made.
@@ -92,6 +122,8 @@ fn message(app: tauri::AppHandle, msg: Value) {
     match msg["type"].as_str() {
         Some("restart") => app.request_restart(), // to open an installed update; the page saved first
         Some("preview_frame") => place_preview(&app, &msg),
+        #[cfg(windows)]
+        Some("preview_color") => preview_color(&app, &msg),
         _ => project::receive(msg),
     }
 }
@@ -101,6 +133,15 @@ fn message(app: tauri::AppHandle, msg: Value) {
 /// the page shows, in window points, and its zoom; no "w" hides it (no preview, or a dialog or
 /// menu over the panel).
 fn place_preview(app: &tauri::AppHandle, msg: &Value) {
+    #[cfg(windows)]
+    place_preview_queued(app, msg);
+    #[cfg(not(windows))]
+    place_preview_at_once(app, msg)
+}
+
+/// macOS and Linux answer every ask at once: WebKit draws where it is told and keeps up.
+#[cfg(not(windows))]
+fn place_preview_at_once(app: &tauri::AppHandle, msg: &Value) {
     let (Some(view), Some(page)) = (app.get_webview("preview"), app.get_webview("main")) else { return };
     let n = |k: &str| msg[k].as_f64();
     // The page's web view fills the window, title bar included, and WebKit starts the page
@@ -116,21 +157,203 @@ fn place_preview(app: &tauri::AppHandle, msg: &Value) {
     };
 }
 
+/// On Windows every ask crosses into the web view's process, which is also redrawing the
+/// document at its new size; answered as fast as they come (many a second while the writer
+/// drags the sash or the window's edge), the web view falls behind and the preview lands
+/// late, over the page's own view. So at most one draw runs every so often, answering the
+/// newest ask, and when the asks stop coming, a last draw answers the last one.
+#[cfg(windows)]
+struct PreviewPlace {
+    shown: Option<(f64, f64, f64, f64, f64, f64)>, // x, y, w, h, zoom, shown height
+    asked: Option<(f64, f64, f64, f64, f64, f64)>, // the newest ask not drawn yet
+    drawn: Option<Instant>,                        // when the web view last moved
+    queued: bool,                                  // a draw is on its way for a later ask
+    bg: Option<(u8, u8, u8)>,                      // the color last painted behind the document
+}
+
+#[cfg(windows)]
+static PLACE: Mutex<PreviewPlace> = Mutex::new(PreviewPlace { shown: None, asked: None, drawn: None, queued: false, bg: None });
+
+#[cfg(windows)]
+const DRAW_EVERY: Duration = Duration::from_millis(40);
+
+#[cfg(windows)]
+fn place_preview_queued(app: &tauri::AppHandle, msg: &Value) {
+    let n = |k: &str| msg[k].as_f64();
+    let ask = match (n("x"), n("y"), n("w"), n("h"), n("zoom"), n("shown")) {
+        (Some(x), Some(y), Some(w), Some(h), Some(zoom), Some(shown)) => Some((x, y, w, h, zoom, shown)),
+        _ => None,
+    };
+    let due = {
+        let mut place = lock(&PLACE);
+        place.asked = ask;
+        if place.queued {
+            return; // a draw is already on its way; it takes this newest ask
+        }
+        match place.drawn {
+            Some(t) if ask.is_some() && t.elapsed() < DRAW_EVERY => {
+                place.queued = true;
+                Some(DRAW_EVERY - t.elapsed()) // too soon since the last draw: answer when it is due
+            }
+            _ => None, // due now — or a hide, which answers at once: a dialog waits to be seen
+        }
+    };
+    match due {
+        Some(wait) => {
+            let app = app.clone();
+            std::thread::spawn(move || {
+                std::thread::sleep(wait);
+                let queued = app.clone();
+                let _ = app.run_on_main_thread(move || draw_preview(&queued));
+            });
+        }
+        None => draw_preview(app),
+    }
+}
+
+/// Draw (or hide) the preview as the page last asked. Every draw runs on the main thread —
+/// the page's asks arrive here too — and the lock never crosses a call that could wait on
+/// another thread.
+#[cfg(windows)]
+fn draw_preview(app: &tauri::AppHandle) {
+    let (Some(view), Some(page)) = (app.get_webview("preview"), app.get_webview("main")) else { return };
+    let mut place = lock(&PLACE);
+    place.queued = false;
+    // The page's web view fills the window, title bar included, and WebKit starts the page
+    // below the title bar: what the page does not show is the title bar's height.
+    let full = page.size().map_or(0.0, |s| s.to_logical::<f64>(page.window().scale_factor().unwrap_or(1.0)).height);
+    let _ = match place.asked {
+        Some((x, y, w, h, zoom, shown)) => {
+            if place.shown == place.asked {
+                return; // already there
+            }
+            let top = (full - shown).max(0.0);
+            let mut drawn = Ok(());
+            // The zoom changes only from the page's own menu, and every call crosses into
+            // the web view's process: ask for it only when it changed.
+            if place.shown.map_or(true, |s| s.4 != zoom) {
+                drawn = view.set_zoom(zoom);
+            }
+            drawn = drawn.and_then(|_| {
+                view.set_bounds(Rect { position: LogicalPosition::new(x, top + y).into(), size: LogicalSize::new(w, h).into() })
+            });
+            if place.shown.is_none() {
+                drawn = drawn.and_then(|_| view.show()); // it starts hidden; once shown it stays so
+            }
+            if drawn.is_ok() {
+                place.shown = place.asked;
+                place.drawn = Some(Instant::now());
+            }
+            drawn
+        }
+        None => {
+            let was = place.shown.take().is_some();
+            place.drawn = Some(Instant::now());
+            if was {
+                view.hide()
+            } else {
+                Ok(()) // it starts hidden anyway
+            }
+        }
+    };
+}
+
+/// While the web view moves, WebView2 paints white in the places not yet drawn — in every
+/// theme. The page knows what color the panel is (it changes with the theme); watch it from
+/// the page's own start, and say so whenever the theme changes.
+#[cfg(windows)]
+const PREVIEW_COLOR_WATCHER: &str = r#"{
+  const say = () => {
+    const el = document.getElementById("preview")
+    if (el) window.__TAURI_INTERNALS__.invoke("message", { msg: { type: "preview_color", color: getComputedStyle(el).backgroundColor } }).catch(() => {})
+  }
+  say()
+  addEventListener("DOMContentLoaded", say)
+  new MutationObserver(say).observe(document.documentElement, { attributes: true, attributeFilter: ["data-theme"] })
+}"#;
+
+/// The colored layer paints comments and emphasis in the editor font's own italic, whose
+/// glyphs run wider than the regular ones the text field draws behind them (the field has
+/// one face for everything). A comment that wraps then wraps at other words in the field,
+/// and every line under it drifts: clicks write a line away from where the writer aimed,
+/// and selections take in text they do not show. Slant the regular glyphs instead: the same
+/// widths, so both layers wrap as one, and near the same look.
+#[cfg(windows)]
+const EDITOR_TOKEN_METRICS: &str = r#"{
+  const style = document.createElement("style")
+  style.textContent = ".layer .tk-comment, .layer .tk-emphasis { font-style: oblique 10deg }"
+  document.documentElement.append(style)
+}"#;
+
+/// Paint the web view's own background the panel's color, when it changed: every call
+/// crosses into the web view's process.
+#[cfg(windows)]
+fn preview_color(app: &tauri::AppHandle, msg: &Value) {
+    let Some(s) = msg["color"].as_str() else { return };
+    // "rgb(60, 60, 60)", or "rgba" with an alpha the numbers after it make no difference to.
+    let rgb: Vec<u8> = s
+        .split('(')
+        .nth(1)
+        .and_then(|rest| rest.split(')').next())
+        .map(|inner| inner.split(',').filter_map(|p| p.trim().parse::<f64>().ok().map(|v| v as u8)).collect())
+        .unwrap_or_default();
+    if rgb.len() < 3 {
+        return;
+    }
+    let color = (rgb[0], rgb[1], rgb[2]);
+    {
+        let mut place = lock(&PLACE);
+        if place.bg == Some(color) {
+            return;
+        }
+        place.bg = Some(color);
+    }
+    if let Some(view) = app.get_webview("preview") {
+        let _ = view.set_background_color(Some(Color(color.0, color.1, color.2, 255)));
+    }
+}
+
 fn main() {
     // Set PATH before any thread starts. The bundled tinymist sits next to the app's own
     // program (a signed sidecar), and is found first.
     let bin = std::env::current_exe().ok().and_then(|exe| Some(exe.parent()?.to_path_buf()));
+    // The app looks its bundled tinymist up by plain name; the installer leaves it under the
+    // -<target triple> name Tauri gives sidecars. Copy it beside the app's own program, once,
+    // where the PATH below looks first.
+    #[cfg(windows)]
+    if let Some(dir) = &bin {
+        let plain = dir.join("tinymist.exe");
+        if !plain.exists() {
+            let named = std::fs::read_dir(dir).ok().and_then(|d| {
+                d.flatten().map(|e| e.path()).find(|p| {
+                    let name = p.file_name().map_or(String::new(), |n| n.to_string_lossy().into_owned());
+                    name.starts_with("tinymist-") && name.ends_with(".exe")
+                })
+            });
+            if let Some(from) = named {
+                let _ = std::fs::copy(from, &plain);
+            }
+        }
+    }
     let sep = if cfg!(windows) { ';' } else { ':' };
     std::env::set_var("PATH", format!("{}{sep}{}", bin.unwrap_or_default().display(), shell_path()));
     let folder = std::env::args().nth(1); // a folder to open at start: cargo run -- sample
-    tauri::Builder::default()
+    let builder = tauri::Builder::default()
         .plugin(tauri_plugin_updater::Builder::new().build())
-        .invoke_handler(tauri::generate_handler![message])
+        .invoke_handler(tauri::generate_handler![message]);
+    #[cfg(not(target_os = "macos"))]
+    let builder = builder.plugin(tauri_plugin_dialog::init()); // folder pickers, save dialogs
+    builder
         .register_asynchronous_uri_scheme_protocol("quire", |ctx, request, responder| {
             let (app, path) = (ctx.app_handle().clone(), request.uri().path().to_string());
             std::thread::spawn(move || responder.respond(project::protocol(&app, &path))); // files can be large
         })
         .setup(move |app| {
+            // What the registry keeps may be newer than the PATH this app was started with
+            // (Tectonic installed after the terminal that opened Quire, say): read it before
+            // anything looks a tool up. (~0.3 s, once, at start.)
+            #[cfg(windows)]
+            tauri::async_runtime::block_on(project::refresh_path());
             // Our errors and the agents' logs (their stderr) go to a file: an app has no terminal.
             // ponytail: not on Windows, where they go to the console the app opens; SetStdHandle would.
             #[cfg(unix)]
@@ -177,7 +400,14 @@ fn main() {
             let name = app.package_info().name.clone(); // productName in tauri.conf.json
             let window = WindowBuilder::new(app, "main").title(&name).inner_size(1400.0, 900.0).build()?;
             let size = window.inner_size()?.to_logical::<f64>(window.scale_factor()?);
-            window.add_child(WebviewBuilder::new("main", WebviewUrl::App("index.html".into())).auto_resize(), LogicalPosition::new(0.0, 0.0), size)?;
+            #[cfg(windows)]
+            let main_page = WebviewBuilder::new("main", WebviewUrl::App("index.html".into()))
+                .auto_resize()
+                .initialization_script(PREVIEW_COLOR_WATCHER)
+                .initialization_script(EDITOR_TOKEN_METRICS);
+            #[cfg(not(windows))]
+            let main_page = WebviewBuilder::new("main", WebviewUrl::App("index.html".into())).auto_resize();
+            window.add_child(main_page, LogicalPosition::new(0.0, 0.0), size)?;
             // The preview's own web view, on top of the page; hidden until the page places it.
             let preview = WebviewBuilder::new("preview", WebviewUrl::App("preview.html".into()))
                 .initialization_script_for_all_frames(PREVIEW_SCROLLBARS)
@@ -267,6 +497,7 @@ async fn update(app: &tauri::AppHandle, asked: bool) -> bool {
 
 /// Apps opened from Finder get a bare PATH without Homebrew, so `npx` and `node` (which most
 /// agents need) would be missing. Ask the login shell for the PATH the writer's terminal has.
+#[cfg(not(windows))]
 fn shell_path() -> String {
     let shell = std::env::var("SHELL").unwrap_or_else(|_| "/bin/zsh".into());
     Command::new(shell)
@@ -276,4 +507,12 @@ fn shell_path() -> String {
         .ok()
         .and_then(|o| String::from_utf8_lossy(&o.stdout).rsplit_once("__PATH__").map(|(_, p)| p.trim().to_string()))
         .unwrap_or_else(|| std::env::var("PATH").unwrap_or_default())
+}
+
+/// No login shell to ask on Windows: Git Bash's `sh` would answer with POSIX-style paths
+/// (/c/Program Files/..., separated by colons) that mean nothing to Windows, and every
+/// program would vanish from PATH. What the app was started with is the terminal's own.
+#[cfg(windows)]
+fn shell_path() -> String {
+    std::env::var("PATH").unwrap_or_default()
 }
