@@ -23,7 +23,9 @@ use tokio::task::JoinHandle;
 use tokio_tungstenite::tungstenite::{self, protocol::WebSocketConfig};
 use unicode_normalization::UnicodeNormalization;
 
-use crate::agent::{complete_api, complete_prompt, find_agent, registry, Agent, BRIDGE};
+use crate::agent::{
+    apple_problem, chat_plain, check_plain, check_prompt, complete_plain, complete_prompt, find_agent, inline_plain, inline_prompt, registry, stop_chat_plain, Agent, Plain, BRIDGE,
+};
 use crate::engine;
 #[cfg(windows)]
 use crate::ProcessGroup;
@@ -1959,7 +1961,7 @@ fn write_template(dir: &str, (_, _, file, text): (&str, &str, &str, &str)) -> Re
     fs::write(&p, text).map_err(err)
 }
 
-async fn chat(text: &str, path: Option<&str>, selection: Option<&str>) {
+async fn chat(text: &str, path: Option<&str>, selection: Option<&str>, plain: Option<Plain>) {
     let turn = {
         let mut w = ws();
         w.turn += 1;
@@ -1970,14 +1972,66 @@ async fn chat(text: &str, path: Option<&str>, selection: Option<&str>) {
         context += &format!("\n\nSelected text:\n{selection}");
     }
     send(json!({"type": "turn_start", "turn": turn, "text": text}));
-    let stop = match BRIDGE.prompt("chat", &format!("{text}{context}")).await {
-        Ok((stop, _)) => stop,
-        Err(e) => {
-            send(json!({"type": "error", "message": e}));
-            "error".into()
-        }
+    let asked = match &plain {
+        None => BRIDGE.prompt("chat", &format!("{text}{context}")).await.map(|(stop, _)| stop),
+        Some(model) => talk(model, text, path, selection).await.map(|reply| match reply {
+            Some(reply) => {
+                send(json!({"type": "update", "update": {"sessionUpdate": "agent_message_chunk", "content": {"type": "text", "text": reply}}}));
+                "end_turn".into()
+            }
+            None => "cancelled".into(),
+        }),
     };
-    send(json!({"type": "turn_end", "turn": turn, "stop": stop}));
+    let stop = asked.unwrap_or_else(|e| {
+        send(json!({"type": "error", "message": e}));
+        "error".into()
+    });
+    // A plain model changes no files, so its turn has nothing to restore.
+    send(json!({"type": "turn_end", "turn": turn, "stop": stop, "plain": plain.is_some()}));
+}
+
+// The chat with a model that only answers (an API or Apple's): the talk so far, the writer's
+// messages and the replies by turns. Another folder starts it afresh.
+static TALK: Mutex<Vec<String>> = Mutex::new(Vec::new());
+
+/// One message to the chat's plain model, with the open file and the selection, and its answer.
+async fn talk(model: &Plain, text: &str, path: Option<&str>, selection: Option<&str>) -> Result<Option<String>, String> {
+    // Apple's model reads about 3,000 words in all, an API far more.
+    let (file_room, talk_room) = if matches!(model, Plain::Apple) { (2_000, 4_000) } else { (24_000, 24_000) };
+    let path = path.filter(|p| !p.is_empty());
+    let mut ask = format!(
+        "You are the writing assistant in Quire, an editor for {} documents. You cannot change files or run tools: \
+         when you suggest a change, show the new text so the writer can copy it.",
+        language_name(path.unwrap_or(""))
+    );
+    if let Some(content) = path.and_then(|p| ws().read(p)) {
+        // ponytail: the start of a long file only; a window around the cursor if that matters.
+        let start: String = content.chars().take(file_room).collect();
+        let more = if start.len() < content.len() { "\n(The file goes on.)" } else { "" };
+        ask += &format!("\n\nThe writer has {} open:\n{start}{more}", path.unwrap_or(""));
+    }
+    if let Some(selection) = selection.filter(|s| !s.is_empty()) {
+        ask += &format!("\n\nSelected text:\n{selection}");
+    }
+    ask += &format!("\n\nThe writer says:\n{text}");
+    let mut talk = lock(&TALK).clone();
+    while talk.len() >= 2 && talk.iter().map(String::len).sum::<usize>() > talk_room {
+        talk.drain(..2); // the oldest exchange goes first
+    }
+    talk.push(ask);
+    let reply = chat_plain(model, &talk).await?;
+    if let Some(reply) = &reply {
+        lock(&TALK).extend([text.to_string(), reply.clone()]);
+    }
+    Ok(reply)
+}
+
+/// Tells the page whether Apple's model can answer here. Only macOS has it.
+async fn send_apple() {
+    if cfg!(target_os = "macos") {
+        let why = apple_problem().await;
+        send(json!({"type": "apple", "available": why.is_none(), "why": why.unwrap_or_default()}));
+    }
 }
 
 // Messages that read or write files. Each carries the folder the page is showing, so a
@@ -2019,6 +2073,7 @@ async fn handle(msg: &Value) -> Result<(), String> {
                     write_template(&path, k)?;
                 }
                 ws().open(&path)?;
+                lock(&TALK).clear();
                 start_agent(&BRIDGE.agent_id().unwrap_or(DEFAULT_AGENT.into())).await?;
             }
         }
@@ -2050,8 +2105,12 @@ async fn handle(msg: &Value) -> Result<(), String> {
             (result["type"], result["req"]) = ("cite_result".into(), msg["req"].clone());
             send(result);
         }
-        "prompt" => chat(f("text")?, opt("path"), opt("selection")).await,
-        "cancel" => BRIDGE.cancel("chat").await,
+        "prompt" => chat(f("text")?, opt("path"), opt("selection"), Plain::of(msg)).await,
+        "cancel" => {
+            stop_chat_plain();
+            BRIDGE.cancel("chat").await
+        }
+        "apple_status" => send_apple().await,
         "permission" => BRIDGE.answer_permission(f("id")?, opt("option").map(String::from)),
         "set_agent" => start_agent(f("id")?).await?,
         "check_setup" => {
@@ -2074,16 +2133,31 @@ async fn handle(msg: &Value) -> Result<(), String> {
         }
         "set_option" => BRIDGE.set_option(f("kind")?, f("id")?, msg["value"].clone()).await?,
         "inline" => {
-            let text = BRIDGE.inline(f("path")?, f("instruction")?, f("selected")?, f("before")?, f("after")?).await?;
+            let model = Plain::of(msg);
+            // Apple's small model rewrites the text around the selection too when it has it.
+            let (before, after) = if matches!(model, Some(Plain::Apple)) { ("", "") } else { (f("before")?, f("after")?) };
+            let prompt = inline_prompt(f("path")?, f("instruction")?, f("selected")?, before, after);
+            let text = match model {
+                Some(model) => inline_plain(&model, prompt).await?,
+                None => BRIDGE.inline(&prompt).await?,
+            };
             send(json!({"type": "inline_result", "req": msg["req"], "text": text}));
         }
         "complete" => {
             let prompt = complete_prompt(f("prompt")?, opt("path").unwrap_or(""), f("before")?, f("after")?);
-            let text = match opt("url") {
-                Some(url) => complete_api(f("kind")?, url, f("model")?, opt("key").unwrap_or(""), &prompt).await?,
+            let text = match Plain::of(msg) {
+                Some(model) => complete_plain(&model, prompt).await?,
                 None => BRIDGE.complete(&prompt).await?,
             };
             send(json!({"type": "complete_result", "req": msg["req"], "text": text}));
+        }
+        "check" => {
+            let prompt = check_prompt(f("prompt")?, opt("path").unwrap_or(""), f("text")?);
+            let text = match Plain::of(msg) {
+                Some(model) => check_plain(&model, prompt).await?,
+                None => BRIDGE.check(&prompt).await?,
+            };
+            send(json!({"type": "check_result", "req": msg["req"], "text": text}));
         }
         "warm" => {
             if BRIDGE.running() {
@@ -2118,7 +2192,7 @@ async fn handle(msg: &Value) -> Result<(), String> {
 async fn safe(msg: Value) {
     if let Err(e) = handle(&msg).await {
         let t = msg["type"].as_str().unwrap_or("");
-        send(json!({"type": "error", "message": format!("{t}: {e}"), "req": msg["req"], "op": t}));
+        send(json!({"type": "error", "message": format!("{t}: {e}"), "req": msg["req"], "op": t, "kind": msg["kind"]}));
     }
 }
 
@@ -2128,6 +2202,7 @@ fn hello() {
     agents.sort_by_key(|a| a["name"].as_str().unwrap_or("").to_lowercase());
     let agent = BRIDGE.agent_id().unwrap_or(DEFAULT_AGENT.into());
     send(json!({"type": "hello", "agents": agents, "agent": agent}));
+    tokio::spawn(send_apple());
     send(ws().state());
     // Whether the agent runs: an agent that failed before the page listened stays not running,
     // and the page still hears why.

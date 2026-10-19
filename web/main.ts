@@ -8,6 +8,7 @@ import { highlightHTML, highlightLine, langOf, startState, sameState, type Lang,
 import { diff, minimalChange, rebase, type Diff } from "./merge"
 import { $, ask, esc, fileIcon, icon, toast } from "./ui"
 import { FORMAT_KEYS, buildFormatBar, connectEditor, insertAt, select, setHeading, syntaxOf } from "./format"
+import { changes, paragraphs, readFixes, type Fix } from "./suggest"
 import { add, connectChat, onFolderOpened, onPermission, onTurnEnd, onTurnStart, onUpdate, renderChips, running, setAgentReady } from "./chat"
 
 // The product name: change it here only.
@@ -264,6 +265,8 @@ function render() {
   markActive()
   hl.scrollTop = ta.scrollTop
   placeGhost()
+  paintIssues()
+  scheduleCheck()
   if (previewKind === "markdown") sendMarkdown()
   sendTyped()
   if (mode === "review") renderReview()
@@ -304,6 +307,8 @@ function edit(from: number, to: number, text: string, disk = false) {
 ta.addEventListener("input", (e) => {
   docVersion++
   ghost = null
+  closeCard()
+  menu.hidden = true
   scheduleRender()
   if (!fromDisk) scheduleSave()
   if (!programmatic) {
@@ -313,6 +318,9 @@ ta.addEventListener("input", (e) => {
 })
 ta.addEventListener("scroll", () => {
   hl.scrollTop = ta.scrollTop
+  closeCard()
+  menu.hidden = true
+  if (rw) floatAt(rwCard, rw.from, rw.to)
 })
 // macOS "smart quotes and dashes" rewrite the word before the caret after every insert, so
 // `"en")` became `“en")` and `-->` became `—>`: in typing, the format bar's markup and agent
@@ -322,6 +330,9 @@ ta.addEventListener("beforeinput", (e) => {
 })
 const onCaret = () => {
   if (ghost && (ta.selectionStart !== ghost.pos || ta.selectionEnd !== ghost.pos)) clearGhost()
+  const pos = ta.selectionStart
+  if (cardMark && !(ta.selectionEnd === pos && cardMark.from <= pos && pos <= cardMark.to)) closeCard()
+  scheduleMenu()
   markActive()
   scheduleInfo()
   followCaret()
@@ -344,6 +355,11 @@ ta.addEventListener("keydown", (e) => {
   } else if (mod && key === "k") {
     e.preventDefault()
     openInline()
+  } else if (mod && e.key === ".") {
+    // On a selection, the rewrite menu; on an underline, its fix.
+    e.preventDefault()
+    if (ta.selectionStart === ta.selectionEnd) openCard(true)
+    else if (placeMenu()) menu.querySelector("button")!.focus()
   } else if (e.key === "Tab" && !e.shiftKey && !e.metaKey && !e.ctrlKey && !e.altKey) {
     // Tab accepts a suggestion or indents. Shift+Tab still leaves the editor.
     e.preventDefault()
@@ -355,6 +371,9 @@ ta.addEventListener("keydown", (e) => {
   } else if (e.key === "Escape" && ghost) {
     e.preventDefault()
     clearGhost()
+  } else if (e.key === "Escape" && cardMark) {
+    e.preventDefault()
+    closeCard()
   }
 })
 new ResizeObserver(scheduleRender).observe($("editor"))
@@ -463,6 +482,9 @@ function applyContent(content: string, base: string | null, c = minimalChange(ta
 // on its way, a disk conflict) may land in the new one.
 function dropFileState() {
   clearGhost()
+  closeCard()
+  closeRewrite()
+  menu.hidden = true
   holdSave = false
   pendingSave = null
   conflict?.remove()
@@ -1126,7 +1148,7 @@ function renderAgentStatus(text?: string) {
     { none: root ? `${name} is not running. Click to start it.` : "Open a folder to start the agent", starting: `Starting ${name}…`, ready: name, working: `${name} is working…` }[agentState]
   $("sb-agent").innerHTML = `${icon(busy ? "loading" : "hubot", busy ? "codicon-modifier-spin" : "")} <span>${esc(label)}</span>`
   $("sb-agent").title = root && agentState === "none" ? "Start the agent" : "Open chat"
-  setAgentReady(agentState === "ready" || agentState === "working")
+  setAgentReady(chApi() ? chReady() : agentState === "ready" || agentState === "working")
   if ($<HTMLDialogElement>("setup").open || !root) renderSetup()
   renderAgentNote(name, label)
 }
@@ -1329,10 +1351,10 @@ function renderOptions(target: HTMLElement, kind: string, options: any[], only?:
   )
 }
 
-// The agent is chosen in the chat, in the autocomplete settings, or on the start page: there
-// is one agent for all three. On the start page the choice is only remembered — it starts
-// when a project opens.
-const agentSelects = [$<HTMLSelectElement>("agent"), $<HTMLSelectElement>("ac-agent"), $<HTMLSelectElement>("start-agent")]
+// The agent is chosen in the chat, in the autocomplete, suggestions or edits settings, or on
+// the start page: there is one agent for all of them. On the start page the choice is only
+// remembered — it starts when a project opens.
+const agentSelects = ["agent", "ac-agent", "ck-agent", "ed-agent", "start-agent"].map((id) => $<HTMLSelectElement>(id))
 for (const sel of agentSelects) {
   sel.onchange = () => {
     for (const other of agentSelects) other.value = sel.value
@@ -1349,77 +1371,125 @@ let acBusy = false
 let acError = ""
 let ghost: { pos: number; text: string } | null = null
 
-// Suggestions come from the agent (ACP), or much faster from an API that talks like OpenAI's
-// (Groq, Ollama, ...) or like Anthropic's.
-const acSources = [...document.querySelectorAll<HTMLInputElement>("input[name=ac-source]")]
-const acFields = {
-  kind: $<HTMLSelectElement>("ac-kind"),
-  url: $<HTMLInputElement>("ac-url"),
-  key: $<HTMLInputElement>("ac-key"),
-  model: $<HTMLInputElement>("ac-model"),
+// Whether Apple's on-device model can answer here. The app says so on macOS only; elsewhere
+// it is never offered.
+let apple = { supported: false, available: false, why: "" }
+const APPLE_NOTE = "Apple's model answers on this Mac: your text is not sent anywhere. It reads about 3,000 words at a time, so it suits short tasks best."
+
+// What a request names as its model: an API's details or Apple's model. None is the agent.
+type Model = { source: "api"; kind: string; url: string; key: string; model: string } | { source: "apple" }
+
+// Autocomplete, suggestions, edits and the chat each ask a model of their own: the agent
+// (ACP), an API that talks like OpenAI's (Groq, Ollama, ...) or like Anthropic's, or Apple's
+// on-device model. `p` names its fields and stored settings; some have instructions too.
+function modelSettings(p: string, defaultPrompt: string, changed: () => void) {
+  const sources = [...document.querySelectorAll<HTMLInputElement>(`input[name=${p}-source]`)]
+  const fields = {
+    kind: $<HTMLSelectElement>(`${p}-kind`),
+    url: $<HTMLInputElement>(`${p}-url`),
+    key: $<HTMLInputElement>(`${p}-key`),
+    model: $<HTMLInputElement>(`${p}-model`),
+  }
+  /** The model to ask, or null for the agent. */
+  const api = (): Model | null => {
+    const source = store.get(`${p}.source`)
+    if (source === "apple") return { source }
+    if (source !== "api") return null
+    const { kind, url, key, model } = fields
+    return { source, kind: kind.value, url: url.value.trim(), key: key.value.trim(), model: model.value.trim() }
+  }
+  /** Why an API or Apple's model cannot be asked now, or "". */
+  const problem = () => {
+    const a = api()
+    if (a?.source === "apple") return apple.available ? "" : apple.why || "Apple's model is not available here."
+    return a && !a.url ? "Fill in the address." : a && !a.model ? "Fill in the model." : ""
+  }
+  const ready = () => (api() ? !problem() : agentState === "ready" || agentState === "working")
+  /** Its short name for the status bar: "" for the agent. */
+  const label = () => {
+    const a = api()
+    return a?.source === "apple" ? "Apple" : (a?.model ?? "")
+  }
+  const show = () => {
+    const source = api()?.source ?? "acp"
+    for (const r of sources) r.checked = r.value === source
+    $(`${p}-acp`).hidden = source !== "acp"
+    $(`${p}-api`).hidden = source !== "api"
+    $(`${p}-apple`).hidden = source !== "apple"
+    fields.url.placeholder = fields.kind.value === "anthropic" ? "https://api.anthropic.com" : "https://api.groq.com/openai/v1"
+    changed()
+  }
+  for (const [name, field] of Object.entries(fields)) {
+    field.value = store.get(`${p}.${name}`) ?? field.value
+    field.oninput = () => {
+      store.set(`${p}.${name}`, field.value.trim())
+      show()
+    }
+  }
+  for (const r of sources) {
+    r.onchange = () => {
+      store.set(`${p}.source`, r.value)
+      show()
+    }
+  }
+  // The writer may change the instructions; only changed ones are kept, so the others get a
+  // better default when one comes.
+  const prompt = document.getElementById(`${p}-prompt`) as HTMLTextAreaElement | null
+  if (prompt) {
+    prompt.value = store.get(`${p}.prompt`) ?? defaultPrompt
+    prompt.oninput = () => {
+      const text = prompt.value.trim()
+      if (text && text !== defaultPrompt) store.set(`${p}.prompt`, text)
+      else store.del(`${p}.prompt`)
+    }
+    prompt.onchange = () => {
+      if (!prompt.value.trim()) prompt.value = defaultPrompt
+      changed()
+    }
+  }
+  return { api, show, problem, ready, label, prompt: () => prompt?.value.trim() || defaultPrompt }
 }
 
-// What the model is told before the text around the cursor. The writer may change it; only a
-// changed one is kept, so the others get a better default when one comes.
+// A settings dialog: Apple's model may have become available since the last one.
+function openSettings(id: string) {
+  send({ type: "apple_status" })
+  $<HTMLDialogElement>(id).showModal()
+}
+
+function renderApple() {
+  for (const el of document.querySelectorAll<HTMLElement>(".apple-choice")) el.hidden = !apple.supported
+  for (const el of document.querySelectorAll<HTMLElement>(".apple-note")) el.textContent = apple.available ? APPLE_NOTE : apple.why
+  renderAcStatus()
+  renderCkStatus()
+  renderEdStatus()
+  renderChatModel()
+  scheduleCheck()
+}
+
+// What the model is told before the text around the cursor.
 const AC_PROMPT =
   "You are the autocomplete of a {language} editor. Continue the text at <CURSOR>.\n" +
   "Reply with ONLY the text to insert: a few words, at most one sentence. Start with a space if one is needed.\n" +
   "No explanation, no quotes, no code fences. Do not use any tools."
-const acPrompt = $<HTMLTextAreaElement>("ac-prompt")
-acPrompt.value = store.get("ac.prompt") ?? AC_PROMPT
-acPrompt.oninput = () => {
-  const text = acPrompt.value.trim()
-  if (text && text !== AC_PROMPT) store.set("ac.prompt", text)
-  else store.del("ac.prompt")
-}
-acPrompt.onchange = () => {
-  if (!acPrompt.value.trim()) acPrompt.value = AC_PROMPT
-}
-
-/** The API to ask, or null for the agent. */
-function acApi() {
-  if (store.get("ac.source") !== "api") return null
-  const { kind, url, key, model } = acFields
-  return { kind: kind.value, url: url.value.trim(), key: key.value.trim(), model: model.value.trim() }
-}
+const { api: acApi, show: renderAcSource, prompt: acPrompt, problem: acProblem, ready: acReady, label: acLabel } = modelSettings("ac", AC_PROMPT, () => {
+  clearGhost()
+  acError = ""
+  renderAcStatus()
+})
 
 function renderAcStatus() {
   const on = acToggle.checked
   const api = acApi()
-  const model = api ? api.model : acModel
-  const error = api && !api.url ? "Fill in the address." : api && !api.model ? "Fill in the model." : acError
+  const model = api ? acLabel() : acModel
+  const error = acProblem() || acError
   $("sb-ac").innerHTML =
     `${icon(acBusy ? "loading" : on && error ? "warning" : "sparkle", acBusy ? "codicon-modifier-spin" : "")} ` +
     `<span>${on ? `Autocomplete${model ? ` · ${esc(model)}` : ""}` : "Autocomplete off"}</span>`
   $("sb-ac").style.opacity = on ? "" : "0.75"
   $("ac-error").textContent = error
   $("ac-error").hidden = !error
-  const from = api ? `An API (${api.kind === "anthropic" ? "Anthropic" : "OpenAI"}-compatible)` : "Your agent (ACP)"
+  const from = !api ? "Your agent (ACP)" : api.source === "apple" ? "Apple's model, on this Mac" : `An API (${api.kind === "anthropic" ? "Anthropic" : "OpenAI"}-compatible)`
   $("start-ac").textContent = on ? `${from}${model ? ` · ${model}` : ""}` : "Off"
-}
-
-function renderAcSource() {
-  const api = !!acApi()
-  for (const r of acSources) r.checked = (r.value === "api") === api
-  $("ac-acp").hidden = api
-  $("ac-api").hidden = !api
-  acFields.url.placeholder = acFields.kind.value === "anthropic" ? "https://api.anthropic.com" : "https://api.groq.com/openai/v1"
-  acError = ""
-  renderAcStatus()
-}
-for (const [name, field] of Object.entries(acFields)) {
-  field.value = store.get(`ac.${name}`) ?? field.value
-  field.oninput = () => {
-    store.set(`ac.${name}`, field.value.trim())
-    renderAcSource()
-  }
-}
-for (const r of acSources) {
-  r.onchange = () => {
-    store.set("ac.source", r.value)
-    clearGhost()
-    renderAcSource()
-  }
 }
 
 // The suggestion is drawn in the colored layer as a copy of the caret's line with the grey
@@ -1455,7 +1525,7 @@ acToggle.onchange = () => {
   else clearGhost()
   renderAcStatus()
 }
-$("sb-ac").onclick = $("start-ac-settings").onclick = () => $<HTMLDialogElement>("ac-settings").showModal()
+$("sb-ac").onclick = $("start-ac-settings").onclick = () => openSettings("ac-settings")
 
 let acTimer = 0
 let reqSeq = 0 // shared by autocomplete and inline, so errors reach the right place
@@ -1464,13 +1534,13 @@ let acWant: { req: number; pos: number; version: number } | null = null
 function scheduleComplete() {
   clearTimeout(acTimer)
   const api = acApi()
-  if (!acToggle.checked || (api ? !(api.url && api.model) : agentState === "none" || agentState === "starting")) return
+  if (!acToggle.checked || !acReady()) return
   acTimer = window.setTimeout(() => {
     if (ta.selectionStart !== ta.selectionEnd || mode !== "edit") return
     const pos = ta.selectionStart
     const doc = ta.value
     acWant = { req: ++reqSeq, pos, version: docVersion }
-    send({ type: "complete", req: acWant.req, path: current, before: doc.slice(Math.max(0, pos - 2000), pos), after: doc.slice(pos, pos + 500), prompt: acPrompt.value.trim() || AC_PROMPT, ...api })
+    send({ type: "complete", req: acWant.req, path: current, before: doc.slice(Math.max(0, pos - 2000), pos), after: doc.slice(pos, pos + 500), prompt: acPrompt(), ...api })
     acBusy = true
     renderAcStatus()
     // An API answers in a fraction of a second, so it is asked after a shorter pause. Every
@@ -1492,31 +1562,397 @@ function showCompletion(req: number, text: string) {
   placeGhost()
 }
 
+// ---------- suggestions (mistakes underlined in red) ----------
+
+const ckToggle = $<HTMLInputElement>("ck-toggle")
+// Off until the writer turns it on: it sends the whole file.
+ckToggle.checked = store.get("suggestions") === "on"
+let ckError = ""
+const CK_PROMPT =
+  "You proofread a {language} document. Find spelling, grammar and punctuation mistakes, and wrong words.\n" +
+  "Leave style, meaning and correct text alone. Never change markup, commands, math, code, citations or labels."
+const { api: ckApi, show: renderCkSource, prompt: ckPrompt, problem: ckProblem, ready: ckReady } = modelSettings("ck", CK_PROMPT, () => {
+  ckError = ""
+  checked.clear() // another model or other instructions: check everything again
+  warmCheck()
+  paintIssues()
+  scheduleCheck()
+})
+const warmCheck = () => ckToggle.checked && !ckApi() && send({ type: "warm", kind: "check" })
+
+// The fixes by paragraph text: a paragraph is sent once, and again only once it changes. Undo
+// brings its fixes back with it.
+// ponytail: kept until the app quits or the settings change; a long session only costs memory.
+const checked = new Map<string, Fix[]>()
+type Mark = { from: number; to: number; para: string; fix: Fix }
+let marks: Mark[] = [] // the open file's, in order
+let ckWant: { req: number; paras: string[] } | null = null
+let ckTimer = 0
+// The underlines are a highlight (the browser's own) over the colored layer's text. An older
+// web view has none: then there are no suggestions, rather than no editor.
+const issues = typeof Highlight === "function" ? new Highlight() : null
+if (issues) CSS.highlights.set("issue", issues)
+else {
+  ckToggle.checked = false
+  ckToggle.disabled = true
+  ckToggle.parentElement!.title = "Suggestions need a newer system web view."
+}
+
+function scheduleCheck(wait = 1500) {
+  clearTimeout(ckTimer)
+  ckTimer = window.setTimeout(runCheck, wait)
+}
+
+// Send the paragraphs not checked yet, the nearest to the cursor first, a few at a time. The
+// next few go when these come back. Nothing goes while the writer types.
+// ponytail: markup-only paragraphs (a preamble, code) are sent too; the instructions leave them be.
+function runCheck() {
+  if (ckWant || !ckToggle.checked || !ckReady() || !current || mode !== "edit") return
+  if (Date.now() - lastTyped < 1000) return scheduleCheck()
+  const caret = ta.selectionStart
+  const todo = paragraphs(ta.value).filter((p) => !checked.has(p.text) && /\p{L}/u.test(p.text))
+  todo.sort((a, b) => Math.abs(a.from - caret) - Math.abs(b.from - caret))
+  const paras: string[] = []
+  let size = 0
+  for (const p of todo) {
+    if (size && size + p.text.length > 4000) break
+    if (!paras.includes(p.text)) paras.push(p.text)
+    size += p.text.length
+  }
+  if (!paras.length) return
+  ckWant = { req: ++reqSeq, paras }
+  send({ type: "check", req: ckWant.req, path: current, text: paras.join("\n\n"), prompt: ckPrompt(), ...ckApi() })
+  renderCkStatus()
+}
+
+function onChecked(req: number, reply: string) {
+  const w = ckWant
+  if (!w || w.req !== req) return
+  ckWant = null
+  const fixes = readFixes(reply, w.paras)
+  if (!fixes) {
+    ckError = "The model did not answer with a list of fixes. Try another model."
+    return renderCkStatus()
+  }
+  ckError = ""
+  w.paras.forEach((p, i) => checked.set(p, fixes[i]))
+  paintIssues()
+  runCheck()
+}
+
+// Underline the open file's fixes.
+// Math, code, comments, labels and strings are not prose: a fix there is the model touching
+// markup, which it was told not to.
+const NOT_PROSE = ".tk-comment, .tk-func, .tk-keyword, .tk-label, .tk-math, .tk-raw, .tk-string"
+const inCode = (pos: number) => !!nodeAt(pos)?.[0].parentElement?.closest(NOT_PROSE)
+
+function paintIssues() {
+  const found: Mark[] = []
+  issues?.clear()
+  if (ckToggle.checked && mode === "edit") {
+    for (const p of paragraphs(ta.value)) {
+      for (const fix of checked.get(p.text) ?? []) found.push({ from: p.from + fix.at, to: p.from + fix.at + fix.len, para: p.text, fix })
+    }
+  }
+  // Its first and last characters: at an edge, nodeAt gives the text before it.
+  marks = found.filter((m) => !inCode(m.from + 1) && !inCode(m.to))
+  for (const m of marks) {
+    const [from, to] = [nodeAt(m.from), nodeAt(m.to)]
+    if (!from || !to) continue
+    const r = document.createRange()
+    r.setStart(...from)
+    r.setEnd(...to)
+    issues?.add(r)
+  }
+  renderCkStatus()
+}
+
+let ckShown = ""
+function renderCkStatus() {
+  const on = ckToggle.checked
+  const error = ckProblem() || ckError
+  const n = marks.length
+  const html =
+    `${icon(ckWant ? "loading" : on && error ? "warning" : "lightbulb", ckWant ? "codicon-modifier-spin" : "")} ` +
+    `<span>${on ? `${n} suggestion${n === 1 ? "" : "s"}` : "Suggestions off"}</span>`
+  if (html !== ckShown) $("sb-ck").innerHTML = ckShown = html // every keystroke: keep the spinner turning
+  $("sb-ck").style.opacity = on ? "" : "0.75"
+  $("sb-ck").title = on && error ? `Suggestions: ${error}` : "Suggestions settings"
+  $("ck-error").textContent = error
+  $("ck-error").hidden = !error
+}
+
+ckToggle.onchange = () => {
+  store.set("suggestions", ckToggle.checked ? "on" : "off")
+  ckError = ""
+  warmCheck()
+  paintIssues()
+  scheduleCheck(0)
+}
+$("sb-ck").onclick = () => openSettings("ck-settings")
+
+// The card with a fix: a click on an underline, or Cmd+. with the cursor on one.
+const card = $("fix-card")
+let cardMark: Mark | null = null
+
+function openCard(focus: boolean) {
+  const pos = ta.selectionStart
+  const m = ta.selectionEnd === pos ? marks.find((m) => m.from <= pos && pos <= m.to) : null
+  if (!m) return
+  cardMark = m
+  $("fix-why").textContent = m.fix.why || "Suggestion"
+  $("fix-apply").textContent = m.fix.fix || `Delete “${ta.value.slice(m.from, m.to)}”`
+  card.hidden = false
+  floatAt(card, m.from, m.from)
+  if (focus) $("fix-apply").focus()
+}
+
+function closeCard() {
+  card.hidden = true
+  cardMark = null
+}
+
+$("fix-apply").onclick = () => {
+  const m = cardMark!
+  closeCard()
+  // The paragraph's other fixes move to its new text, so they stay without asking again.
+  const { at, len, fix } = m.fix
+  const rest = checked.get(m.para)!.filter((f) => f.at + f.len <= at || f.at >= at + len)
+  const moved = rest.map((f) => (f.at < at ? f : { ...f, at: f.at + fix.length - len }))
+  checked.set(m.para.slice(0, at) + fix + m.para.slice(at + len), moved)
+  edit(m.from, m.to, fix)
+}
+$("fix-dismiss").onclick = () => {
+  const m = cardMark!
+  closeCard()
+  checked.set(m.para, checked.get(m.para)!.filter((f) => f !== m.fix))
+  paintIssues()
+  ta.focus()
+}
+card.onkeydown = (e) => {
+  if (e.key !== "Escape") return
+  closeCard()
+  ta.focus()
+}
+ta.addEventListener("click", () => openCard(false))
+document.addEventListener("mousedown", (e) => {
+  if (cardMark && !card.contains(e.target as Node) && e.target !== ta) closeCard()
+})
+
+// ---------- edits: Cmd+K and the rewrite menu ask this model ----------
+
+const { api: edApi, show: renderEdSource, problem: edProblem, label: edLabel } = modelSettings("ed", "", () => renderEdStatus())
+
+function renderEdStatus() {
+  const error = edProblem()
+  $("sb-ed").innerHTML = `${icon(error ? "warning" : "edit")} <span>Edits${edLabel() ? ` · ${esc(edLabel())}` : ""}</span>`
+  $("sb-ed").title = error ? `Edits: ${error}` : "Edits settings: Cmd+K and the rewrite menu"
+  $("ed-error").textContent = error
+  $("ed-error").hidden = !error
+}
+$("sb-ed").onclick = () => openSettings("ed-settings")
+
+/** Why an edit cannot be asked for now, or "". */
+function edWhy() {
+  if (edApi()) return edProblem()
+  if (agentState === "starting") return "The agent is still starting. Try again in a moment."
+  return agentState === "none" ? "The agent is not running. Click it in the status bar to start it." : ""
+}
+
+// ---------- the chat's model: with an API or Apple's, the chat only answers ----------
+
+const { api: chApi, show: renderChSource, problem: chProblem, ready: chReady } = modelSettings("ch", "", () => renderChatModel())
+
+function renderChatModel() {
+  const api = chApi()
+  $("chat-source").textContent = !api ? "Agent" : api.source === "apple" ? "Apple model" : api.model || "API"
+  $("agent").hidden = $("chat-options").hidden = !!api // the agent's own choices
+  $<HTMLTextAreaElement>("chat-input").placeholder = api ? "Ask about your writing (answers only, no file changes)" : "Ask the agent to write or change something"
+  const error = chProblem()
+  $("ch-error").textContent = error
+  $("ch-error").hidden = !error
+  renderAgentStatus() // whether the chat can send
+}
+$("chat-source").onclick = () => openSettings("ch-settings")
+
+// ---------- rewrite the selection: a menu over it, then the new text to accept or not ----------
+
+// What the agent is asked for each button. "Other" asks the writer.
+const STYLES: Record<string, string> = {
+  formal: "Paraphrase it in a formal tone.",
+  scientific: "Paraphrase it in a precise, scientific style, as in a research paper.",
+  friendly: "Paraphrase it in a friendly, conversational tone.",
+  standard: "Paraphrase it in plain, clear language.",
+}
+const KEEP = " Keep its meaning and its language. Keep markup, math, citations and labels as they are."
+const menu = $("rewrite-menu")
+const rwCard = $("rewrite-card")
+const rwAsk = $<HTMLTextAreaElement>("rewrite-ask")
+let rw: { from: number; to: number; selected: string; req: number; text: string } | null = null
+let menuTimer = 0
+
+// The menu shows under a selection once it stops changing.
+function scheduleMenu() {
+  clearTimeout(menuTimer)
+  menu.hidden = true
+  menuTimer = window.setTimeout(placeMenu, 250)
+}
+
+function placeMenu() {
+  const [from, to] = [ta.selectionStart, ta.selectionEnd]
+  if (from === to || mode !== "edit" || !current || !rwCard.hidden || !box.hidden || !/\p{L}/u.test(ta.value.slice(from, to))) return false
+  menu.hidden = false
+  floatAt(menu, from, to)
+  return true
+}
+
+// Buttons take no focus from the text on a click, so the selection stays.
+menu.onmousedown = (e) => e.preventDefault()
+menu.onclick = (e) => {
+  const style = (e.target as HTMLElement).closest("button")?.dataset.style
+  if (!style) return
+  const [from, to] = [ta.selectionStart, ta.selectionEnd]
+  menu.hidden = true
+  rw = { from, to, selected: ta.value.slice(from, to), req: 0, text: "" }
+  $("rewrite-title").textContent = style === "other" ? "Rewrite" : `Rewrite: ${(e.target as HTMLElement).textContent}`
+  $("rewrite-text").replaceChildren()
+  $("rewrite-apply").hidden = true
+  rwAsk.hidden = style !== "other"
+  rwCard.hidden = false
+  if (style === "other") {
+    rwAsk.value = ""
+    rwStatus("Enter to send, Esc to close.")
+    rwAsk.focus()
+  } else rewrite(STYLES[style] + KEEP)
+  floatAt(rwCard, from, to)
+}
+menu.onkeydown = (e) => {
+  if (e.key !== "Escape") return
+  menu.hidden = true
+  ta.focus()
+}
+menu.addEventListener("focusout", (e) => {
+  if (!menu.contains(e.relatedTarget as Node) && e.relatedTarget !== ta) menu.hidden = true
+})
+ta.addEventListener("blur", (e) => {
+  if (!menu.contains(e.relatedTarget as Node)) menu.hidden = true
+})
+
+function rewrite(instruction: string) {
+  const w = rw!
+  const why = edWhy()
+  if (why) return rwStatus(why, "error")
+  const doc = ta.value
+  w.req = ++reqSeq
+  send({ type: "inline", req: w.req, path: current, instruction, selected: w.selected, before: doc.slice(Math.max(0, w.from - 3000), w.from), after: doc.slice(w.to, w.to + 1000), ...edApi() })
+  rwStatus("Rewriting\u2026", "busy")
+}
+
+function rwStatus(text: string, kind: "" | "busy" | "error" = "") {
+  const el = $("rewrite-status")
+  el.className = kind === "error" ? "error" : ""
+  el.innerHTML = kind === "busy" ? `${icon("loading", "codicon-modifier-spin")} ${esc(text)}` : esc(text)
+}
+
+// The new text, its changed words marked.
+function showRewrite(req: number, text: string) {
+  const w = rw
+  if (!w || w.req !== req) return
+  w.text = keepSpaces(w.selected, text)
+  let html = ""
+  let at = 0
+  for (const f of changes(w.selected, w.text, "")) {
+    html += esc(w.selected.slice(at, f.at)) + (f.fix ? `<ins>${esc(f.fix)}</ins>` : "")
+    at = f.at + f.len
+  }
+  $("rewrite-text").innerHTML = html + esc(w.selected.slice(at))
+  rwStatus(w.text === w.selected ? "The agent changed nothing." : "")
+  rwAsk.hidden = true
+  $("rewrite-apply").hidden = w.text === w.selected
+  floatAt(rwCard, w.from, w.to)
+  ;($("rewrite-apply").hidden ? $("rewrite-discard") : $("rewrite-apply")).focus()
+}
+
+function closeRewrite() {
+  rwCard.hidden = true
+  rw = null
+}
+
+rwAsk.onkeydown = (e) => {
+  if (e.key === "Escape") {
+    closeRewrite()
+    return ta.focus()
+  }
+  if (e.key !== "Enter" || e.shiftKey || e.isComposing || !rwAsk.value.trim()) return
+  e.preventDefault()
+  rewrite(rwAsk.value.trim())
+}
+$("rewrite-apply").onclick = () => {
+  const w = rw
+  if (!w?.text) return // no new text yet
+  if (ta.value.slice(w.from, w.to) !== w.selected) return rwStatus("The text changed meanwhile. Select it again and retry.", "error")
+  closeRewrite()
+  edit(w.from, w.to, w.text)
+}
+$("rewrite-discard").onclick = () => {
+  closeRewrite()
+  ta.focus()
+}
+rwCard.onkeydown = (e) => {
+  if (e.key !== "Escape" || e.target === rwAsk) return
+  closeRewrite()
+  ta.focus()
+}
+document.addEventListener("mousedown", (e) => {
+  if (rw && !rwCard.contains(e.target as Node)) closeRewrite()
+})
+
 // ---------- inline edit (Cmd+K) ----------
 
 const box = $("inline-box")
 const inlineInput = $<HTMLTextAreaElement>("inline-input")
 let inlineWant: { req: number; from: number; to: number; selected: string } | null = null
 
-// Screen position of a text offset, measured on the colored layer (it mirrors the text field).
-function coordsAt(pos: number): DOMRect {
+// Where a text offset is in the colored layer (it mirrors the text field): a text node and
+// the offset in it. None on an empty line.
+function nodeAt(pos: number): [Node, number] | null {
   const line = lineOf(pos)
-  const div = hl.children[line] as HTMLElement
+  const div = hl.children[line]
+  if (!div) return null
   let rest = pos - lineStarts[line]
   const walk = document.createTreeWalker(div, NodeFilter.SHOW_TEXT)
   for (let node = walk.nextNode(); node; node = walk.nextNode()) {
     const len = node.textContent!.length
-    if (rest <= len) {
-      const r = document.createRange()
-      r.setStart(node, rest)
-      r.collapse(true)
-      const rect = r.getClientRects()[0] ?? r.getBoundingClientRect()
-      if (rect.height) return rect
-      break
-    }
+    if (rest <= len) return [node, rest]
     rest -= len
   }
-  return div.getBoundingClientRect()
+  return null
+}
+
+// Screen position of a text offset, measured on the colored layer.
+function coordsAt(pos: number): DOMRect {
+  const at = nodeAt(pos)
+  if (at) {
+    const r = document.createRange()
+    r.setStart(...at)
+    r.collapse(true)
+    const rect = r.getClientRects()[0] ?? r.getBoundingClientRect()
+    if (rect.height) return rect
+  }
+  return hl.children[lineOf(pos)].getBoundingClientRect()
+}
+
+// Put a floating box under the text from..to, or over it when there is no room below.
+function floatAt(el: HTMLElement, from: number, to: number) {
+  const [top, bottom] = [coordsAt(from), coordsAt(to)]
+  const below = bottom.bottom + el.offsetHeight + 8 < innerHeight
+  el.style.left = `${Math.max(8, Math.min(top.left - 10, innerWidth - el.offsetWidth - 8))}px`
+  el.style.top = below ? `${bottom.bottom + 6}px` : `${Math.max(8, top.top - el.offsetHeight - 6)}px`
+}
+
+// Agents trim the spaces and blank lines around a selection: put them back.
+function keepSpaces(selected: string, text: string) {
+  return selected.trim() ? selected.match(/^\s*/)![0] + text.trim() + selected.match(/\s*$/)![0] : text
 }
 
 function inlineStatus(text: string, kind: "" | "busy" | "error" = "") {
@@ -1572,7 +2008,10 @@ inlineInput.onkeydown = (e) => {
     send({ type: "cite", req: inlineWant.req, id: inlineInput.value.trim(), path: current })
     return inlineStatus("Looking it up…", "busy")
   }
+  const why = edWhy()
+  if (why) return inlineStatus(why, "error")
   send({
+    ...edApi(),
     type: "inline",
     req: inlineWant.req,
     path: current,
@@ -1591,10 +2030,7 @@ function applyInline(req: number, text: string) {
     inlineStatus("The text changed while the agent was working. Select it again and retry.", "error")
     return
   }
-  if (w.selected.trim()) {
-    // Keep the spaces and blank lines around the selection; agents trim them.
-    text = w.selected.match(/^\s*/)![0] + text.trim() + w.selected.match(/\s*$/)![0]
-  }
+  text = keepSpaces(w.selected, text)
   // The edit becomes a change to review, like any agent change.
   if (baseline == null) baseline = ta.value
   box.hidden = true
@@ -1709,7 +2145,7 @@ function showPreview(url: string) {
 }
 // The web view sits over #preview. A native view covers whatever the page floats over it, so
 // it steps aside while a dialog or menu would sit under it, and notices go to its left.
-const floating = ["ask", "new-project-ask", "setup", "ac-settings", "inline-box", "ctx-menu", "toasts", "sidebar", "chat"].map((id) => $(id))
+const floating = ["ask", "new-project-ask", "setup", "ac-settings", "ck-settings", "ed-settings", "ch-settings", "inline-box", "fix-card", "rewrite-menu", "rewrite-card", "ctx-menu", "toasts", "sidebar", "chat"].map((id) => $(id))
 let placing = 0
 let placed = "" // the place last sent
 let bgSent = "" // the theme's preview background last sent: the web view shows it while a preview loads
@@ -1804,11 +2240,12 @@ function followCaret() {
 
 connectEditor(edit, () => openInline("cite"))
 connectChat({
-  send,
+  send: (msg: any) => send(msg.type === "prompt" ? { ...msg, ...chApi() } : msg),
   context: () => ({ path: current, selection: ta.selectionEnd > ta.selectionStart ? ta.value.slice(ta.selectionStart, ta.selectionEnd) : null }),
   save: flushSave,
   working: (busy) => {
-    agentState = busy ? "working" : agentState === "working" ? "ready" : agentState
+    // A turn with an API or Apple's model leaves the agent as it was.
+    if (busy ? !chApi() : agentState === "working") agentState = busy ? "working" : "ready"
     renderAgentStatus()
   },
   show: () => setPanel("chat", true),
@@ -1865,6 +2302,9 @@ renderLabels()
 renderTab()
 renderAgentStatus()
 renderAcSource()
+renderCkSource()
+renderEdSource()
+renderChSource()
 
 // ---------- messages from the app ----------
 
@@ -1881,6 +2321,7 @@ function onMessage(msg: any) {
         sel.value = agentId
       }
       if (acToggle.checked) send({ type: "warm", kind: "complete" })
+      warmCheck()
       renderAgentStatus()
       break
     case "folder":
@@ -1997,6 +2438,10 @@ function onMessage(msg: any) {
       renderAgentStatus(msg.error && "Agent failed to start")
       checkForStart() // another agent may need another starter
       if (msg.ready && acToggle.checked) send({ type: "warm", kind: "complete" })
+      if (msg.ready) {
+        warmCheck()
+        scheduleCheck(0)
+      }
       break
     case "setup": {
       setupRows = msg.rows
@@ -2045,6 +2490,7 @@ function onMessage(msg: any) {
         acModel = opt?.name ?? m?.currentValue ?? ""
         renderAcStatus()
       }
+      if (msg.kind === "check") renderOptions($("check-options"), "check", msg.options, isModelOrEffort)
       break
     case "status":
       agentState = "starting"
@@ -2060,13 +2506,21 @@ function onMessage(msg: any) {
       onTurnStart(msg.turn, msg.text)
       break
     case "turn_end":
-      onTurnEnd(msg.turn, msg.stop)
+      onTurnEnd(msg.turn, msg.stop, msg.plain)
+      break
+    case "apple":
+      apple = { supported: true, available: msg.available, why: msg.why }
+      renderApple()
       break
     case "inline_result":
       applyInline(msg.req, msg.text)
+      showRewrite(msg.req, msg.text)
       break
     case "complete_result":
       showCompletion(msg.req, msg.text)
+      break
+    case "check_result":
+      onChecked(msg.req, msg.text)
       break
     case "cite_result":
       applyCite(msg)
@@ -2082,9 +2536,21 @@ function onMessage(msg: any) {
         renderRecent(recent().filter((p) => p !== opening))
         opening = ""
       }
-      if (msg.op === "warm") {
+      if (msg.op === "warm" && msg.kind === "check") {
+        ckError = msg.message.replace(/^warm: /, "")
+        renderCkStatus()
+      } else if (msg.op === "warm") {
         // Autocomplete could not start yet: say so where it lives, without a notice.
         $("sb-ac").title = `Autocomplete is not ready: ${msg.message}`
+      } else if (msg.req && rw?.req === msg.req) {
+        rwStatus(msg.message.replace(/^inline: /, ""), "error")
+      } else if (msg.req && ckWant?.req === msg.req) {
+        // A wrong key or model fails on every paragraph: said once, in the suggestions settings.
+        ckWant = null
+        ckError = msg.message.replace(/^check: /, "")
+        renderCkStatus()
+      } else if (msg.op === "check") {
+        // Nobody waits for it any more.
       } else if (msg.req && inlineWant?.req === msg.req) inlineStatus(msg.message, "error")
       else if (msg.req && acWant?.req === msg.req) {
         acWant = null

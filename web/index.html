@@ -183,6 +183,7 @@
         <div class="chips" id="chips"></div>
         <textarea id="chat-input" rows="3" placeholder="Ask the agent to write or change something"></textarea>
         <div class="composer-bar">
+          <button type="button" id="chat-source" class="ghost-select" aria-haspopup="true" title="Where the chat's answers come from">Agent</button>
           <select id="agent" class="ghost-select" title="Agent"></select>
           <span id="chat-options" class="options"></span>
           <button type="submit" class="send" id="send" title="Send (Enter)"><i class="codicon codicon-arrow-up"></i></button>
@@ -199,6 +200,8 @@
       <span class="item" id="sb-words"></span>
       <span class="item" id="sb-lang">Typst</span>
       <button class="item" id="sb-autosave"></button>
+      <button class="item" id="sb-ed" aria-haspopup="true" title="Edits settings"><i class="codicon codicon-edit"></i> <span>Edits</span></button>
+      <button class="item" id="sb-ck" aria-haspopup="true" title="Suggestions settings"><i class="codicon codicon-lightbulb"></i> <span>Suggestions</span></button>
       <button class="item" id="sb-ac" aria-haspopup="true" title="Autocomplete settings"><i class="codicon codicon-sparkle"></i> <span>Autocomplete</span></button>
     </footer>
   </div>
@@ -209,6 +212,33 @@
       <textarea id="inline-input" rows="1" placeholder="Edit selection"></textarea>
     </div>
     <div class="inline-foot"><span id="inline-status"></span><span class="muted">Enter to send &middot; Esc to close</span></div>
+  </div>
+
+  <div id="rewrite-menu" role="toolbar" aria-label="Rewrite the selection" hidden>
+    <button type="button" data-style="formal">Formal</button>
+    <button type="button" data-style="scientific">Scientific</button>
+    <button type="button" data-style="friendly">Friendly</button>
+    <button type="button" data-style="standard">Standard</button>
+    <button type="button" data-style="other">Other&hellip;</button>
+  </div>
+
+  <div id="rewrite-card" role="dialog" aria-labelledby="rewrite-title" hidden>
+    <p id="rewrite-title"></p>
+    <textarea id="rewrite-ask" rows="1" placeholder="Say how to change it" hidden></textarea>
+    <div id="rewrite-text"></div>
+    <p id="rewrite-status"></p>
+    <div class="fix-actions">
+      <button type="button" class="btn primary sm" id="rewrite-apply">Replace</button>
+      <button type="button" class="btn secondary sm" id="rewrite-discard">Discard</button>
+    </div>
+  </div>
+
+  <div id="fix-card" role="dialog" aria-labelledby="fix-why" hidden>
+    <p id="fix-why"></p>
+    <div class="fix-actions">
+      <button type="button" class="btn primary sm" id="fix-apply"></button>
+      <button type="button" class="btn secondary sm" id="fix-dismiss">Dismiss</button>
+    </div>
   </div>
 
   <dialog id="ask" class="ask" aria-labelledby="ask-title">
@@ -258,6 +288,7 @@
       <div class="source" role="radiogroup" aria-label="Where suggestions come from">
         <label class="check"><input type="radio" name="ac-source" value="acp" /> Your agent (ACP)</label>
         <label class="check"><input type="radio" name="ac-source" value="api" /> An API</label>
+        <label class="check apple-choice" hidden><input type="radio" name="ac-source" value="apple" /> Apple (on this Mac)</label>
       </div>
       <div id="ac-acp" class="options stacked">
         <label>Agent <select id="ac-agent" title="The same agent as the chat"></select></label>
@@ -274,11 +305,109 @@
         <label>API key <input id="ac-key" type="password" /></label>
         <label>Model <input id="ac-model" spellcheck="false" /></label>
       </div>
+      <p id="ac-apple" class="muted apple-note" hidden></p>
       <label class="prompt">Instructions
         <textarea id="ac-prompt" rows="6" spellcheck="false"></textarea>
       </label>
       <p class="muted hint">What the model is told before your text. {language} becomes the kind of document. A suggestion is always one line. Empty it to get the default back.</p>
       <p id="ac-error" hidden></p>
+      <div class="ask-actions">
+        <button value="done" class="btn primary">Done</button>
+      </div>
+    </form>
+  </dialog>
+  <dialog id="ck-settings" class="ask settings" aria-labelledby="ck-title">
+    <form method="dialog">
+      <p class="ask-title" id="ck-title">Suggestions</p>
+      <label class="check"><input type="checkbox" id="ck-toggle" /> Suggest changes to my text</label>
+      <p class="muted">The whole file is checked, and each paragraph again when it changes. Mistakes are underlined in red: click one, or put the cursor on it and press Cmd+., to see the fix.</p>
+      <div class="source" role="radiogroup" aria-label="Where suggestions come from">
+        <label class="check"><input type="radio" name="ck-source" value="acp" /> Your agent (ACP)</label>
+        <label class="check"><input type="radio" name="ck-source" value="api" /> An API</label>
+        <label class="check apple-choice" hidden><input type="radio" name="ck-source" value="apple" /> Apple (on this Mac)</label>
+      </div>
+      <div id="ck-acp" class="options stacked">
+        <label>Agent <select id="ck-agent" title="The same agent as the chat"></select></label>
+        <div id="check-options" class="options stacked"></div>
+      </div>
+      <div id="ck-api" class="options stacked" hidden>
+        <label>Kind
+          <select id="ck-kind">
+            <option value="openai">OpenAI-compatible</option>
+            <option value="anthropic">Anthropic-compatible</option>
+          </select>
+        </label>
+        <label>Address <input id="ck-url" spellcheck="false" /></label>
+        <label>API key <input id="ck-key" type="password" /></label>
+        <label>Model <input id="ck-model" spellcheck="false" /></label>
+      </div>
+      <p id="ck-apple" class="muted apple-note" hidden></p>
+      <label class="prompt">Instructions
+        <textarea id="ck-prompt" rows="4" spellcheck="false"></textarea>
+      </label>
+      <p class="muted hint">What the model is told before your text. {language} becomes the kind of document. Quire adds how to answer, as a list of fixes. Empty it to get the default back.</p>
+      <p id="ck-error" hidden></p>
+      <div class="ask-actions">
+        <button value="done" class="btn primary">Done</button>
+      </div>
+    </form>
+  </dialog>
+  <dialog id="ed-settings" class="ask settings" aria-labelledby="ed-title">
+    <form method="dialog">
+      <p class="ask-title" id="ed-title">Edits</p>
+      <p class="muted intro">Cmd+K and the rewrite menu (select text) ask this model for new text.</p>
+      <div class="source" role="radiogroup" aria-label="Where edits come from">
+        <label class="check"><input type="radio" name="ed-source" value="acp" /> Your agent (ACP)</label>
+        <label class="check"><input type="radio" name="ed-source" value="api" /> An API</label>
+        <label class="check apple-choice" hidden><input type="radio" name="ed-source" value="apple" /> Apple (on this Mac)</label>
+      </div>
+      <div id="ed-acp" class="options stacked">
+        <label>Agent <select id="ed-agent" title="The same agent as the chat"></select></label>
+        <p class="muted">It uses the chat's model and effort.</p>
+      </div>
+      <div id="ed-api" class="options stacked" hidden>
+        <label>Kind
+          <select id="ed-kind">
+            <option value="openai">OpenAI-compatible</option>
+            <option value="anthropic">Anthropic-compatible</option>
+          </select>
+        </label>
+        <label>Address <input id="ed-url" spellcheck="false" /></label>
+        <label>API key <input id="ed-key" type="password" /></label>
+        <label>Model <input id="ed-model" spellcheck="false" /></label>
+      </div>
+      <p id="ed-apple" class="muted apple-note" hidden></p>
+      <p id="ed-error" hidden></p>
+      <div class="ask-actions">
+        <button value="done" class="btn primary">Done</button>
+      </div>
+    </form>
+  </dialog>
+  <dialog id="ch-settings" class="ask settings" aria-labelledby="ch-title">
+    <form method="dialog">
+      <p class="ask-title" id="ch-title">Chat</p>
+      <p class="muted intro">Your agent can change files and run tools, and every change waits for your review. An API or Apple's model only answers: it cannot change files.</p>
+      <div class="source" role="radiogroup" aria-label="Where the chat's answers come from">
+        <label class="check"><input type="radio" name="ch-source" value="acp" /> Your agent (ACP)</label>
+        <label class="check"><input type="radio" name="ch-source" value="api" /> An API</label>
+        <label class="check apple-choice" hidden><input type="radio" name="ch-source" value="apple" /> Apple (on this Mac)</label>
+      </div>
+      <div id="ch-acp" class="options stacked">
+        <p class="muted">Pick the agent and its options under the message box.</p>
+      </div>
+      <div id="ch-api" class="options stacked" hidden>
+        <label>Kind
+          <select id="ch-kind">
+            <option value="openai">OpenAI-compatible</option>
+            <option value="anthropic">Anthropic-compatible</option>
+          </select>
+        </label>
+        <label>Address <input id="ch-url" spellcheck="false" /></label>
+        <label>API key <input id="ch-key" type="password" /></label>
+        <label>Model <input id="ch-model" spellcheck="false" /></label>
+      </div>
+      <p id="ch-apple" class="muted apple-note" hidden></p>
+      <p id="ch-error" hidden></p>
       <div class="ask-actions">
         <button value="done" class="btn primary">Done</button>
       </div>

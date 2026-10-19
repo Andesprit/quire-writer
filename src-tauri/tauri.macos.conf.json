@@ -1,0 +1,5 @@
+{
+  "bundle": {
+    "externalBin": ["../build/bin/tinymist", "../build/bin/quire-apple"]
+  }
+}

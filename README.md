@@ -19,10 +19,23 @@ autocomplete, your own agent, Grammarly, themes, and how Quire compares with VS 
   here, and where autocomplete comes from.
 - Chat bar: ask the agent to write or change things in your folder.
 - Cmd+K on selected text: ask for an edit of just that part.
+- Rewrite menu: select text and a small menu shows under it (or press Cmd+.): Formal,
+  Scientific, Friendly, Standard, or Other to say what you want. The new text shows in a
+  small window with its changed words marked; Replace puts it in, Discard leaves your text
+  as it was. It uses the Edits model, like Cmd+K.
 - Autocomplete: grey text after you pause typing, Tab to accept. Toggle in the top bar.
-  It asks your agent or, much faster, an API of your choice (OpenAI-compatible, such as
-  Groq or Ollama, or Anthropic-compatible): click Autocomplete in the status bar. The
-  instructions the model follows can be changed there too.
+  Click Autocomplete in the status bar to choose its model and change its instructions.
+- Every AI feature has its own model, in its own settings: your agent (ACP), an API
+  (OpenAI-compatible, such as Groq or Ollama, or Anthropic-compatible), or Apple's model on
+  the Mac itself (macOS 26 with Apple Intelligence on). Autocomplete, Suggestions and Edits
+  (Cmd+K and the rewrite menu) are set from the status bar, the chat from the button under
+  its message box. With an API or Apple's model the chat only answers: it cannot change files.
+  Apple's model reads about 3,000 words at a time and is weaker at proofreading than the others.
+- Suggestions: mistakes underlined in red, as in Grammarly. Click one, or put the cursor on
+  it and press Cmd+., to apply the fix or dismiss it. Off until you turn it on: click
+  Suggestions in the status bar. It has its own instructions. The whole file is checked,
+  then each paragraph again when it changes. Math, code, comments and markup are never
+  underlined.
 - Track changes: every change the agent makes shows as a change to review.
   Accept or reject each one, edit it before you accept, or use
   "Restore files to before this message" in the chat to undo a whole turn.
@@ -85,9 +98,14 @@ It goes online only for these:
 - Your agent: it runs on your Mac with your own login. For chat, Cmd+K and autocomplete it
   sends your request and the parts of your project it reads to its provider. That
   provider's terms apply.
-- Autocomplete from an API, if you choose one: the text around the cursor goes to the
-  address you give, and that provider's terms apply. With a local one (Ollama) it stays on
-  your Mac. The API key is kept with the app's settings on your Mac, not encrypted.
+- An API, for any feature you set to one: what that feature sends goes to the address you
+  give, and that provider's terms apply. Autocomplete sends the text around the cursor,
+  Cmd+K and the rewrite menu the selection and the text around it, the chat your message,
+  the open file and the selection. With a local one (Ollama) it stays on your Mac. API keys
+  are kept with the app's settings on your Mac, not encrypted.
+- Suggestions, if you turn them on: the whole open file goes to the model you choose, then
+  each paragraph you change.
+- Apple's model runs on your Mac: nothing is sent anywhere.
 - Starting an agent the first time: `npx` or `uvx` download it from npm or PyPI.
 - Citations by DOI or arXiv ID: one request to doi.org.
 - Updates: a check on GitHub at start, once a day and when you choose Check for Updates, then
@@ -158,9 +176,11 @@ The workflow needs these repository secrets:
   change not made by the editor becomes a change to review. LaTeX build files go to a
   temporary folder, not into the project. The preview loads from `quire://localhost`, an
   address only the app has: the Markdown and PDF viewers, the project's images, the PDF.
-- `src-tauri/src/agent.rs`: talks ACP to one agent process with three sessions: chat, inline edits,
-  autocomplete (smallest model the agent offers; or no agent at all: one curl request to an
-  OpenAI- or Anthropic-compatible API). Agents come from `agents.json`, a copy
+- `src-tauri/src/agent.rs`: talks ACP to one agent process with four sessions: chat, inline edits,
+  autocomplete and suggestions (the last two start on the smallest model the agent offers).
+  Each can skip the agent: one curl request to an OpenAI- or Anthropic-compatible API, or a
+  call to `quire-apple`, a small Swift program in `src-tauri/apple/` that asks Apple's
+  on-device model. build-app.sh builds it, and the Mac app carries it next to tinymist. Agents come from `agents.json`, a copy
   of the ACP registry. With flow-atelier installed, `atelier harness sync` writes a newer
   copy that the app uses instead. An agent that quits on its own is started again, unless it
   quits within 30 seconds of starting; then a click on it in the status bar starts it.
