@@ -82,6 +82,15 @@ jobs:
           mv "tinymist$exe" "tinymist-$target$exe" # the sidecar name Tauri expects
           rm "$file" "$file.sha256"
 
+      - name: Build the bridge to Apple's model
+        if: runner.os == 'macOS'
+        run: |
+          # Apple's model needs the macOS 26 SDK, which comes with Xcode 26.
+          xcode=$(ls -d /Applications/Xcode_26*.app 2>/dev/null | sort -V | tail -1)
+          [ -n "$xcode" ] && export DEVELOPER_DIR="$xcode/Contents/Developer"
+          target=$(rustc -vV | sed -n 's/^host: //p')
+          swiftc -O -target arm64-apple-macos26.0 -o "build/bin/quire-apple-$target" src-tauri/apple/quire-apple.swift
+
       - name: Apple signing
         if: runner.os == 'macOS'
         env:

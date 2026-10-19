@@ -893,13 +893,14 @@ details.thought div { white-space: pre-wrap; margin-top: 4px; padding-left: 18px
 .settings .check { display: flex; align-items: center; gap: 8px; }
 .settings input[type="checkbox"], .settings input[type="radio"] { accent-color: var(--btn); margin: 0; width: 14px; height: 14px; }
 .settings .muted { margin: 6px 0 14px 22px; font-size: 12px; line-height: 1.45; }
-.settings .source { display: flex; gap: 20px; margin-bottom: 12px; }
+.settings .source { display: flex; flex-wrap: wrap; gap: 4px 20px; margin-bottom: 12px; }
+.settings .apple-note, .settings .intro { margin: 0 0 12px; }
 .settings .ask-actions { margin-top: 16px; }
 .settings .prompt { display: grid; gap: 6px; margin-top: 12px; color: var(--muted); }
 .settings .hint { margin: 6px 0 0; }
 .options.stacked { display: grid; gap: 6px; }
 .options.stacked label { display: grid; grid-template-columns: 70px 1fr; align-items: center; gap: 8px; color: var(--muted); }
-#ac-error { margin: 8px 0 0; color: var(--danger); overflow-wrap: anywhere; }
+#ac-error, #ck-error, #ed-error, #ch-error { margin: 8px 0 0; color: var(--danger); overflow-wrap: anywhere; }
 .options.stacked select, .options.stacked input, .settings textarea {
   min-width: 0;
   height: 26px;
@@ -928,6 +929,46 @@ details.thought div { white-space: pre-wrap; margin-top: 4px; padding-left: 18px
 .inline-foot { display: flex; justify-content: space-between; gap: 12px; margin-top: 4px; font-size: 11px; }
 #inline-status { display: inline-flex; align-items: center; gap: 4px; color: var(--muted); }
 #inline-status.error { color: var(--danger); }
+
+/* Suggestions: mistakes the model found, underlined in the colored layer behind the text. */
+::highlight(issue) { text-decoration: underline 2px var(--danger); text-underline-offset: 4px; }
+#fix-card {
+  position: fixed;
+  z-index: 25;
+  max-width: min(360px, calc(100vw - 16px));
+  padding: 8px 10px;
+  background: var(--widget);
+  border: 1px solid var(--widget-border);
+  border-radius: 8px;
+  box-shadow: var(--shadow);
+  animation: rise 0.2s cubic-bezier(0.16, 1, 0.3, 1);
+}
+#fix-why { margin: 0 0 8px; color: var(--muted); font-size: 12px; }
+.fix-actions { display: flex; flex-wrap: wrap; gap: 6px; }
+#fix-apply { height: auto; min-height: 22px; white-space: pre-wrap; text-align: left; }
+
+/* Rewrite: a menu over the selection, then the new text to replace it with. */
+#rewrite-menu, #rewrite-card {
+  position: fixed;
+  z-index: 25;
+  background: var(--widget);
+  border: 1px solid var(--widget-border);
+  border-radius: 8px;
+  box-shadow: var(--shadow);
+  animation: rise 0.2s cubic-bezier(0.16, 1, 0.3, 1);
+}
+#rewrite-menu { display: flex; padding: 2px; }
+#rewrite-menu button { height: 24px; padding: 0 8px; border: 0; border-radius: 6px; background: transparent; color: var(--fg); font-size: 12px; }
+#rewrite-menu button:hover, #rewrite-menu button:focus-visible { background: var(--hover-strong); }
+#rewrite-card { width: min(460px, calc(100vw - 16px)); padding: 8px 10px; }
+#rewrite-title { margin: 0 0 6px; color: var(--muted); font-size: 12px; }
+#rewrite-ask { width: 100%; min-height: 26px; margin-bottom: 6px; padding: 4px 6px; border: 1px solid var(--input-border); border-radius: 4px; background: var(--input); color: var(--fg); resize: none; }
+#rewrite-text { max-height: 240px; overflow-y: auto; white-space: pre-wrap; overflow-wrap: break-word; line-height: 1.55; }
+#rewrite-text:empty { display: none; }
+#rewrite-text ins { background: var(--diff-ins-text); text-decoration: none; border-radius: 2px; }
+#rewrite-status { display: flex; align-items: center; gap: 4px; margin: 6px 0; color: var(--muted); font-size: 12px; }
+#rewrite-status:empty { display: none; }
+#rewrite-status.error { color: var(--danger); }
 
 #toasts {
   position: fixed;
@@ -1031,7 +1072,7 @@ details.thought div { white-space: pre-wrap; margin-top: 4px; padding-left: 18px
   #app { --sidebar-col: 0px !important; }
   #sidebar { position: fixed; top: 35px; bottom: 22px; left: 48px; z-index: 21; width: min(280px, 100vw - 48px); box-shadow: var(--shadow); }
   .app-name, .title-actions #toggle-preview { display: none; }
-  #statusbar #sb-lang, #statusbar #sb-pos, #statusbar #sb-words, #sb-ac span { display: none; }
+  #statusbar #sb-lang, #statusbar #sb-pos, #statusbar #sb-words, #sb-ac span, #sb-ck span, #sb-ed span { display: none; }
   #review-bar { left: 8px; right: 8px; translate: none; justify-content: center; }
   #sb-agent span { max-width: 40vw; overflow: hidden; text-overflow: ellipsis; }
   .welcome-mark { font-size: 30px; }

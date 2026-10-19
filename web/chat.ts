@@ -198,11 +198,12 @@ export function onTurnStart(turn: number, text: string) {
   messages.scrollTop = messages.scrollHeight
 }
 
-export function onTurnEnd(turn: number, stop: string) {
+// `plain`: an API or Apple's model answered, and changed no files.
+export function onTurnEnd(turn: number, stop: string, plain = false) {
   bubble = null
   setRunning(false)
   const r = messages.querySelector<HTMLElement>(`[data-turn="${turn}"] .restore`)
-  if (r) r.hidden = false
+  if (r) r.hidden = plain
   if (stop === "cancelled") add("chat-note", "Stopped.")
 }
 

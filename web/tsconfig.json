@@ -21,6 +21,7 @@
     "format.ts",
     "chat.ts",
     "merge.ts",
+    "suggest.ts",
     "highlight.ts",
     "markdown.ts",
     "pdf.ts"

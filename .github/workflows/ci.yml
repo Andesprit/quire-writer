@@ -29,8 +29,8 @@ jobs:
 
       - name: App tests
         run: |
-          # The app bundles tinymist as a sidecar; compiling only needs the file to exist.
-          mkdir -p build/bin && touch build/bin/tinymist-aarch64-apple-darwin
+          # The app bundles tinymist and the bridge to Apple's model; compiling only needs the files to exist.
+          mkdir -p build/bin && touch build/bin/tinymist-aarch64-apple-darwin build/bin/quire-apple-aarch64-apple-darwin
           cargo test --manifest-path src-tauri/Cargo.toml
 
   # The installers a release would publish, built the same way and not published.

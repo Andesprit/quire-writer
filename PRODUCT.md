@@ -42,6 +42,12 @@ because nothing lands without their say.
 - Open a folder; list and edit its text files (.typ, .tex, .qmd, .md, .bib and similar).
 - Chat with the agent; stream replies, tool calls and plans; answer permission requests.
 - Inline edit on a selection; autocomplete as grey text, Tab to accept, can be turned off.
+- Rewrite menu on a selection (Formal, Scientific, Friendly, Standard, Other): the new text
+  shows in a small window to replace the selection with or discard.
+- Each AI feature picks its model: an ACP agent, an OpenAI- or Anthropic-compatible API, or
+  Apple's on-device model (macOS 26). The chat with an API or Apple's model only answers.
+- Suggestions: the model checks the open file and mistakes are underlined in red; a click (or
+  Cmd+.) shows the fix to apply or dismiss. Off by default; its own model and instructions.
 - Track changes: accept, reject or modify each change; accept/reject all; restore all files
   to before a chat message.
 - Agent picker plus the options each agent reports (mode, model, effort, others).

@@ -1,10 +1,12 @@
-//! ACP bridge: one agent process with up to three sessions.
+//! ACP bridge: one agent process with up to four sessions.
 //!
 //! - chat:     the chat bar. Its updates stream to the page as-is.
 //! - inline:   select-and-edit. Replies with replacement text only.
 //! - complete: autocomplete. Replies with the next few words only.
+//! - check:    suggestions. Replies with a JSON list of fixes only.
 //!
-//! Autocomplete can skip the agent: `complete_api` asks an OpenAI- or Anthropic-compatible API instead.
+//! Every one of them can skip the agent and ask a `Plain` model instead: an OpenAI- or
+//! Anthropic-compatible API, or Apple's on-device model.
 //!
 //! Agents are started from agents.json, a copy of the ACP registry, so any agent listed
 //! there (Claude, Codex, Gemini, ...) works by id. ACP is JSON-RPC, one message per line on
@@ -39,16 +41,18 @@ const RESTART_AFTER: Duration = Duration::from_secs(30);
 // A stopped agent gets this long to end on its own, then it is killed.
 const KILL_AFTER: Duration = Duration::from_secs(2);
 
-fn inline_prompt(path: &str, instruction: &str, selected: &str, before: &str, after: &str) -> String {
+/// The text around the selection is left out when empty.
+pub fn inline_prompt(path: &str, instruction: &str, selected: &str, before: &str, after: &str) -> String {
+    let around = |label: &str, text: &str| if text.is_empty() { String::new() } else { format!("\n\n{label}:\n{text}") };
     format!(
         "You are editing a {} document ({path}). Rewrite the SELECTED text following the instruction.\n\
          Reply with ONLY the replacement text. No explanation, no quotes, no code fences. Do not use any tools.\n\
          If nothing is selected, reply with the text to insert at the cursor.\n\n\
-         Instruction: {instruction}\n\n\
-         Text before the selection:\n{before}\n\n\
-         SELECTED:\n{selected}\n\n\
-         Text after the selection:\n{after}",
-        language_name(path)
+         Instruction: {instruction}{}\n\n\
+         SELECTED:\n{selected}{}",
+        language_name(path),
+        around("Text before the selection", before),
+        around("Text after the selection", after)
     )
 }
 
@@ -56,6 +60,19 @@ fn inline_prompt(path: &str, instruction: &str, selected: &str, before: &str, af
 /// text around the cursor.
 pub fn complete_prompt(instructions: &str, path: &str, before: &str, after: &str) -> String {
     format!("{}\n\n{before}<CURSOR>{after}", instructions.replace("{language}", language_name(path)))
+}
+
+/// What suggestions ask: the writer's instructions (the page has the default ones), how to
+/// answer, which the page reads and so is not theirs to change, then the text.
+pub fn check_prompt(instructions: &str, path: &str, text: &str) -> String {
+    format!(
+        "{}\n\n\
+         Reply with ONLY a JSON array, no other text: [{{\"original\": \"...\", \"suggestion\": \"...\", \"reason\": \"...\"}}]\n\
+         \"original\" is copied exactly from the text: the mistake and a few words around it, so it is found. \
+         \"suggestion\" is the same words, corrected. \"reason\" is two to five words. Reply [] when nothing needs fixing.\n\n\
+         Text:\n{text}",
+        instructions.replace("{language}", language_name(path))
+    )
 }
 
 pub struct Agent {
@@ -280,7 +297,9 @@ pub struct Bridge {
     session_lock: tokio::sync::Mutex<()>, // two requests must not open two sessions of one kind
     inline_lock: tokio::sync::Mutex<()>,
     complete_lock: tokio::sync::Mutex<()>,
+    check_lock: tokio::sync::Mutex<()>,
     completions: AtomicU64,
+    checks: AtomicU64,
     newest_completion: AtomicU64,
     permissions: AtomicU64,
 }
@@ -323,10 +342,10 @@ impl State {
         picks
     }
 
-    /// Smallest model (model=true) or lowest effort the complete session offers.
-    fn fast_picks(&self, model: bool) -> Vec<(String, Value)> {
+    /// Smallest model (model=true) or lowest effort a `kind` session offers.
+    fn fast_picks(&self, kind: &str, model: bool) -> Vec<(String, Value)> {
         let mut picks = vec![];
-        for o in list(self.options.get("complete")) {
+        for o in list(self.options.get(kind)) {
             if o["type"] != "select" {
                 continue;
             }
@@ -488,10 +507,11 @@ impl Bridge {
         for (config_id, value) in picks {
             self.apply_option(kind, &config_id, value).await?;
         }
-        if kind == "complete" && self.st().chosen.get("complete").is_none_or(Map::is_empty) {
+        // Both run in the background, so they start fast and cheap until the writer picks.
+        if matches!(kind, "complete" | "check") && self.st().chosen.get(kind).is_none_or(Map::is_empty) {
             // Effort choices depend on the model, so pick the model first.
             for model in [true, false] {
-                let picks = self.st().fast_picks(model);
+                let picks = self.st().fast_picks(kind, model);
                 for (config_id, value) in picks {
                     self.apply_option(kind, &config_id, value).await?;
                 }
@@ -556,13 +576,13 @@ impl Bridge {
         }
     }
 
-    pub async fn inline(&self, path: &str, instruction: &str, selected: &str, before: &str, after: &str) -> Result<String, String> {
+    pub async fn inline(&self, prompt: &str) -> Result<String, String> {
         // One at a time: two prompts in one session would mix their replies.
         if self.inline_lock.try_lock().is_err() {
             self.cancel("inline").await; // the newer request wins
         }
         let _one = self.inline_lock.lock().await;
-        let (_, reply) = self.prompt("inline", &inline_prompt(path, instruction, selected, before, after)).await?;
+        let (_, reply) = self.prompt("inline", prompt).await?;
         Ok(strip_fences(&reply))
     }
 
@@ -582,6 +602,19 @@ impl Bridge {
         }
         let (_, reply) = self.prompt("complete", prompt).await?;
         Ok(suggestion(&reply))
+    }
+
+    pub async fn check(&self, prompt: &str) -> Result<String, String> {
+        if self.check_lock.try_lock().is_err() {
+            self.cancel("check").await; // the newer request wins
+        }
+        let _one = self.check_lock.lock().await;
+        // ponytail: as for completions, a fresh session every 10 keeps the history small.
+        if self.checks.fetch_add(1, Relaxed) % 10 == 9 {
+            self.st().sessions.remove("check");
+        }
+        let (_, reply) = self.prompt("check", prompt).await?;
+        Ok(answer(&reply))
     }
 
     fn resolve_permissions(&self, option_id: Option<String>) {
@@ -660,11 +693,14 @@ impl Bridge {
     }
 }
 
+/// A model that thinks aloud puts its answer after the thoughts.
+fn answer(reply: &str) -> String {
+    strip_fences(reply.rsplit_once("</think>").map_or(reply, |(_, answer)| answer))
+}
+
 /// A suggestion is one short line. Anything else is chatter or an error message.
 fn suggestion(reply: &str) -> String {
-    // A model that thinks aloud puts its answer after the thoughts.
-    let reply = reply.rsplit_once("</think>").map_or(reply, |(_, answer)| answer);
-    let reply = strip_fences(reply).trim_end_matches('\n').to_string();
+    let reply = answer(reply).trim_end_matches('\n').to_string();
     if reply.contains('\n') || reply.chars().count() > 300 { String::new() } else { reply }
 }
 
@@ -682,62 +718,153 @@ fn curl_config(url: &str, headers: &[String], body: &Value) -> Result<String, St
     Ok(config)
 }
 
-/// Autocomplete without the agent: one request to an API that talks like OpenAI's (Groq,
-/// Ollama, ...) or like Anthropic's. No session and no tools, so the answer comes in well
-/// under a second.
-// ponytail: a new curl, so a new TLS handshake (about 150 ms to Groq), for every suggestion.
-// A kept connection (reqwest is already in the build, for the updater) if that matters.
-pub async fn complete_api(kind: &str, url: &str, model: &str, key: &str, prompt: &str) -> Result<String, String> {
-    static NEWER: Notify = Notify::const_new();
-    NEWER.notify_waiters(); // a newer keystroke wins: the request still waiting ends, and its curl with it
-    let (anthropic, base) = (kind == "anthropic", url.trim_end_matches('/'));
-    // The two kinds differ in the address, the name of the limit and the key's header. The
-    // limit leaves room for a model that thinks first; the instructions keep the answer short.
-    // No temperature: the newer models of both refuse one.
-    let (url, limit, mut headers) = if anthropic {
-        // Their base address has no /v1, but people paste it with one.
-        (format!("{}/v1/messages", base.trim_end_matches("/v1")), "max_tokens", vec!["anthropic-version: 2023-06-01".to_string()])
-    } else {
-        (format!("{base}/chat/completions"), "max_completion_tokens", vec![])
-    };
-    if !key.is_empty() {
-        headers.push(if anthropic { format!("x-api-key: {key}") } else { format!("Authorization: Bearer {key}") });
+/// A model asked without the agent: an API that talks like OpenAI's (Groq, Ollama, ...) or
+/// like Anthropic's, or Apple's on-device model. No session and no tools: one request, one
+/// answer, so an API answers in well under a second.
+pub enum Plain {
+    Api { kind: String, url: String, model: String, key: String },
+    Apple,
+}
+
+const APPLE_MISSING: &str = "This copy of Quire has no bridge to Apple's model. Build it with build-app.sh.";
+
+impl Plain {
+    /// The model a message from the page names in "source", or None for the agent.
+    pub fn of(msg: &Value) -> Option<Plain> {
+        let s = |k: &str| msg[k].as_str().unwrap_or("").trim().to_string();
+        match msg["source"].as_str() {
+            Some("api") => Some(Plain::Api { kind: s("kind"), url: s("url"), model: s("model"), key: s("key") }),
+            Some("apple") => Some(Plain::Apple),
+            _ => None,
+        }
     }
-    let body = json!({"model": model, "messages": [{"role": "user", "content": prompt}], limit: 1024});
-    // The key and the text go in on stdin: other programs can read a command's arguments.
-    let config = curl_config(&url, &headers, &body)?;
-    let mut child = Command::new("curl")
-        .args(["-sS", "--max-time", "15", "--config", "-"])
-        .stdin(Stdio::piped())
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped())
-        .kill_on_drop(true)
-        .spawn()
-        .map_err(|e| format!("Could not run curl: {e}"))?;
+
+    /// The answer to `talk`: the writer's messages and the model's replies by turns, the
+    /// writer's first and last. None when a newer request on `newer` came first. `limits` is
+    /// the most tokens and seconds it may take.
+    // ponytail: a new curl, so a new TLS handshake (about 150 ms to Groq), for every request.
+    // A kept connection (reqwest is already in the build, for the updater) if that matters.
+    async fn ask(&self, talk: &[String], limits: (u32, u32), newer: &Notify) -> Result<Option<String>, String> {
+        self.ask_with(talk, limits, newer, &[]).await
+    }
+
+    /// `apple`: more arguments for Apple's bridge, such as --fixes.
+    async fn ask_with(&self, talk: &[String], (tokens, secs): (u32, u32), newer: &Notify, apple: &[&str]) -> Result<Option<String>, String> {
+        let Plain::Api { kind, url, model, key } = self else {
+            let tokens = tokens.to_string();
+            let args = [&["--max-tokens", tokens.as_str()], apple].concat();
+            let Some(out) = run("quire-apple", &args, &transcript(talk), secs, newer).await.map_err(|e| {
+                if e.kind() == std::io::ErrorKind::NotFound { APPLE_MISSING.to_string() } else { format!("Could not ask Apple's model: {e}") }
+            })?
+            else {
+                return Ok(None);
+            };
+            let why = String::from_utf8_lossy(&out.stderr).trim().to_string();
+            return if out.status.success() { Ok(Some(String::from_utf8_lossy(&out.stdout).into())) } else { Err(if why.is_empty() { "Apple's model needs macOS 26.".into() } else { why }) };
+        };
+        let (anthropic, base) = (kind == "anthropic", url.trim_end_matches('/'));
+        // The two kinds differ in the address, the name of the limit and the key's header. The
+        // limit leaves room for a model that thinks first; the instructions keep the answer short.
+        // No temperature: the newer models of both refuse one.
+        let (url, limit, mut headers) = if anthropic {
+            // Their base address has no /v1, but people paste it with one.
+            (format!("{}/v1/messages", base.trim_end_matches("/v1")), "max_tokens", vec!["anthropic-version: 2023-06-01".to_string()])
+        } else {
+            (format!("{base}/chat/completions"), "max_completion_tokens", vec![])
+        };
+        if !key.is_empty() {
+            headers.push(if anthropic { format!("x-api-key: {key}") } else { format!("Authorization: Bearer {key}") });
+        }
+        let messages: Vec<Value> = talk.iter().enumerate().map(|(i, t)| json!({"role": if i % 2 == 0 { "user" } else { "assistant" }, "content": t})).collect();
+        let body = json!({"model": model, "messages": messages, limit: tokens});
+        // The key and the text go in on stdin: other programs can read a command's arguments.
+        let config = curl_config(&url, &headers, &body)?;
+        let Some(out) = run("curl", &["-sS", "--max-time", &secs.to_string(), "--config", "-"], &config, secs + 5, newer).await.map_err(|e| format!("Could not run curl: {e}"))? else {
+            return Ok(None);
+        };
+        if !out.status.success() {
+            let why = String::from_utf8_lossy(&out.stderr);
+            let why = why.trim().split_once(") ").map_or(why.trim(), |(_, w)| w); // drop "curl: (7) "
+            return Err(format!("Could not reach {url} ({why})."));
+        }
+        let kind = if anthropic { "Anthropic" } else { "OpenAI" };
+        let answer: Value = serde_json::from_slice(&out.stdout).map_err(|_| format!("{url} did not answer like an {kind}-compatible API."))?;
+        if let Some(e) = answer["error"]["message"].as_str().or(answer["error"].as_str()) {
+            return Err(e.into());
+        }
+        Ok(Some(if anthropic {
+            // The answer is the text blocks; thoughts come in blocks of their own.
+            answer["content"].as_array().into_iter().flatten().filter(|b| b["type"] == "text").filter_map(|b| b["text"].as_str()).collect()
+        } else {
+            answer["choices"][0]["message"]["content"].as_str().unwrap_or("").into()
+        }))
+    }
+}
+
+/// Runs `program` with `input` on stdin. None when a newer request on `newer` came first: the
+/// one still waiting ends, and its program with it.
+async fn run(program: &str, args: &[&str], input: &str, secs: u32, newer: &Notify) -> std::io::Result<Option<std::process::Output>> {
+    newer.notify_waiters();
+    let mut child = Command::new(program).args(args).stdin(Stdio::piped()).stdout(Stdio::piped()).stderr(Stdio::piped()).kill_on_drop(true).spawn()?;
     let mut stdin = child.stdin.take().unwrap();
-    stdin.write_all(config.as_bytes()).await.map_err(|e| e.to_string())?;
-    drop(stdin); // curl reads to the end of it
-    let out = tokio::select! {
-        out = child.wait_with_output() => out.map_err(|e| e.to_string())?,
-        _ = NEWER.notified() => return Ok(String::new()),
-    };
-    if !out.status.success() {
-        let why = String::from_utf8_lossy(&out.stderr);
-        let why = why.trim().split_once(") ").map_or(why.trim(), |(_, w)| w); // drop "curl: (7) "
-        return Err(format!("Could not reach {url} ({why})."));
+    stdin.write_all(input.as_bytes()).await?;
+    drop(stdin); // it reads to the end
+    tokio::select! {
+        out = tokio::time::timeout(Duration::from_secs(secs.into()), child.wait_with_output()) => match out {
+            Ok(out) => out.map(Some),
+            Err(_) => Err(std::io::Error::new(std::io::ErrorKind::TimedOut, format!("no answer in {secs} seconds"))),
+        },
+        _ = newer.notified() => Ok(None),
     }
-    let kind = if anthropic { "Anthropic" } else { "OpenAI" };
-    let answer: Value = serde_json::from_slice(&out.stdout).map_err(|_| format!("{url} did not answer like an {kind}-compatible API."))?;
-    if let Some(e) = answer["error"]["message"].as_str().or(answer["error"].as_str()) {
-        return Err(e.into());
+}
+
+/// Apple's model takes one text: the talk so far goes before the writer's last message.
+fn transcript(talk: &[String]) -> String {
+    let (last, before) = talk.split_last().map_or(("", &[][..]), |(l, b)| (l.as_str(), b));
+    if before.is_empty() {
+        return last.into();
     }
-    let reply: String = if anthropic {
-        // The answer is the text blocks; thoughts come in blocks of their own.
-        answer["content"].as_array().into_iter().flatten().filter(|b| b["type"] == "text").filter_map(|b| b["text"].as_str()).collect()
-    } else {
-        answer["choices"][0]["message"]["content"].as_str().unwrap_or("").into()
-    };
-    Ok(suggestion(&reply))
+    let earlier: Vec<String> = before.iter().enumerate().map(|(i, t)| format!("{}: {t}", if i % 2 == 0 { "Writer" } else { "You" })).collect();
+    format!("Earlier in this conversation:\n\n{}\n\nNow:\n{last}", earlier.join("\n\n"))
+}
+
+pub async fn complete_plain(model: &Plain, prompt: String) -> Result<String, String> {
+    static NEWER: Notify = Notify::const_new(); // a newer keystroke wins
+    Ok(suggestion(&model.ask(&[prompt], (1024, 15), &NEWER).await?.unwrap_or_default()))
+}
+
+/// The reply is a list of fixes for a few paragraphs, so it gets more room and time than a
+/// completion. Apple's model is made to answer with a well-formed list: on its own it often
+/// does not.
+pub async fn check_plain(model: &Plain, prompt: String) -> Result<String, String> {
+    static NEWER: Notify = Notify::const_new();
+    Ok(answer(&model.ask_with(&[prompt], (4096, 60), &NEWER, &["--fixes"]).await?.unwrap_or_default()))
+}
+
+/// Cmd+K and the rewrite menu.
+pub async fn inline_plain(model: &Plain, prompt: String) -> Result<String, String> {
+    static NEWER: Notify = Notify::const_new();
+    Ok(answer(&model.ask(&[prompt], (4096, 60), &NEWER).await?.unwrap_or_default()))
+}
+
+static CHAT: Notify = Notify::const_new();
+
+/// The chat with a model that only answers. None: stopped.
+pub async fn chat_plain(model: &Plain, talk: &[String]) -> Result<Option<String>, String> {
+    Ok(model.ask(talk, (4096, 120), &CHAT).await?.map(|reply| answer(&reply)))
+}
+
+pub fn stop_chat_plain() {
+    CHAT.notify_waiters();
+}
+
+/// Why Apple's model cannot answer on this Mac, or None when it can.
+pub async fn apple_problem() -> Option<String> {
+    match Command::new("quire-apple").arg("--check").output().await {
+        Ok(out) if out.status.success() => None,
+        Ok(out) => Some(Some(String::from_utf8_lossy(&out.stderr).trim().to_string()).filter(|w| !w.is_empty()).unwrap_or("Apple's model needs macOS 26.".into())),
+        Err(_) => Some(APPLE_MISSING.into()),
+    }
 }
 
 fn strip_fences(text: &str) -> String {
@@ -786,6 +913,10 @@ mod tests {
     }
 
     /// A stand-in for an API: it answers one request with `answer` and gives back what curl sent.
+    fn model(kind: &str, url: &str, key: &str) -> Plain {
+        Plain::Api { kind: kind.into(), url: url.into(), model: "m".into(), key: key.into() }
+    }
+
     async fn api(answer: Value) -> (String, tokio::task::JoinHandle<(String, Value)>) {
         let server = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
         let url = format!("http://{}", server.local_addr().unwrap());
@@ -816,7 +947,7 @@ mod tests {
         let prompt = complete_prompt("Continue this {language} text.", "a.typ", "She said \"hi\" \\ then\nleft", " now");
         assert_eq!(prompt, "Continue this Typst text.\n\nShe said \"hi\" \\ then\nleft<CURSOR> now");
         let (url, asked) = api(json!({"choices": [{"message": {"role": "assistant", "content": "```\nand so on.\n```"}}]})).await;
-        assert_eq!(complete_api("openai", &format!("{url}/v1/"), "m", "k\"y", &prompt).await.unwrap(), "and so on.");
+        assert_eq!(complete_plain(&model("openai", &format!("{url}/v1/"), "k\"y"), prompt.clone()).await.unwrap(), "and so on.");
         let (head, body) = asked.await.unwrap();
         assert!(head.starts_with("POST /v1/chat/completions "), "{head}");
         assert!(head.contains("Authorization: Bearer k\"y\r\n"), "{head}");
@@ -825,7 +956,7 @@ mod tests {
 
         // Anthropic's way: another address, header and limit; the answer comes after the thoughts.
         let (url, asked) = api(json!({"content": [{"type": "thinking", "thinking": "hm"}, {"type": "text", "text": "and so on."}]})).await;
-        assert_eq!(complete_api("anthropic", &format!("{url}/v1"), "m", "key", &prompt).await.unwrap(), "and so on.");
+        assert_eq!(complete_plain(&model("anthropic", &format!("{url}/v1"), "key"), prompt.clone()).await.unwrap(), "and so on.");
         let (head, body) = asked.await.unwrap();
         assert!(head.starts_with("POST /v1/messages "), "{head}");
         assert!(head.contains("x-api-key: key\r\n") && head.contains("anthropic-version: 2023-06-01\r\n"), "{head}");
@@ -833,9 +964,42 @@ mod tests {
 
         // What the API says is wrong reaches the writer, in either shape.
         let (url, _asked) = api(json!({"type": "error", "error": {"type": "authentication_error", "message": "invalid x-api-key"}})).await;
-        assert_eq!(complete_api("anthropic", &url, "m", "key", "x").await.unwrap_err(), "invalid x-api-key");
+        assert_eq!(complete_plain(&model("anthropic", &url, "key"), "x".into()).await.unwrap_err(), "invalid x-api-key");
         // Nothing listens there (Ollama not started): said plainly.
-        assert!(complete_api("openai", "http://127.0.0.1:1/v1", "m", "", "x").await.unwrap_err().starts_with("Could not reach"));
+        assert!(complete_plain(&model("openai", "http://127.0.0.1:1/v1", ""), "x".into()).await.unwrap_err().starts_with("Could not reach"));
+    }
+
+    #[tokio::test]
+    async fn checks_with_an_api() {
+        // A list of fixes runs over many lines: it comes back whole, without its fences.
+        let fixes = "[\n  {\"original\": \"teh\", \"suggestion\": \"the\", \"reason\": \"Spelling\"}\n]";
+        let (url, asked) = api(json!({"choices": [{"message": {"content": format!("```json\n{fixes}\n```")}}]})).await;
+        let prompt = check_prompt("Check this {language} text.", "a.tex", "teh end");
+        assert!(prompt.starts_with("Check this LaTeX text.") && prompt.ends_with("Text:\nteh end"), "{prompt}");
+        assert_eq!(check_plain(&model("openai", &url, ""), prompt).await.unwrap(), fixes);
+        assert_eq!(asked.await.unwrap().1["max_completion_tokens"], 4096);
+    }
+
+    #[tokio::test]
+    async fn chats_with_a_model() {
+        // The talk so far goes as messages by turns, the writer's last.
+        let talk = ["Hi".to_string(), "Hello!".into(), "Shorter, please.".into()];
+        let (url, asked) = api(json!({"choices": [{"message": {"content": "Sure."}}]})).await;
+        assert_eq!(chat_plain(&model("openai", &url, ""), &talk).await.unwrap().as_deref(), Some("Sure."));
+        let roles: Vec<Value> = asked.await.unwrap().1["messages"].as_array().unwrap().iter().map(|m| m["role"].clone()).collect();
+        assert_eq!(roles, [json!("user"), json!("assistant"), json!("user")]);
+        // Apple's model takes one text.
+        assert_eq!(transcript(&talk[2..]), "Shorter, please.");
+        assert_eq!(transcript(&talk), "Earlier in this conversation:\n\nWriter: Hi\n\nYou: Hello!\n\nNow:\nShorter, please.");
+    }
+
+    // Needs Apple's model on this Mac and the bridge on PATH: cargo test -- --ignored
+    #[tokio::test]
+    #[ignore]
+    async fn asks_apple() {
+        assert_eq!(apple_problem().await, None);
+        let reply = complete_plain(&Plain::Apple, "Reply with only the word: yes".into()).await.unwrap();
+        assert!(reply.to_lowercase().contains("yes"), "{reply}");
     }
 
     #[cfg(unix)] // sh and its signals
