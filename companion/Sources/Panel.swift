@@ -94,7 +94,13 @@ struct PanelView: View {
         .frame(maxHeight: 120)
         .fixedSize(horizontal: false, vertical: true)
         if let fix = draft.fix {
-          card(fix)
+          let count: Int = draft.fixes.count
+          let step: (Int) -> Void = { draft.step($0) }
+          let acceptAll: () -> Void = { for fix in draft.fixes { draft.accept(fix) } }
+          FixCard(
+            fix: fix, position: count > 1 ? (draft.current, count, step) : nil,
+            accept: { draft.accept(fix) }, dismiss: { draft.dismiss(fix) },
+            acceptAll: count > 1 ? acceptAll : nil)
         } else if draft.checked {
           done
         }
@@ -113,56 +119,9 @@ struct PanelView: View {
     let change = fix.change
     let from = s.characters.index(whole.lowerBound, offsetBy: change.before.count)
     let to = s.characters.index(from, offsetBy: max(change.old.count, 1))
-    s[from..<to].underlineStyle = Text.LineStyle(pattern: .solid, color: color(fix))
-    s[from..<to].backgroundColor = color(fix).opacity(0.15)
+    s[from..<to].underlineStyle = Text.LineStyle(pattern: .solid, color: fix.color)
+    s[from..<to].backgroundColor = fix.color.opacity(0.15)
     return s
-  }
-
-  private func color(_ fix: Fix) -> Color { fix.category == "Word choice" ? .blue : .red }
-
-  private func card(_ fix: Fix) -> some View {
-    let change = fix.change
-    return VStack(alignment: .leading, spacing: 10) {
-      HStack(spacing: 6) {
-        Circle().fill(color(fix)).frame(width: 7, height: 7)
-        Text(fix.category).foregroundStyle(.secondary)
-        Spacer()
-        if draft.fixes.count > 1 {
-          Text("\(draft.current + 1) of \(draft.fixes.count)").font(.callout).foregroundStyle(.secondary).monospacedDigit()
-          Button { draft.step(-1) } label: { Image(systemName: "chevron.left") }.help("Previous suggestion")
-          Button { draft.step(1) } label: { Image(systemName: "chevron.right") }.help("Next suggestion")
-        }
-      }
-      .buttonStyle(.borderless)
-      HStack(alignment: .firstTextBaseline, spacing: 8) {
-        if !change.old.isEmpty {
-          Text(change.old).strikethrough(color: .red).foregroundStyle(.secondary)
-          Image(systemName: "arrow.right").foregroundStyle(.secondary)
-        }
-        Text(change.new.isEmpty ? "Remove" : change.new)
-          .foregroundStyle(.white)
-          .padding(.horizontal, 8)
-          .padding(.vertical, 3)
-          .background(change.new.isEmpty ? Color.red : green, in: .rect(cornerRadius: 5))
-      }
-      .font(.title3)
-      if !fix.reason.isEmpty {
-        Text(fix.reason).fixedSize(horizontal: false, vertical: true)
-      }
-      HStack(spacing: 14) {
-        Button("Accept") { draft.accept(fix) }
-          .buttonStyle(.borderedProminent)
-          .tint(green)
-          .keyboardShortcut(.defaultAction)
-        Button("Dismiss") { draft.dismiss(fix) }.buttonStyle(.borderless)
-        Spacer()
-        if draft.fixes.count > 1 {
-          Button("Accept all \(draft.fixes.count)") { for fix in draft.fixes { draft.accept(fix) } }.buttonStyle(.borderless)
-        }
-      }
-    }
-    .padding(14)
-    .background(RoundedRectangle(cornerRadius: 10).strokeBorder(green, lineWidth: 1.5))
   }
 
   private var done: some View {
@@ -211,6 +170,68 @@ struct PanelView: View {
         .font(.caption2)
         .foregroundStyle(.tertiary)
     }
+  }
+}
+
+extension Fix {
+  var color: Color { category == "Word choice" ? .blue : .red }
+}
+
+/// One suggestion, as Grammarly shows it: its kind, the change, why, Accept and Dismiss.
+struct FixCard: View {
+  let fix: Fix
+  var position: (index: Int, count: Int, step: (Int) -> Void)?
+  let accept: () -> Void
+  let dismiss: () -> Void
+  var acceptAll: (() -> Void)?
+
+  var body: some View {
+    let change = fix.change
+    VStack(alignment: .leading, spacing: 10) {
+      HStack(spacing: 6) {
+        Circle().fill(fix.color).frame(width: 7, height: 7)
+        Text(fix.category).foregroundStyle(.secondary)
+        Spacer()
+        if let position {
+          Text("\(position.index + 1) of \(position.count)").font(.callout).foregroundStyle(.secondary).monospacedDigit()
+          Button { position.step(-1) } label: { Image(systemName: "chevron.left") }.help("Previous suggestion")
+          Button { position.step(1) } label: { Image(systemName: "chevron.right") }.help("Next suggestion")
+        }
+      }
+      .buttonStyle(.borderless)
+      HStack(alignment: .firstTextBaseline, spacing: 8) {
+        if !change.old.isEmpty {
+          Text(change.old).strikethrough(color: .red).foregroundStyle(.secondary)
+          Image(systemName: "arrow.right").foregroundStyle(.secondary)
+        }
+        Text(change.new.isEmpty ? "Remove" : change.new)
+          .foregroundStyle(.white)
+          .padding(.horizontal, 8)
+          .padding(.vertical, 3)
+          .background(change.new.isEmpty ? Color.red : green, in: .rect(cornerRadius: 5))
+      }
+      .font(.title3)
+      if !fix.reason.isEmpty {
+        Text(fix.reason).fixedSize(horizontal: false, vertical: true)
+      }
+      HStack(spacing: 14) {
+        // Drawn by hand: macOS greys a standard button out in a window that is not active,
+        // and the live card never is.
+        Button(action: accept) {
+          Text("Accept").foregroundStyle(.white).padding(.horizontal, 12).padding(.vertical, 5)
+            .background(green, in: .rect(cornerRadius: 6))
+        }
+        .buttonStyle(.plain)
+        .keyboardShortcut(.defaultAction)
+        Button("Dismiss", action: dismiss).buttonStyle(.borderless)
+        Spacer()
+        if let acceptAll, let position {
+          Button("Accept all \(position.count)", action: acceptAll).buttonStyle(.borderless)
+        }
+      }
+    }
+    .padding(14)
+    .background(RoundedRectangle(cornerRadius: 10).strokeBorder(green, lineWidth: 1.5))
   }
 }
 

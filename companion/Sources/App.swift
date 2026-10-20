@@ -50,6 +50,7 @@ final class Delegate: NSObject, NSApplicationDelegate {
       Task { @MainActor in Companion.show() }
       return noErr
     }, 1, &pressed, nil, nil)
+    MainActor.assumeIsolated { Live.shared.start() }
   }
 
   func applicationWillTerminate(_ notification: Notification) {
@@ -63,6 +64,7 @@ struct SettingsView: View {
   @AppStorage("apiURL") private var apiURL = ""
   @AppStorage("apiModel") private var apiModel = ""
   @State private var key = Keychain.read()
+  @AppStorage("liveApps") private var liveApps = ""
 
   var body: some View {
     Form {
@@ -84,6 +86,19 @@ struct SettingsView: View {
         SecureField("API key", text: $key, prompt: Text("Kept in your Keychain"))
           .onChange(of: key) { Keychain.write(key) }
         note("Any API that talks like OpenAI's: OpenAI, Groq, OpenRouter, Ollama (http://localhost:11434/v1), LM Studio.")
+      }
+      Section("Underline mistakes as you type") {
+        ForEach(Live.apps, id: \.id) { app in
+          Toggle(app.name, isOn: Binding(
+            get: { Prefs.liveApps.contains(app.id) },
+            set: { on in
+              var apps = Prefs.liveApps
+              if on { apps.insert(app.id) } else { apps.remove(app.id) }
+              liveApps = apps.sorted().joined(separator: ",")
+            }))
+        }
+        note("Off until you turn an app on. Each line you can see is checked once you stop typing; click a squiggle to fix it. With the agent every check counts against your subscription. Apple's model is free and private but finds fewer mistakes.")
+        if let problem = Live.shared.problem { Text(problem).font(.callout).foregroundStyle(.red) }
       }
       Section {
         note("Select text in any app and press Ctrl+Option+Q.")

@@ -28,6 +28,8 @@ enum Prefs {
   static var agent: String { UserDefaults.standard.string(forKey: "agent") ?? "claude-acp" }
   static var apiURL: String { (UserDefaults.standard.string(forKey: "apiURL") ?? "").trimmingCharacters(in: .whitespaces) }
   static var apiModel: String { (UserDefaults.standard.string(forKey: "apiModel") ?? "").trimmingCharacters(in: .whitespaces) }
+  /// The apps the writer turned live underlines on for, by bundle id.
+  static var liveApps: Set<String> { Set((UserDefaults.standard.string(forKey: "liveApps") ?? "").split(separator: ",").map(String.init)) }
 }
 
 enum Keychain {

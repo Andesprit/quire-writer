@@ -13,7 +13,7 @@ struct Selection {
   let bounds: CGRect?  // where it is on screen (top-left origin), when the app says
 }
 
-private func attr(_ el: AXUIElement, _ name: String) -> CFTypeRef? {
+func attr(_ el: AXUIElement, _ name: String) -> CFTypeRef? {
   var v: CFTypeRef?
   return AXUIElementCopyAttributeValue(el, name as CFString, &v) == .success ? v : nil
 }
