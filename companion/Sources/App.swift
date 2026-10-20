@@ -116,7 +116,10 @@ enum CLI {
       do {
         print("Engine: \(Engine.current.label)")
         if a[1] == "--check" {
-          for fix in try await Ask.check(a[2]) { print("\(fix.original) -> \(fix.suggestion) (\(fix.reason))") }
+          for fix in try await Ask.check(a[2]) {
+            let c = fix.change
+            print("[\(fix.category)] \(c.old) -> \(c.new)   in \"\(fix.original)\"\n  \(fix.reason)")
+          }
         } else {
           print(try await Ask.rewrite(a[3], a[2]))
         }
@@ -146,5 +149,9 @@ enum CLI {
     precondition(Fix.parse("I found nothing to fix.", in: text) == nil, "a reply without a list is not 'no mistakes'")
     precondition(Fix.parse("[]", in: text)?.isEmpty == true)
     precondition(clean("```\nHello\n```") == "Hello" && clean("```") == "```")
+    let change = { (o: String, s: String) in Fix(original: o, suggestion: s, category: "Grammar", reason: "").change }
+    precondition(change("has less projects", "has fewer projects") == ("has ", "less", "fewer", " projects"))
+    precondition(change("However the", "However, the") == ("", "However", "However,", " the"), "a comma only added comes with its word")
+    precondition(change("to the libary", "to the library") == ("to the ", "libary", "library", ""))
   }
 }

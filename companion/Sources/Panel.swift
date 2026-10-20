@@ -1,13 +1,19 @@
-// The panel the hotkey opens next to the pointer: the selected text, the fixes the model
-// suggests, Quire's rewrite styles, a box to ask for any change, and Replace. Nothing reaches
-// the other app until the writer presses Replace.
+// The panel the hotkey opens under the selection, in the manner of Grammarly's card: the text
+// with the current mistake marked, one suggestion at a time (its kind, the change, why), then
+// Quire's rewrite styles and a box to ask for any change. Nothing reaches the other app until
+// the writer presses Replace.
 import AppKit
 import SwiftUI
+
+private let green = Color(red: 0.01, green: 0.49, blue: 0.43)
 
 @MainActor @Observable final class Draft {
   var selection: Selection?
   var text = ""  // the new text so far
-  var fixes: [Fix] = []
+  var fixes: [Fix] = []  // the ones not accepted or dismissed yet
+  var current = 0
+  var found = 0  // how many the last check found
+  var accepted = 0
   var checked = false
   var ask = ""
   var status = ""
@@ -15,9 +21,12 @@ import SwiftUI
   var busy = false
   private var request = 0  // a newer selection or request wins
 
+  var fix: Fix? { fixes.indices.contains(current) ? fixes[current] : nil }
+
   func start(_ selection: Selection?, status: String = "") {
     request += 1
-    (self.selection, text, fixes, checked, ask, self.status, failed, busy) = (selection, selection?.text ?? "", [], false, "", status, false, false)
+    (self.selection, text, ask, self.status, failed, busy) = (selection, selection?.text ?? "", "", status, false, false)
+    (fixes, current, found, accepted, checked) = ([], 0, 0, 0, false)
     if selection != nil { check() }
   }
 
@@ -25,7 +34,7 @@ import SwiftUI
     let text = text
     let starting = Engine.current == .acp && !Agent.shared.isRunning
     run(starting ? "Starting the agent. Its first start can take a minute..." : "Checking...", { try await Ask.check(text) }) { [self] in
-      (fixes, checked) = ($0, true)
+      (fixes, current, found, checked) = ($0, 0, $0.count, true)
     }
   }
 
@@ -33,13 +42,25 @@ import SwiftUI
     let (text, instruction) = (text, instruction.trimmingCharacters(in: .whitespacesAndNewlines))
     guard !instruction.isEmpty else { return }
     run("Rewriting...", { try await Ask.rewrite(text, keep ? instruction + Ask.keep : instruction) }) { [self] in
-      (self.text, fixes, checked, ask) = ($0, [], false, "")
+      (self.text, fixes, current, found, checked, ask) = ($0, [], 0, 0, false, "")
     }
   }
 
   func accept(_ fix: Fix) {
-    if let r = text.range(of: fix.original) { text.replaceSubrange(r, with: fix.suggestion) }
+    if let r = text.range(of: fix.original) {
+      text.replaceSubrange(r, with: fix.suggestion)
+      accepted += 1
+    }
+    dismiss(fix)
+  }
+
+  func dismiss(_ fix: Fix) {
     fixes.removeAll { $0.id == fix.id }
+    current = min(current, max(fixes.count - 1, 0))
+  }
+
+  func step(_ by: Int) {
+    if !fixes.isEmpty { current = (current + by + fixes.count) % fixes.count }
   }
 
   private func run<T>(_ doing: String, _ ask: @escaping () async throws -> T, then apply: @escaping (T) -> Void) {
@@ -68,40 +89,110 @@ struct PanelView: View {
     VStack(alignment: .leading, spacing: 12) {
       if draft.selection != nil {
         ScrollView {
-          Text(draft.text).textSelection(.enabled).frame(maxWidth: .infinity, alignment: .leading)
+          Text(marked).textSelection(.enabled).frame(maxWidth: .infinity, alignment: .leading)
         }
-        .frame(maxHeight: 150)
+        .frame(maxHeight: 120)
         .fixedSize(horizontal: false, vertical: true)
-        .padding(8)
-        .background(.quaternary.opacity(0.5), in: .rect(cornerRadius: 6))
-        ForEach(draft.fixes) { fix in
-          HStack(alignment: .firstTextBaseline) {
-            VStack(alignment: .leading, spacing: 2) {
-              Text(fix.original).strikethrough().foregroundStyle(.secondary)
-              Text(fix.suggestion)
-              if !fix.reason.isEmpty { Text(fix.reason).font(.caption).foregroundStyle(.secondary) }
-            }
-            Spacer()
-            Button("Accept") { draft.accept(fix) }
-          }
+        if let fix = draft.fix {
+          card(fix)
+        } else if draft.checked {
+          done
         }
-        if draft.fixes.count > 1 {
-          Button("Accept All") { for fix in draft.fixes { draft.accept(fix) } }
-        } else if draft.checked && draft.fixes.isEmpty {
-          Label("No mistakes found.", systemImage: "checkmark").foregroundStyle(.secondary)
-        }
-        HStack {
-          ForEach(Ask.styles, id: \.name) { style in
-            Button(style.name) { draft.rewrite(style.instruction, keep: true) }
-          }
-          Spacer()
-          Button("Check") { draft.check() }
-        }
-        .disabled(draft.busy)
-        TextField("Ask for a change, then press Return", text: $draft.ask)
-          .onSubmit { draft.rewrite(draft.ask, keep: false) }
-          .disabled(draft.busy)
+        rewrite
       }
+      footer
+    }
+    .padding(16)
+    .frame(width: 440)
+  }
+
+  /// The text, with the words the current suggestion changes underlined as Grammarly does.
+  private var marked: AttributedString {
+    var s = AttributedString(draft.text)
+    guard let fix = draft.fix, let whole = s.range(of: fix.original) else { return s }
+    let change = fix.change
+    let from = s.characters.index(whole.lowerBound, offsetBy: change.before.count)
+    let to = s.characters.index(from, offsetBy: max(change.old.count, 1))
+    s[from..<to].underlineStyle = Text.LineStyle(pattern: .solid, color: color(fix))
+    s[from..<to].backgroundColor = color(fix).opacity(0.15)
+    return s
+  }
+
+  private func color(_ fix: Fix) -> Color { fix.category == "Word choice" ? .blue : .red }
+
+  private func card(_ fix: Fix) -> some View {
+    let change = fix.change
+    return VStack(alignment: .leading, spacing: 10) {
+      HStack(spacing: 6) {
+        Circle().fill(color(fix)).frame(width: 7, height: 7)
+        Text(fix.category).foregroundStyle(.secondary)
+        Spacer()
+        if draft.fixes.count > 1 {
+          Text("\(draft.current + 1) of \(draft.fixes.count)").font(.callout).foregroundStyle(.secondary).monospacedDigit()
+          Button { draft.step(-1) } label: { Image(systemName: "chevron.left") }.help("Previous suggestion")
+          Button { draft.step(1) } label: { Image(systemName: "chevron.right") }.help("Next suggestion")
+        }
+      }
+      .buttonStyle(.borderless)
+      HStack(alignment: .firstTextBaseline, spacing: 8) {
+        if !change.old.isEmpty {
+          Text(change.old).strikethrough(color: .red).foregroundStyle(.secondary)
+          Image(systemName: "arrow.right").foregroundStyle(.secondary)
+        }
+        Text(change.new.isEmpty ? "Remove" : change.new)
+          .foregroundStyle(.white)
+          .padding(.horizontal, 8)
+          .padding(.vertical, 3)
+          .background(change.new.isEmpty ? Color.red : green, in: .rect(cornerRadius: 5))
+      }
+      .font(.title3)
+      if !fix.reason.isEmpty {
+        Text(fix.reason).fixedSize(horizontal: false, vertical: true)
+      }
+      HStack(spacing: 14) {
+        Button("Accept") { draft.accept(fix) }
+          .buttonStyle(.borderedProminent)
+          .tint(green)
+          .keyboardShortcut(.defaultAction)
+        Button("Dismiss") { draft.dismiss(fix) }.buttonStyle(.borderless)
+        Spacer()
+        if draft.fixes.count > 1 {
+          Button("Accept all \(draft.fixes.count)") { for fix in draft.fixes { draft.accept(fix) } }.buttonStyle(.borderless)
+        }
+      }
+    }
+    .padding(14)
+    .background(RoundedRectangle(cornerRadius: 10).strokeBorder(green, lineWidth: 1.5))
+  }
+
+  private var done: some View {
+    Label(
+      draft.found == 0 ? "No mistakes found." : "All suggestions reviewed: \(draft.accepted) accepted.",
+      systemImage: "checkmark.circle.fill"
+    )
+    .foregroundStyle(green)
+  }
+
+  private var rewrite: some View {
+    VStack(alignment: .leading, spacing: 8) {
+      Divider()
+      HStack {
+        Text("Rewrite").foregroundStyle(.secondary)
+        ForEach(Ask.styles, id: \.name) { style in
+          Button(style.name) { draft.rewrite(style.instruction, keep: true) }
+        }
+        Spacer()
+        Button { draft.check() } label: { Image(systemName: "arrow.clockwise") }.help("Check again")
+      }
+      .controlSize(.small)
+      TextField("Ask for a change, then press Return", text: $draft.ask)
+        .onSubmit { draft.rewrite(draft.ask, keep: false) }
+    }
+    .disabled(draft.busy)
+  }
+
+  private var footer: some View {
+    VStack(alignment: .leading, spacing: 8) {
       HStack(alignment: .firstTextBaseline) {
         if draft.busy { ProgressView().controlSize(.small) }
         Text(draft.status)
@@ -111,17 +202,15 @@ struct PanelView: View {
         Spacer()
         Button("Cancel") { Companion.close() }.keyboardShortcut(.cancelAction)
         if let selection = draft.selection {
-          Button("Replace") { Companion.replace() }
-            .keyboardShortcut(.defaultAction)
-            .disabled(draft.busy || draft.text == selection.text)
+          let replace = Button("Replace") { Companion.replace() }.disabled(draft.busy || draft.text == selection.text)
+          // Return accepts the suggestion on screen; once none is left, it replaces.
+          if draft.fix == nil { replace.keyboardShortcut(.defaultAction) } else { replace }
         }
       }
       Text("\(Engine.current.label)  ·  ⌃⌥Q on a selection in any app")
         .font(.caption2)
         .foregroundStyle(.tertiary)
     }
-    .padding(16)
-    .frame(width: 460)
   }
 }
 
@@ -133,6 +222,7 @@ final class Panel: NSPanel {
 
 @MainActor enum Companion {
   static let draft = Draft()
+  private static var top: CGFloat = 0  // the panel grows down from here as suggestions arrive
 
   static let panel: Panel = {
     let p = Panel(
@@ -146,6 +236,13 @@ final class Panel: NSPanel {
     let host = NSHostingController(rootView: PanelView(draft: draft))
     host.sizingOptions = .preferredContentSize
     p.contentViewController = host
+    // A window grows up from its bottom edge; keep the top edge where it was instead.
+    NotificationCenter.default.addObserver(forName: NSWindow.didResizeNotification, object: p, queue: .main) { _ in
+      MainActor.assumeIsolated { p.setFrameOrigin(NSPoint(x: p.frame.minX, y: max(top - p.frame.height, 0))) }
+    }
+    NotificationCenter.default.addObserver(forName: NSWindow.didMoveNotification, object: p, queue: .main) { _ in
+      MainActor.assumeIsolated { top = p.frame.maxY }
+    }
     return p
   }()
 
@@ -153,11 +250,11 @@ final class Panel: NSPanel {
   static func show() {
     guard AXIsProcessTrusted() else {
       draft.start(nil, status: "Quire Companion needs Accessibility to read your selection. Turn it on in System Settings > Privacy & Security > Accessibility, then press ⌃⌥Q again.")
-      return open()
+      return open(near: nil)
     }
     let selection = Selections.read()
     draft.start(selection, status: selection == nil ? "Select some text first, then press ⌃⌥Q." : "")
-    open()
+    open(near: selection?.bounds)
   }
 
   static func close() {
@@ -173,15 +270,16 @@ final class Panel: NSPanel {
     DispatchQueue.main.asyncAfter(deadline: .now() + 0.3) { Selections.write(text, to: selection) }
   }
 
-  /// Next to the pointer, inside the screen.
-  private static func open() {
+  /// Under the selection when the app says where it is (`text`, top-left origin), else under
+  /// the pointer; inside the screen either way.
+  private static func open(near text: CGRect?) {
     panel.layoutIfNeeded()
-    let mouse = NSEvent.mouseLocation
-    let screen = (NSScreen.screens.first { $0.frame.contains(mouse) } ?? NSScreen.main)?.visibleFrame ?? .zero
+    let height = NSScreen.screens.first?.frame.height ?? 0  // Accessibility measures from its top
+    let at = text.map { NSPoint(x: $0.minX - 16, y: height - $0.maxY - 6) } ?? NSEvent.mouseLocation.applying(.init(translationX: -16, y: -12))
+    let screen = (NSScreen.screens.first { $0.frame.contains(at) } ?? NSScreen.main)?.visibleFrame ?? .zero
     let size = panel.frame.size
-    panel.setFrameOrigin(NSPoint(
-      x: min(max(mouse.x + 12, screen.minX), screen.maxX - size.width),
-      y: min(max(mouse.y - size.height - 12, screen.minY), screen.maxY - size.height)))
+    top = min(max(at.y, screen.minY + size.height), screen.maxY)
+    panel.setFrameOrigin(NSPoint(x: min(max(at.x, screen.minX), screen.maxX - size.width), y: top - size.height))
     panel.orderFrontRegardless()
     panel.makeKey()
   }

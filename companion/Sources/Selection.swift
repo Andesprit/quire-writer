@@ -10,6 +10,7 @@ struct Selection {
   let app: NSRunningApplication
   let element: AXUIElement?  // nil: read through the clipboard
   let text: String
+  let bounds: CGRect?  // where it is on screen (top-left origin), when the app says
 }
 
 private func attr(_ el: AXUIElement, _ name: String) -> CFTypeRef? {
@@ -17,8 +18,28 @@ private func attr(_ el: AXUIElement, _ name: String) -> CFTypeRef? {
   return AXUIElementCopyAttributeValue(el, name as CFString, &v) == .success ? v : nil
 }
 
+private func focused(_ app: AXUIElement) -> AXUIElement? {
+  attr(app, kAXFocusedUIElementAttribute).map { $0 as! AXUIElement }
+}
+
+/// Where the selection is on screen. Native apps (Notes) give the rect of a range; WebKit
+/// (Mail, Safari) gives it for its own text markers instead. Tested on 2026-10-19.
+private func bounds(_ el: AXUIElement?) -> CGRect? {
+  guard let el else { return nil }
+  for (range, rectFor) in [(kAXSelectedTextRangeAttribute, kAXBoundsForRangeParameterizedAttribute), ("AXSelectedTextMarkerRange", "AXBoundsForTextMarkerRange")] {
+    var v: CFTypeRef?
+    guard let r = attr(el, range),
+      AXUIElementCopyParameterizedAttributeValue(el, rectFor as CFString, r, &v) == .success, let v,
+      CFGetTypeID(v) == AXValueGetTypeID()
+    else { continue }
+    var rect = CGRect.zero
+    if AXValueGetValue(v as! AXValue, .cgRect, &rect), rect.height > 0 { return rect }
+  }
+  return nil
+}
+
 private func selected(in app: AXUIElement) -> (AXUIElement, String)? {
-  guard let el = attr(app, kAXFocusedUIElementAttribute).map({ $0 as! AXUIElement }),
+  guard let el = focused(app),
     let text = attr(el, kAXSelectedTextAttribute) as? String, !text.isEmpty
   else { return nil }
   return (el, text)
@@ -31,16 +52,16 @@ enum Selections {
     // Not the system-wide element's focused app: with some apps in front (Dia), that fails.
     guard let app = NSWorkspace.shared.frontmostApplication else { return nil }
     let ax = AXUIElementCreateApplication(app.processIdentifier)
-    if let (el, text) = selected(in: ax) { return Selection(app: app, element: el, text: text) }
+    if let (el, text) = selected(in: ax) { return Selection(app: app, element: el, text: text, bounds: bounds(el)) }
     // Chromium and Electron build their tree only for a client that asks for it.
     if AXUIElementSetAttributeValue(ax, "AXManualAccessibility" as CFString, kCFBooleanTrue) == .success {
       usleep(300_000)
-      if let (el, text) = selected(in: ax) { return Selection(app: app, element: el, text: text) }
+      if let (el, text) = selected(in: ax) { return Selection(app: app, element: el, text: text, bounds: bounds(el)) }
     }
     let saved = Clipboard.save()
     defer { Clipboard.restore(saved) }
     guard let text = Clipboard.copy(), !text.isEmpty else { return nil }
-    return Selection(app: app, element: nil, text: text)
+    return Selection(app: app, element: nil, text: text, bounds: bounds(focused(ax)))
   }
 
   /// Puts `text` in place of the selection. Its app must be in front again.

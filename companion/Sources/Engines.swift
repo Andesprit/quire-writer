@@ -52,10 +52,27 @@ enum Keychain {
 
 /// A fix the model suggests: `original` is copied from the text, `suggestion` replaces it.
 struct Fix: Identifiable {
+  static let categories = ["Spelling", "Grammar", "Punctuation", "Word choice"]
+
   let id = UUID()
   let original: String
   let suggestion: String
-  let reason: String
+  let category: String
+  let reason: String  // one sentence for the writer
+
+  /// The words that change, and the unchanged words around them: in "has less projects" ->
+  /// "has fewer projects", the change is "less" -> "fewer". A comma only added is shown with
+  /// the word before it: "However" -> "However,".
+  var change: (before: String, old: String, new: String, after: String) {
+    let (a, b) = (tokens(original), tokens(suggestion))
+    var p = 0
+    while p < a.count, p < b.count, a[p] == b[p] { p += 1 }
+    var s = 0
+    while s < a.count - p, s < b.count - p, a[a.count - 1 - s] == b[b.count - 1 - s] { s += 1 }
+    if p + s == a.count, p > 0 { p -= 1 }  // nothing removed: take in the token before
+    func join(_ t: ArraySlice<String>) -> String { t.joined() }
+    return (join(a[..<p]), join(a[p..<(a.count - s)]), join(b[p..<(b.count - s)]), join(a[(a.count - s)...]))
+  }
 
   /// The fixes in a model's reply, a JSON array, that are found in `text` and change it. Nil
   /// when the reply holds no such array.
@@ -68,9 +85,15 @@ struct Fix: Identifiable {
       guard let o = item["original"] as? String, let s = item["suggestion"] as? String,
         !o.isEmpty, o != s, text.contains(o)
       else { return nil }
-      return Fix(original: o, suggestion: s, reason: item["reason"] as? String ?? "")
+      let category = item["category"] as? String ?? ""
+      return Fix(original: o, suggestion: s, category: categories.contains(category) ? category : "Grammar", reason: item["reason"] as? String ?? "")
     }
   }
+}
+
+/// Words, runs of space, and single other characters.
+private func tokens(_ s: String) -> [String] {
+  s.matches(of: try! Regex(#"[\p{L}\p{N}']+|\s+|[^\p{L}\p{N}'\s]"#)).map { String(s[$0.range]) }
 }
 
 /// A model that thinks aloud puts its answer after the thoughts; some put it in a code fence.
@@ -98,9 +121,11 @@ enum Ask {
       Find spelling, grammar and punctuation mistakes, and wrong words.
       Leave style, meaning and correct text alone.
 
-      Reply with ONLY a JSON array, no other text: [{"original": "...", "suggestion": "...", "reason": "..."}]
+      Reply with ONLY a JSON array, no other text: [{"original": "...", "suggestion": "...", "category": "...", "reason": "..."}]
       "original" is copied exactly from the text: the mistake and a few words around it, so it is found. \
-      "suggestion" is the same words, corrected. "reason" is two to five words. Reply [] when nothing needs fixing.
+      "suggestion" is the same words, corrected. "category" is one of \(Fix.categories.joined(separator: ", ")). \
+      "reason" is one short sentence that tells the writer what is wrong, for example: \
+      "The quantifier less does not fit the countable noun projects." Reply [] when nothing needs fixing.
 
       Text:
       \(text)
@@ -146,7 +171,9 @@ struct AppleFix {
   var original: String
   @Guide(description: "The same words with only the mistake corrected")
   var suggestion: String
-  @Guide(description: "Two to five words on what was wrong")
+  @Guide(description: "What kind of mistake it is", .anyOf(Fix.categories))
+  var category: String
+  @Guide(description: "One short sentence that tells the writer what is wrong")
   var reason: String
 }
 
@@ -172,7 +199,7 @@ enum AppleModel {
   /// Made to answer with a well-formed list: on its own it often does not.
   static func fixes(_ prompt: String) async throws -> String {
     let reply = try await answer { try await LanguageModelSession().respond(to: prompt, generating: AppleFixes.self).content }
-    let list = reply.fixes.map { ["original": $0.original, "suggestion": $0.suggestion, "reason": $0.reason] }
+    let list = reply.fixes.map { ["original": $0.original, "suggestion": $0.suggestion, "category": $0.category, "reason": $0.reason] }
     return String(decoding: try JSONSerialization.data(withJSONObject: list), as: UTF8.self)
   }
 
