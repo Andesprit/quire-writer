@@ -7,6 +7,7 @@ import { Chunk } from "@codemirror/merge"
 import { highlightHTML, highlightLine, langOf, startState, sameState, type Lang, type State } from "./highlight"
 import { diagnosticRange, errorCount, isCurrentDiagnostic, type Diagnostic, type DiagnosticBatch } from "./diagnostics"
 import { findMatches, replacementEdit, type Match } from "./find"
+import { fuzzyMatch, rankFiles } from "./palette"
 import { diff, minimalChange, rebase, type Diff } from "./merge"
 import { $, ask, esc, fileIcon, icon, toast } from "./ui"
 import { FORMAT_KEYS, buildFormatBar, connectEditor, insertAt, select, setHeading, syntaxOf } from "./format"
@@ -105,10 +106,12 @@ if (zoom !== 1) setZoom(zoom)
 document.addEventListener(
   "keydown",
   (e) => {
+    if (e.isComposing || palette.open) return
     if (!(e.metaKey || e.ctrlKey) || e.altKey) return
     const key = e.key.toLowerCase()
     // Cmd+B and Cmd+I are bold and italic in the text; Chrome keeps Cmd+L for itself.
-    if (key === "s" && !e.shiftKey) flushSave(true)
+    if (key === "p") openPalette(e.shiftKey)
+    else if (key === "s" && !e.shiftKey) flushSave(true)
     else if (key === "e" && e.shiftKey) togglePanel("sidebar")
     else if (key === "\\") togglePanel("preview")
     else if (key === "j" && !e.shiftKey) {
@@ -539,6 +542,7 @@ function dropFileState() {
 function openFile(path: string, content: string, base: string | null) {
   dropFileState()
   current = path
+  rememberFile(path)
   lang = langOf(path)
   baseline = base
   ta.value = content // a new file starts a fresh undo history
@@ -1052,6 +1056,7 @@ renderRecent()
 
 // Another folder was opened: nothing from the previous one may stay on screen.
 function resetForFolder(newRoot: string) {
+  closePalette(false)
   clearTimeout(saveTimer)
   closeFile()
   invalidateDiagnostics()
@@ -2358,6 +2363,198 @@ for (const b of document.querySelectorAll<HTMLElement>("[data-as]")) {
 // The document in the format the preview shows, made again by the export.
 $("export-preview").onclick = () => exportAs(previewAs(langOf(previewing ?? current ?? "")))
 renderPreviewAs()
+// ---------- quick input: files and existing commands, with the keyboard kept in one place ----------
+
+const palette = $<HTMLDialogElement>("quick-input")
+const paletteQuery = $<HTMLInputElement>("quick-query")
+const paletteList = $("quick-list")
+type QuickItem = { id: string; label: string; detail?: string; keys?: string; positions?: number[]; run: () => void }
+let quickItems: QuickItem[] = []
+let quickIndex = 0
+let quickOpener: HTMLElement | null = null
+let quickOpenerPath: string | undefined
+const commandKey = /Mac/i.test(navigator.platform) ? "⌘" : "Ctrl+"
+
+function recentFiles(): string[] {
+  try {
+    const list: unknown = JSON.parse(store.get(`file-recent.${root}`) ?? "[]")
+    return Array.isArray(list) ? list.filter((p): p is string => typeof p === "string") : []
+  } catch { return [] }
+}
+function rememberFile(path: string) {
+  if (root) store.set(`file-recent.${root}`, JSON.stringify([path, ...recentFiles().filter((p) => p !== path)].slice(0, 30)))
+}
+
+function quickCommands(): QuickItem[] {
+  const click = (id: string) => () => $(id).click()
+  const commands: QuickItem[] = [
+    { id: "open-project", label: "Open project…", run: click("open-folder") },
+    { id: "new-project", label: "New project…", run: click("new-project") },
+    { id: "sidebar", label: "Toggle explorer", keys: commandKey + "⇧E", run: click("toggle-sidebar") },
+    { id: "chat", label: "Toggle chat", keys: commandKey + "J", run: () => { if (isOpen("chat")) setPanel("chat", false); else openChat() } },
+    { id: "setup", label: "Check Setup…", run: () => send({ type: "check_setup" }) },
+    { id: "autocomplete", label: "Turn autocomplete " + (acToggle.checked ? "off" : "on"), run: () => acToggle.click() },
+    { id: "ac-settings", label: "Autocomplete settings…", run: click("sb-ac") },
+    { id: "ck-settings", label: "Suggestions settings…", run: click("sb-ck") },
+    { id: "ed-settings", label: "Edits settings…", run: click("sb-ed") },
+    { id: "ch-settings", label: "Chat settings…", run: click("chat-source") },
+    { id: "autosave", label: "Turn auto save " + (autosave ? "off" : "on"), run: click("sb-autosave") },
+    { id: "zoom-in", label: "Zoom in", keys: commandKey + "+", run: () => setZoom(zoom + 0.1) },
+    { id: "zoom-out", label: "Zoom out", keys: commandKey + "−", run: () => setZoom(zoom - 0.1) },
+    { id: "zoom-reset", label: "Reset zoom", keys: commandKey + "0", run: () => setZoom(1) },
+    { id: "theme-system", label: "Color theme: Follow system", run: () => { store.del("theme"); applyTheme() } },
+    ...THEMES.flatMap((t) => t === "-" ? [] : [{ id: "theme-" + t[0], label: "Color theme: " + t[1], run: () => { store.set("theme", t[0]); applyTheme() } }]),
+  ]
+  if (root) commands.push(
+    { id: "preview", label: "Toggle preview", keys: commandKey + "\\", run: click("toggle-preview") },
+    { id: "new-file", label: "New file…", run: click("new-file") },
+    { id: "new-folder", label: "New folder…", run: click("new-folder") },
+  )
+  if (current) commands.push(
+    { id: "find", label: "Find in file", keys: commandKey + "F", run: click("open-find") },
+    { id: "save", label: "Save file", keys: commandKey + "S", run: () => flushSave(true) },
+  )
+  if (current && syntax()) commands.push({ id: "export", label: "Export document…", run: click("export") })
+  if (previewing && files.includes(previewing)) for (const [as, label] of Object.entries(PREVIEW_AS)) commands.push({
+    id: "preview-" + as, label: "Preview as " + label,
+    run: () => { setPanel("preview", true); document.querySelector<HTMLElement>('[data-as="' + as + '"]')!.click() },
+  })
+  if (compileDiagnostics[0]?.path && files.includes(compileDiagnostics[0].path)) commands.push({ id: "first-error", label: "Go to first error", run: () => jumpToDiagnostic() })
+  return commands
+}
+
+function markedText(text: string, positions: number[], offset = 0) {
+  const matched = new Set(positions)
+  let at = offset
+  return Array.from(text, (c) => { const mark = matched.has(at); at += c.length; return mark ? "<mark>" + esc(c) + "</mark>" : esc(c) }).join("")
+}
+
+function renderPalette() {
+  if (!palette.open) return
+  const commands = paletteQuery.value.trimStart().startsWith(">")
+  const query = commands ? paletteQuery.value.trimStart().slice(1).trimStart() : paletteQuery.value
+  $("quick-title").textContent = commands ? "Run a command" : "Open a file"
+  paletteQuery.setAttribute("aria-label", commands ? "Search commands" : "Search project files")
+  if (commands) quickItems = quickCommands().flatMap((c) => {
+    const match = fuzzyMatch(c.label, query)
+    return match ? [{ ...c, ...match }] : []
+  }).sort((a, b) => b.score - a.score)
+  else {
+    const recent = recentFiles()
+    const folder = root
+    quickItems = rankFiles(files, query, recent).map((m) => ({
+      id: m.path, label: m.path, positions: m.positions,
+      detail: m.path === current ? "Open" : recent.includes(m.path) ? "Recent" : "",
+      run: async () => {
+        if (m.path === current) { if (mode === "edit") ta.focus(); return }
+        if (await leaveCurrent() && root === folder && files.includes(m.path)) {
+          ta.focus({ preventScroll: true })
+          send({ type: "open_file", path: m.path })
+        }
+      },
+    }))
+  }
+  quickIndex = Math.min(quickIndex, Math.max(0, quickItems.length - 1))
+  paletteList.innerHTML = quickItems.map((item, i) => {
+    const start = commands ? 0 : item.label.lastIndexOf("/") + 1
+    const name = markedText(item.label.slice(start), item.positions ?? [], start)
+    const directory = start ? markedText(item.label.slice(0, start - 1), item.positions ?? []) : ""
+    return '<div id="quick-option-' + i + '" role="option" aria-selected="' + (i === quickIndex) + '" data-index="' + i + '" class="quick-row" title="' + esc(item.label) + '">' +
+      (commands ? icon("chevron-right") : fileIcon(item.id)) + '<span class="quick-name">' + name + '</span>' +
+      (directory ? '<span class="quick-path">' + directory + '</span>' : "") + '<span class="quick-detail">' + esc(item.keys ?? item.detail ?? "") + '</span></div>'
+  }).join("")
+  $("quick-empty").hidden = !!quickItems.length
+  $("quick-empty").textContent = commands ? "No matching commands. Try a different word." : !root ? "Open a project to find its files. Type > for commands." : "No matching files. Try a file name or folder name."
+  $("quick-count").textContent = `${quickItems.length} ${commands ? "command" : "file"}${quickItems.length === 1 ? "" : "s"}`
+  selectQuickItem(quickIndex)
+}
+
+function selectQuickItem(index: number) {
+  quickIndex = index
+  for (const row of paletteList.children) row.setAttribute("aria-selected", String(Number((row as HTMLElement).dataset.index) === index))
+  const active = paletteList.children[index] as HTMLElement | undefined
+  if (active) {
+    paletteQuery.setAttribute("aria-activedescendant", active.id)
+    active.scrollIntoView({ block: "nearest" })
+  } else paletteQuery.removeAttribute("aria-activedescendant")
+}
+
+function placePalette() {
+  if (!palette.open) return
+  const editor = $("editor-group").getBoundingClientRect()
+  const width = Math.min(560, innerWidth - 16, editor.width > 320 ? editor.width - 24 : innerWidth - 16)
+  const centre = editor.width > 320 ? editor.left + editor.width / 2 : innerWidth / 2
+  palette.style.width = width + "px"
+  palette.style.left = Math.max(8, Math.min(centre - width / 2, innerWidth - width - 8)) + "px"
+  palette.style.top = $("titlebar").getBoundingClientRect().bottom + 8 + "px"
+  placePreview()
+}
+
+function openPalette(commands = false) {
+  if (document.querySelector("dialog[open]") && !palette.open) return
+  if (!palette.open) {
+    quickOpener = document.activeElement as HTMLElement | null
+    quickOpenerPath = quickOpener?.dataset.path
+    clearTimeout(menuTimer)
+    menu.hidden = true
+    hideMenu()
+    $("diagnostic-card").hidden = true
+    palette.showModal()
+  }
+  paletteQuery.value = commands ? ">" : ""
+  quickIndex = 0
+  renderPalette()
+  placePalette()
+  paletteQuery.focus()
+}
+
+function closePalette(restore = true) {
+  if (!palette.open) return
+  palette.close()
+  if (restore) {
+    const opener = quickOpener?.isConnected ? quickOpener : [...$("tree").querySelectorAll<HTMLElement>("[data-path]")].find((el) => el.dataset.path === quickOpenerPath)
+    const target = opener ?? ta
+    target.focus({ preventScroll: true })
+  }
+  placePreview()
+}
+function runQuickItem(index = quickIndex) {
+  const item = quickItems[index]
+  if (!item) return
+  const commands = paletteQuery.value.trimStart().startsWith(">")
+  closePalette()
+  // Recheck availability: a file or build result may have changed while the list was open.
+  if (commands) quickCommands().find((c) => c.id === item.id)?.run()
+  else item.run()
+}
+paletteQuery.oninput = () => { quickIndex = 0; renderPalette() }
+palette.addEventListener("cancel", (e) => { e.preventDefault(); closePalette() })
+palette.addEventListener("click", (e) => {
+  const r = palette.getBoundingClientRect()
+  if (e.target === palette && (e.clientX < r.left || e.clientX > r.right || e.clientY < r.top || e.clientY > r.bottom)) closePalette()
+})
+paletteList.onmousedown = (e) => e.preventDefault()
+paletteList.onclick = (e) => {
+  const row = (e.target as HTMLElement).closest<HTMLElement>("[data-index]")
+  if (row) runQuickItem(Number(row.dataset.index))
+}
+$("quick-close").onclick = () => closePalette()
+$("open-quick").onclick = () => openPalette()
+palette.addEventListener("keydown", (e) => {
+  if (e.isComposing) return
+  if ((e.metaKey || e.ctrlKey) && e.key.toLowerCase() === "p") openPalette(e.shiftKey)
+  else if (e.key === "ArrowDown" || e.key === "ArrowUp") {
+    if (quickItems.length) selectQuickItem((quickIndex + (e.key === "ArrowDown" ? 1 : -1) + quickItems.length) % quickItems.length)
+  } else if (e.key === "Enter" && e.target === paletteQuery) runQuickItem()
+  else if (e.key === "Tab") (document.activeElement === paletteQuery ? $("quick-close") : paletteQuery).focus()
+  else return
+  e.preventDefault()
+  e.stopPropagation()
+})
+new ResizeObserver(placePalette).observe($("editor-group"))
+addEventListener("resize", placePalette)
+addEventListener("blur", () => closePalette(false))
+
 // ---------- the preview's own web view (preview.ts): a long document drawing there never holds up typing here ----------
 
 const toPreview = (msg: object) => tauri.event.emit("to-preview", msg)
@@ -2371,7 +2568,7 @@ function showPreview(url: string) {
 }
 // The web view sits over #preview. A native view covers whatever the page floats over it, so
 // it steps aside while a dialog or menu would sit under it, and notices go to its left.
-const floating = ["ask", "new-project-ask", "setup", "ac-settings", "ck-settings", "ed-settings", "ch-settings", "inline-box", "fix-card", "diagnostic-card", "rewrite-menu", "rewrite-card", "ctx-menu", "toasts", "sidebar", "chat"].map((id) => $(id))
+const floating = ["quick-input", "ask", "new-project-ask", "setup", "ac-settings", "ck-settings", "ed-settings", "ch-settings", "inline-box", "fix-card", "diagnostic-card", "rewrite-menu", "rewrite-card", "ctx-menu", "toasts", "sidebar", "chat"].map((id) => $(id))
 let placing = 0
 let placed = "" // the place last sent
 let bgSent = "" // the theme's preview background last sent: the web view shows it while a preview loads
@@ -2382,7 +2579,7 @@ function placePreview() {
     const r = el.getBoundingClientRect()
     const right = r.width && r.left > 240 ? `${innerWidth - r.left + 12}px` : ""
     if ($("toasts").style.getPropertyValue("--toasts-right") !== right) $("toasts").style.setProperty("--toasts-right", right)
-    const over = (o: DOMRect) => o.left < r.right - 1 && o.right > r.left + 1 && o.top < r.bottom - 1 && o.bottom > r.top + 1
+    const over = (o: DOMRect) => o.width > 0 && o.height > 0 && o.left < r.right - 1 && o.right > r.left + 1 && o.top < r.bottom - 1 && o.bottom > r.top + 1
     const shown = r.width > 0 && r.height > 0 && !floating.some((f) => over(f.getBoundingClientRect()))
     // In window points: the page's pixels are zoomed.
     const frame = shown ? { x: r.left * zoom, y: r.top * zoom, w: r.width * zoom, h: r.height * zoom, shown: innerHeight * zoom, zoom } : {}
@@ -2649,6 +2846,7 @@ function onMessage(msg: any) {
       root = msg.root
       checkForStart()
       files = msg.files
+      renderPalette()
       dirs = msg.dirs ?? []
       changed = new Set(msg.changed)
       labels = msg.labels ?? []

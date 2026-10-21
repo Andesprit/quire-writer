@@ -915,6 +915,24 @@ details.thought div { white-space: pre-wrap; margin-top: 4px; padding-left: 18px
 .ctx-menu .keys { opacity: 0.7; font-size: 12px; }
 .ctx-menu hr { margin: 4px 6px; border: 0; border-top: 1px solid var(--widget-border); }
 
+/* Quick input uses the editor's width; the native preview steps aside on overlap. */
+#quick-input { position: fixed; inset: auto; margin: 0; padding: 8px; max-width: calc(100vw - 16px); max-height: calc(100dvh - 100px); overflow: hidden; border: 1px solid var(--widget-border); border-top: 2px solid var(--focus); border-radius: 6px; background: var(--widget); color: var(--fg); box-shadow: var(--shadow); font: 13px var(--ui); }
+#quick-input[open] { display: flex; flex-direction: column; gap: 6px; }
+#quick-input::backdrop { background: transparent; }
+.quick-head { display: flex; align-items: center; justify-content: space-between; padding-left: 4px; font-size: 12px; color: var(--muted); }
+#quick-query { flex: none; width: 100%; min-width: 0; height: 30px; padding: 4px 8px; border: 1px solid var(--input-border); border-radius: 2px; background: var(--input); color: var(--fg); font: 13px var(--ui); }
+#quick-query:focus { outline: 1px solid var(--focus); outline-offset: -1px; }
+#quick-list { min-height: 0; max-height: 340px; overflow-y: auto; }
+.quick-row { display: flex; gap: 8px; align-items: center; min-height: 30px; padding: 5px 8px; border-radius: 3px; cursor: pointer; }
+.quick-row:hover { background: var(--hover); }
+.quick-row[aria-selected="true"] { background: var(--selection); outline: 1px solid var(--focus); outline-offset: -1px; }
+.quick-name { flex: 0 1 auto; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.quick-path { min-width: 0; flex: 1 2 auto; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: var(--muted); font-size: 12px; }
+.quick-detail { flex: none; margin-left: auto; color: var(--muted); font-size: 11px; white-space: nowrap; }
+.quick-row mark { color: var(--fg-strong); background: transparent; font-weight: 700; text-decoration: underline; text-underline-offset: 2px; }
+#quick-help { display: flex; flex-wrap: wrap; justify-content: space-between; gap: 4px; padding: 3px 4px; color: var(--muted); font-size: 11px; }
+#quick-empty { margin: 12px 6px; color: var(--muted); }
+
 /* Autocomplete settings (a native dialog, like the save question) */
 .settings .check { display: flex; align-items: center; gap: 8px; }
 .settings input[type="checkbox"], .settings input[type="radio"] { accent-color: var(--btn); margin: 0; width: 14px; height: 14px; }

@@ -2,7 +2,7 @@ import assert from "node:assert/strict"
 import { fuzzyMatch, rankFiles } from "./palette.ts"
 
 const files = ["chapter/text.typ", "latex/main.tex", "context.typ", "tex/appendix.typ", "main.typ"]
-assert.equal(rankFiles(files, "tex")[0].path, "latex/main.tex", "consecutive extension beats scattered letters")
+assert.equal(rankFiles(files, "tex")[0].path, "latex/main.tex", "extension query ranks a .tex file before partial name matches")
 assert.equal(rankFiles(files, "txt")[0].path, "chapter/text.typ", "name matches rank above folder-only matches")
 assert.equal(rankFiles(files, "ltx/m")[0].path, "latex/main.tex", "path subsequences work")
 assert.deepEqual(rankFiles(files, "TEX"), rankFiles(files, "tex"), "case does not affect ranking or positions")

@@ -14,6 +14,7 @@
       <span class="app-name" id="app-name">Quire</span>
       <span id="window-title" class="window-title"></span>
       <div class="title-actions">
+        <button class="icon-btn" id="open-quick" title="Quick open files (Cmd+P)" aria-label="Quick open files"><i class="codicon codicon-go-to-file"></i></button>
         <button class="icon-btn" id="toggle-sidebar" title="Toggle explorer (Cmd+Shift+E)" aria-pressed="true"><i class="codicon codicon-layout-sidebar-left"></i></button>
         <button class="icon-btn" id="toggle-preview" title="Toggle preview (Cmd+\)" aria-pressed="true"><i class="codicon codicon-open-preview"></i></button>
         <button class="icon-btn" id="toggle-chat" title="Toggle chat (Cmd+J)" aria-pressed="false"><i class="codicon codicon-layout-sidebar-right"></i></button>
@@ -102,6 +103,8 @@
         <div id="welcome" class="welcome">
           <div class="welcome-mark" id="welcome-mark" aria-hidden="true"></div>
           <dl class="shortcuts" id="shortcuts">
+            <dt>Open a file</dt><dd><kbd>&#8984;</kbd><kbd>P</kbd></dd>
+            <dt>Run a command</dt><dd><kbd>&#8679;</kbd><kbd>&#8984;</kbd><kbd>P</kbd></dd>
             <dt>Edit selection with AI</dt><dd><kbd>&#8984;</kbd><kbd>K</kbd></dd>
             <dt>Toggle chat</dt><dd><kbd>&#8984;</kbd><kbd>J</kbd></dd>
             <dt>Accept suggestion</dt><dd><kbd>Tab</kbd></dd>
@@ -236,6 +239,13 @@
     </footer>
   </div>
 
+  <dialog id="quick-input" aria-labelledby="quick-title">
+    <div class="quick-head"><label id="quick-title" for="quick-query">Open a file</label><button class="icon-btn small" id="quick-close" title="Close (Escape)" aria-label="Close quick input"><i class="codicon codicon-close"></i></button></div>
+    <input id="quick-query" role="combobox" aria-label="Search project files" aria-autocomplete="list" aria-expanded="true" aria-controls="quick-list" aria-describedby="quick-help quick-count" placeholder="Search files by name, or type > for commands" spellcheck="false" autocomplete="off" />
+    <div id="quick-list" role="listbox" aria-label="Results"></div>
+    <p id="quick-empty" hidden></p>
+    <div id="quick-help">↑ ↓ to choose · Enter to run · Esc to close <span id="quick-count" role="status" aria-live="polite"></span></div>
+  </dialog>
   <div id="diagnostic-card" role="note" hidden></div>
   <div id="inline-box" hidden>
     <div class="inline-row">
