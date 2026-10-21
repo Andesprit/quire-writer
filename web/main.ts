@@ -5,6 +5,7 @@ import "@fontsource/ia-writer-quattro/700.css"
 import "@fontsource/ia-writer-quattro/700-italic.css"
 import { Chunk } from "@codemirror/merge"
 import { highlightHTML, highlightLine, langOf, startState, sameState, type Lang, type State } from "./highlight"
+import { diagnosticRange, errorCount, isCurrentDiagnostic, type Diagnostic, type DiagnosticBatch } from "./diagnostics"
 import { diff, minimalChange, rebase, type Diff } from "./merge"
 import { $, ask, esc, fileIcon, icon, toast } from "./ui"
 import { FORMAT_KEYS, buildFormatBar, connectEditor, insertAt, select, setHeading, syntaxOf } from "./format"
@@ -266,6 +267,7 @@ function render() {
   hl.scrollTop = ta.scrollTop
   placeGhost()
   paintIssues()
+  paintDiagnostics()
   scheduleCheck()
   if (previewKind === "markdown") sendMarkdown()
   sendTyped()
@@ -306,6 +308,7 @@ function edit(from: number, to: number, text: string, disk = false) {
 
 ta.addEventListener("input", (e) => {
   docVersion++
+  invalidateDiagnostics()
   ghost = null
   closeCard()
   menu.hidden = true
@@ -318,6 +321,7 @@ ta.addEventListener("input", (e) => {
 })
 ta.addEventListener("scroll", () => {
   hl.scrollTop = ta.scrollTop
+  showDiagnosticAtCaret()
   closeCard()
   menu.hidden = true
   if (rw) floatAt(rwCard, rw.from, rw.to)
@@ -336,6 +340,7 @@ const onCaret = () => {
   markActive()
   scheduleInfo()
   followCaret()
+  showDiagnosticAtCaret()
 }
 document.addEventListener("selectionchange", () => {
   if (document.activeElement === ta) onCaret()
@@ -418,6 +423,7 @@ async function leaveCurrent(): Promise<boolean> {
   else if (answer === "discard") {
     clearTimeout(saveTimer)
     ta.value = saved
+    invalidateDiagnostics()
     render()
     updateDirty()
   }
@@ -483,6 +489,7 @@ function applyContent(content: string, base: string | null, c = minimalChange(ta
 function dropFileState() {
   clearGhost()
   closeCard()
+  $("diagnostic-card").hidden = true
   closeRewrite()
   menu.hidden = true
   holdSave = false
@@ -519,7 +526,7 @@ function openFile(path: string, content: string, base: string | null) {
     previewing = target
     requestPreview(target)
   }
-  if (pendingJump?.path === path) goTo(path, pendingJump.line, pendingJump.col)
+  if (pendingJump?.path === path) goTo(path, pendingJump.line, pendingJump.col, pendingJump.utf16)
 }
 
 function closeFile(message?: string) {
@@ -1017,6 +1024,9 @@ renderRecent()
 function resetForFolder(newRoot: string) {
   clearTimeout(saveTimer)
   closeFile()
+  invalidateDiagnostics()
+  compileMain = null
+  typedSent = ""
   previewing = null
   previewKind = ""
   showPreview("")
@@ -2145,7 +2155,7 @@ function showPreview(url: string) {
 }
 // The web view sits over #preview. A native view covers whatever the page floats over it, so
 // it steps aside while a dialog or menu would sit under it, and notices go to its left.
-const floating = ["ask", "new-project-ask", "setup", "ac-settings", "ck-settings", "ed-settings", "ch-settings", "inline-box", "fix-card", "rewrite-menu", "rewrite-card", "ctx-menu", "toasts", "sidebar", "chat"].map((id) => $(id))
+const floating = ["ask", "new-project-ask", "setup", "ac-settings", "ck-settings", "ed-settings", "ch-settings", "inline-box", "fix-card", "diagnostic-card", "rewrite-menu", "rewrite-card", "ctx-menu", "toasts", "sidebar", "chat"].map((id) => $(id))
 let placing = 0
 let placed = "" // the place last sent
 let bgSent = "" // the theme's preview background last sent: the web view shows it while a preview loads
@@ -2189,34 +2199,123 @@ function sendMarkdown() {
 // It goes at once, as in VS Code; tinymist takes the keys that come while it compiles together.
 let typedSent = "" // path and text last sent
 function sendTyped() {
-  if (previewKind !== "live" || !previewing?.endsWith(".typ") || !current) return
-  const key = `${current}\n${ta.value}`
+  if (!previewing || !["typst", "latex"].includes(langOf(previewing)) || !current) return
+  const key = `${previewing}\n${current}\n${diagnosticGeneration}\n${ta.value}`
   if (key === typedSent) return
   typedSent = key
-  send({ type: "typed", path: current, content: ta.value })
+  send({ type: "typed", path: current, content: ta.value, main: previewing, generation: diagnosticGeneration })
 }
+
+// ---------- compile errors: the same colored layer as suggestions, never the text field ----------
+
+let diagnosticGeneration = 0
+let compileMain: string | null = null
+let compileDiagnostics: Diagnostic[] = []
+let compileLog = ""
+const compileMarks = typeof Highlight === "function" ? new Highlight() : null
+if (compileMarks) CSS.highlights.set("compile-error", compileMarks)
+
+function invalidateDiagnostics() {
+  diagnosticGeneration++ // immediately, before the next render sends the new text
+  compileDiagnostics = []
+  compileLog = ""
+  renderDiagnostics()
+}
+
+function receiveDiagnostics(batch: DiagnosticBatch, log = "") {
+  if (!isCurrentDiagnostic(batch, root, previewing, diagnosticGeneration, current, ta.value)) return false
+  compileMain = batch.main
+  compileDiagnostics = batch.diagnostics
+  compileLog = log
+  renderDiagnostics()
+  return true
+}
+
+function jumpToDiagnostic(d = compileDiagnostics[0]) {
+  if (d?.path) goTo(d.path, d.line, d.col, true)
+}
+$("sb-errors").onclick = () => jumpToDiagnostic()
+$("compile-jump").onclick = () => jumpToDiagnostic()
+
+function renderDiagnostics() {
+  const first = compileDiagnostics[0]
+  const n = errorCount(compileDiagnostics)
+  const status = $("sb-errors") as HTMLButtonElement
+  status.hidden = !n
+  status.disabled = !first?.path
+  status.innerHTML = `${icon("error")} <span>${n} error${n === 1 ? "" : "s"}</span>`
+  status.title = first ? `${first.message} — Go to the first error` : ""
+  $("compile-banner").hidden = !first
+  if (first) {
+    const jump = $("compile-jump") as HTMLButtonElement
+    jump.textContent = first.path
+      ? `The document has an error in ${first.path} on line ${first.line + 1}: ${first.message}`
+      : first.message
+    jump.disabled = !first.path
+    jump.title = first.path ? "Go to this error" : ""
+  }
+  $("compile-log").hidden = !compileLog
+  $("compile-log-text").textContent = compileLog
+  if (!compileLog) $("compile-log").removeAttribute("open")
+  paintDiagnostics()
+}
+
+function paintDiagnostics() {
+  compileMarks?.clear()
+  for (const line of hl.querySelectorAll(".compile-error-line")) line.classList.remove("compile-error-line")
+  for (const d of compileDiagnostics.filter((d) => d.path === current).slice(0, 20)) {
+    const offsets = diagnosticRange(ta.value, d)
+    if (!offsets) continue
+    hl.children[d.line]?.classList.add("compile-error-line")
+    const from = nodeAt(offsets.from), to = nodeAt(offsets.to)
+    if (!from || !to) continue
+    const range = document.createRange()
+    range.setStart(...from)
+    range.setEnd(...to)
+    compileMarks?.add(range)
+  }
+  showDiagnosticAtCaret()
+}
+
+function showDiagnosticAtCaret() {
+  const card = $("diagnostic-card")
+  const d = document.activeElement === ta && mode === "edit" && compileDiagnostics.find((d) => d.path === current && d.line === lineOf(ta.selectionStart))
+  card.hidden = !d
+  if (!d) {
+    ta.removeAttribute("aria-describedby")
+    return
+  }
+  const html = `<strong>${esc(d.message)}</strong>${d.hints.map((h) => `<p>${esc(h)}</p>`).join("")}`
+  if (card.innerHTML !== html) card.innerHTML = html
+  ta.setAttribute("aria-describedby", "diagnostic-card")
+  floatAt(card, ta.selectionStart, ta.selectionStart)
+}
+ta.addEventListener("blur", () => { $("diagnostic-card").hidden = true })
+ta.addEventListener("keydown", (e) => { if (e.key === "Escape") $("diagnostic-card").hidden = true })
 
 // ---------- preview sync: a click in the preview shows that text; the preview follows the caret ----------
 
-let pendingJump: { path: string; line: number; col: number } | null = null
+let pendingJump: { path: string; line: number; col: number; utf16?: boolean } | null = null
 let followed = "" // the caret line the preview last scrolled to
 let followTimer = 0
 
 // tinymist counts columns in characters; the text field counts UTF-16 units.
-function goTo(path: string, line: number, col: number) {
+function goTo(path: string, line: number, col: number, utf16 = false) {
   if (path !== current) {
-    pendingJump = { path, line, col }
+    pendingJump = { path, line, col, utf16 }
     leaveCurrent().then((ok) => ok && send({ type: "open_file", path }))
     return
   }
   pendingJump = null
   if (mode === "review") setMode("edit")
   const l = Math.min(line, lineStarts.length - 1)
-  const pos = lineStarts[l] + [...ta.value.slice(lineStarts[l], lineStarts[l + 1] ?? ta.value.length)].slice(0, col).join("").length
+  const text = lineText(l)
+  const pos = lineStarts[l] + (utf16 ? Math.min(col, text.length) : [...text].slice(0, col).join("").length)
   ta.focus({ preventScroll: true })
   ta.setSelectionRange(pos, pos)
   const div = hl.children[l] as HTMLElement | undefined
   if (div) ta.scrollTop = Math.max(0, div.offsetTop - ta.clientHeight / 3)
+  showDiagnosticAtCaret()
 }
 
 function followCaret() {
@@ -2369,6 +2468,12 @@ function onMessage(msg: any) {
       renderReviewStatus()
       break
     case "preview": {
+      if (compileMain !== msg.path) {
+        compileDiagnostics = []
+        compileLog = ""
+        compileMain = msg.path
+        renderDiagnostics()
+      }
       previewing = msg.path
       previewKind = msg.kind
       $("preview-name").textContent = `Preview ${baseName(msg.path)}`
@@ -2380,9 +2485,21 @@ function onMessage(msg: any) {
       sendTyped()
       break
     }
-    case "build":
-      if (["pdf", "docx", "html"].includes(previewKind)) toPreview(msg) // the viewer reloads, or shows the error
+    case "diagnostics":
+      receiveDiagnostics(msg)
       break
+    case "build": {
+      if (msg.main && (msg.root !== root || msg.main !== previewing)) break
+      if (Array.isArray(msg.diagnostics)) {
+        if (!msg.ok && !msg.diagnostics.length) msg.diagnostics = [{ path: null, line: 0, col: 0, end_line: 0, end_col: 0,
+          message: "LaTeX could not compile this document. Show log has the details; Check Setup can check your TeX installation.", hints: [] }]
+        if (!receiveDiagnostics(msg, msg.log ?? "")) break
+        // The main page shows the readable error and offers the log on request.
+        if (previewKind === "pdf") toPreview({ ...msg, log: "", structured: true })
+        else toPreview(msg)
+      } else if (["pdf", "docx", "html"].includes(previewKind)) toPreview(msg)
+      break
+    }
     case "exporting":
       exporting = toast(`Exporting ${msg.name}…`, "info")
       break
@@ -2397,6 +2514,7 @@ function onMessage(msg: any) {
       }
       break
     case "renamed": {
+      invalidateDiagnostics()
       const move = (p: string) => (within(p, msg.from) ? msg.to + p.slice(msg.from.length) : p)
       if (current && within(current, msg.from)) {
         current = move(current)
@@ -2417,16 +2535,19 @@ function onMessage(msg: any) {
         $("preview-name").textContent = `Preview ${baseName(previewing)}`
         requestPreview(previewing)
       }
+      sendTyped()
       renderTree()
       break
     }
     case "deleted":
+      invalidateDiagnostics()
       if (current && within(current, msg.path)) closeFile(`${baseName(msg.path)} was moved to the Trash.`)
       if (previewing && within(previewing, msg.path)) {
         previewing = null
         showPreview("")
       }
       if (selected && within(selected, msg.path)) selected = null
+      sendTyped()
       renderTree()
       break
     case "agent":

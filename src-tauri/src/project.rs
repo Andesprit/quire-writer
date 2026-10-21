@@ -451,6 +451,7 @@ impl Workspace {
         for k in moved {
             self.unshadow(&k);
         }
+        self.typed_text.retain(|path, _| path != rel && !path.starts_with(&under));
         move_keys(&mut self.known, rel, to);
         move_keys(&mut self.baseline, rel, to);
         for d in self.checkpoints.values_mut() {
@@ -2455,6 +2456,10 @@ mod tests {
         assert_eq!(rx.try_recv().unwrap(), json!({"event": "removeMemoryFiles", "files": [&file]}).to_string());
         w.external("a.typ", "agent again".into());
         assert!(rx.try_recv().is_err()); // it already does
+        w.control = None; // Word/HTML previews still have a diagnostic overlay.
+        w.typed("a.typ", "unsaved").unwrap();
+        w.forget("a.typ", Some("renamed.typ"));
+        assert!(!w.typed_text.contains_key("a.typ"), "a renamed file must not survive in the diagnostic overlay");
     }
 
     #[test]

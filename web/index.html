@@ -161,6 +161,11 @@
           <button class="icon-btn" id="export-preview"><i class="codicon codicon-export"></i></button>
         </div>
       </div>
+      <div id="compile-banner" role="status" aria-live="polite" hidden>
+        <button type="button" id="compile-jump"></button>
+        <p>The preview shows the last version that compiled.</p>
+        <details id="compile-log" hidden><summary>Show log</summary><pre id="compile-log-text"></pre></details>
+      </div>
       <div id="preview"></div><!-- the preview's own web view sits over it -->
       <div id="preview-empty" class="empty-pane center"><p class="muted">The preview appears when you open a Typst, LaTeX, Quarto or Markdown file.</p></div>
     </section>
@@ -195,6 +200,7 @@
     <footer id="statusbar">
       <button class="item" id="sb-agent" title="Open chat"><i class="codicon codicon-hubot"></i> <span>No agent</span></button>
       <button class="item" id="sb-review" hidden title="Go to the next change"><i class="codicon codicon-diff"></i> <span id="sb-review-text"></span></button>
+      <button class="item" id="sb-errors" hidden title="Go to the first error"></button>
       <span class="spacer"></span>
       <span class="item" id="sb-pos"></span>
       <span class="item" id="sb-words"></span>
@@ -206,6 +212,7 @@
     </footer>
   </div>
 
+  <div id="diagnostic-card" role="note" hidden></div>
   <div id="inline-box" hidden>
     <div class="inline-row">
       <i class="codicon codicon-sparkle" id="inline-icon"></i>
