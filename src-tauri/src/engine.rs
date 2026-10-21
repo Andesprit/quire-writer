@@ -2,16 +2,18 @@
 //! It stays warm from one build to the next: the fonts are found once, and a change compiles
 //! again from what the last build already worked out. The live preview is tinymist's.
 
+use std::collections::{BTreeMap, HashMap};
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::sync::{LazyLock, Mutex};
 
+use serde_json::{json, Value};
 use typst::diag::{FileResult, SourceDiagnostic};
 use typst::foundations::{Bytes, Datetime, Duration};
 use typst::syntax::{FileId, RootedPath, Source, VirtualPath, VirtualRoot};
 use typst::text::{Font, FontBook};
 use typst::utils::LazyHash;
-use typst::{Feature, Library, LibraryExt, World};
+use typst::{Feature, Library, LibraryExt, World, WorldExt};
 use typst_html::{HtmlDocument, HtmlOptions};
 use typst_kit::datetime::Time;
 use typst_kit::diagnostics::{emit, termcolor::NoColor, DiagnosticFormat, DiagnosticWorld};
@@ -41,6 +43,7 @@ struct Project {
     library: LazyHash<Library>,
     files: FileStore<SystemFiles>,
     time: Time,
+    typed: HashMap<FileId, Source>,
 }
 
 impl World for Project {
@@ -57,11 +60,11 @@ impl World for Project {
     }
 
     fn source(&self, id: FileId) -> FileResult<Source> {
-        self.files.source(id)
+        self.typed.get(&id).cloned().map(Ok).unwrap_or_else(|| self.files.source(id))
     }
 
     fn file(&self, id: FileId) -> FileResult<Bytes> {
-        self.files.file(id)
+        self.typed.get(&id).map(|s| Ok(Bytes::new(s.text().as_bytes().to_vec()))).unwrap_or_else(|| self.files.file(id))
     }
 
     fn font(&self, index: usize) -> Option<Font> {
@@ -98,46 +101,119 @@ pub async fn build(file: &Path, root: &Path, out: &Path) -> Result<(), String> {
     rx.await.unwrap_or_else(|_| Err("Typst stopped while compiling this document.".into()))
 }
 
-fn compile(file: &Path, root: &Path, out: &Path) -> Result<(), String> {
+/// Reuse fonts, library and compile caches for diagnostics and exports. An export always
+/// clears the memory overlay: only the writer's saved files belong in an exported document.
+fn with_project<T>(file: &Path, root: &Path, typed: &BTreeMap<String, String>, run: impl FnOnce(&Project) -> T) -> Result<T, String> {
     let main = VirtualPath::virtualize(root, file).map_err(|e| e.to_string())?;
     let main = RootedPath::new(VirtualRoot::Project, main).intern();
-    // Held until the build ends: one build at a time, each from where the last one left off.
     let mut last = lock(&LAST);
     let mut project = match last.take() {
         Some(mut p) if p.root == root => {
-            p.files.reset(); // read the files again; the ones unchanged compile from memory
+            p.files.reset();
             p.time.reset();
             p
         }
         _ => {
             let packages = SystemPackages::new(SystemDownloader::new(concat!("quire/", env!("CARGO_PKG_VERSION"))));
             Project {
-                root: root.into(),
-                main,
+                root: root.into(), main,
                 library: LazyHash::new(Library::builder().with_features([Feature::Html].into_iter().collect()).build()),
                 files: FileStore::new(SystemFiles::new(FsRoot::new(root.into()), packages)),
                 time: Time::system(),
+                typed: HashMap::new(),
             }
         }
     };
     project.main = main;
-    let made = if out.extension().is_some_and(|e| e == "pdf") {
-        typst::compile::<PagedDocument>(&project).output.and_then(|doc| typst_pdf::pdf(&doc, &PdfOptions::default()))
-    } else {
-        let html = typst::compile::<HtmlDocument>(&project).output;
-        html.and_then(|doc| typst_html::html(&doc, &HtmlOptions { pretty: false })).map(String::into_bytes)
-    };
-    typst::comemo::evict(10); // keep what the last builds worked out, not every build's
-    let result = match made {
-        Ok(bytes) => fs::write(out, bytes).map_err(|e| e.to_string()),
-        Err(errors) => Err(describe(&project, &errors)),
-    };
+    project.typed = typed.iter().filter_map(|(path, text)| {
+        let path = VirtualPath::virtualize(root, &root.join(path)).ok()?;
+        let id = RootedPath::new(VirtualRoot::Project, path).intern();
+        Some((id, Source::new(id, text.clone())))
+    }).collect();
+    let result = run(&project);
+    typst::comemo::evict(10);
     *last = Some(project);
-    result
+    Ok(result)
+}
+
+pub fn warm(file: &Path, root: &Path) {
+    let _ = with_project(file, root, &BTreeMap::new(), |_| { let _ = FONTS.book(); });
+}
+
+/// Structured errors for the source as typed. Positions are zero-based UTF-16, as in a
+/// textarea; package errors retain their message but cannot jump outside the project.
+pub fn diagnostics(file: &Path, root: &Path, typed: &BTreeMap<String, String>) -> Result<Vec<Value>, String> {
+    with_project(file, root, typed, |project| {
+        typst::compile::<PagedDocument>(project).output.err().unwrap_or_default().iter().map(|e| {
+            let source = e.span.id().and_then(|id| project.source(id).ok());
+            let range = project.range(e.span);
+            let position = |at: usize| {
+                let text = source.as_ref().map_or("", |s| s.text());
+                let prefix = &text[..at.min(text.len())];
+                (prefix.bytes().filter(|b| *b == b'\n').count(), prefix.rsplit('\n').next().unwrap_or("").encode_utf16().count())
+            };
+            let (line, col) = position(range.as_ref().map_or(0, |r| r.start));
+            let (end_line, end_col) = position(range.as_ref().map_or(0, |r| r.end));
+            let path = e.span.id().and_then(|id| matches!(id.get().root(), VirtualRoot::Project).then(|| project.name(id)));
+            json!({"path": path, "line": line, "col": col, "end_line": end_line, "end_col": end_col,
+                "message": e.message.as_str(), "hints": e.hints.iter().map(|h| h.v.as_str()).collect::<Vec<_>>()})
+        }).collect()
+    })
+}
+
+fn compile(file: &Path, root: &Path, out: &Path) -> Result<(), String> {
+    with_project(file, root, &BTreeMap::new(), |project| {
+        let made = if out.extension().is_some_and(|e| e == "pdf") {
+            typst::compile::<PagedDocument>(project).output.and_then(|doc| typst_pdf::pdf(&doc, &PdfOptions::default()))
+        } else {
+            typst::compile::<HtmlDocument>(project).output
+                .and_then(|doc| typst_html::html(&doc, &HtmlOptions { pretty: false })).map(String::into_bytes)
+        };
+        match made {
+            Ok(bytes) => fs::write(out, bytes).map_err(|e| e.to_string()),
+            Err(errors) => Err(describe(project, &errors)),
+        }
+    })?
 }
 
 fn describe(project: &Project, errors: &[SourceDiagnostic]) -> String {
     let mut text = NoColor::new(Vec::new());
     let _ = emit(&mut text, project, errors, DiagnosticFormat::Human);
     String::from_utf8_lossy(&text.into_inner()).into_owned()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::collections::BTreeMap;
+
+    #[test]
+    fn unsaved_diagnostics_and_utf16_positions() {
+        let root = std::env::temp_dir().join(format!("quire-diagnostics-{}", std::process::id()));
+        fs::create_dir_all(&root).unwrap();
+        let file = root.join("main.typ");
+        let original = include_str!("../../sample/main.typ");
+        fs::write(&file, original).unwrap();
+        let broken = original.replacen("== Fermentation", "#let x = (\n#foo(bar\n== Fermentation", 1);
+        let errors = diagnostics(&file, &root, &BTreeMap::from([("main.typ".into(), broken)])).unwrap();
+        assert_eq!(errors[0]["path"], "main.typ");
+        assert_eq!(errors[0]["line"], 8); // zero-based on the wire
+        assert_eq!(errors[0]["col"], 9);
+        assert_eq!(errors[0]["message"], "unclosed delimiter");
+        assert!(errors.iter().any(|d| d["hints"].as_array().is_some_and(|h| !h.is_empty())));
+        assert_eq!(fs::read_to_string(&file).unwrap(), original, "diagnostics never save typed text");
+        let unicode = "🍞 café #foo()\n";
+        let errors = diagnostics(&file, &root, &BTreeMap::from([("main.typ".into(), unicode.into())])).unwrap();
+        assert_eq!(errors[0]["col"], "🍞 café #".encode_utf16().count());
+        assert_eq!(errors[0]["message"], "unknown variable: foo");
+        assert!(diagnostics(&file, &root, &BTreeMap::new()).unwrap().is_empty(), "fixed disk source replaces the overlay");
+        fs::write(root.join("chapter.typ"), "Chapter\n").unwrap();
+        let errors = diagnostics(&file, &root, &BTreeMap::from([
+            ("main.typ".into(), "#include \"chapter.typ\"".into()),
+            ("chapter.typ".into(), "#missing()".into()),
+        ])).unwrap();
+        assert_eq!(errors[0]["path"], "chapter.typ");
+        assert_eq!(errors[0]["message"], "unknown variable: missing");
+        fs::remove_dir_all(root).unwrap();
+    }
 }

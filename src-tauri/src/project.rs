@@ -307,6 +307,49 @@ pub struct Workspace {
     preview_id: u64, // which preview is the current one
     asked: u64,      // the newest preview the page asked for: an older request that finishes later must not replace it
     built: Option<Built>,
+    typed_text: BTreeMap<String, String>,
+    typed_generation: u64,
+    diagnostic_tx: Option<tokio::sync::watch::Sender<DiagnosticInput>>,
+}
+
+#[derive(Clone)]
+struct DiagnosticInput {
+    root: PathBuf,
+    main: PathBuf,
+    text: BTreeMap<String, String>,
+    generation: u64,
+}
+
+/// One compile at a time; changes during a compile replace the pending text, not queue it.
+async fn diagnose(mut rx: tokio::sync::watch::Receiver<DiagnosticInput>) {
+    loop {
+        let input = rx.borrow_and_update().clone();
+        tokio::select! {
+            _ = tokio::time::sleep(Duration::from_millis(300)) => {},
+            changed = rx.changed() => { if changed.is_err() { break } else { continue } },
+        }
+        if rx.has_changed().unwrap_or(true) { continue }
+        let snapshot = input.clone();
+        let result = tokio::task::spawn_blocking(move || {
+            // Match exports' stack allowance for deeply nested Typst documents.
+            std::thread::Builder::new().stack_size(32 << 20).spawn(move || {
+                engine::diagnostics(&snapshot.main, &snapshot.root, &snapshot.text)
+            }).map_err(|e| e.to_string())?.join().map_err(|_| "Typst stopped while checking this document.".to_string())?
+        }).await;
+        if !rx.has_changed().unwrap_or(true) {
+            let errors = result.ok().and_then(Result::ok).unwrap_or_else(|| vec![json!({
+                "path": null, "line": 0, "col": 0, "end_line": 0, "end_col": 0,
+                "message": "Quire could not check this document. Try reopening the project.", "hints": []
+            })]);
+            let w = ws();
+            if w.root.as_ref() == Some(&input.root) && !rx.has_changed().unwrap_or(true) {
+                send(json!({"type": "diagnostics", "root": page(&input.root),
+                    "main": page(input.main.strip_prefix(&input.root).unwrap()),
+                    "generation": input.generation, "diagnostics": errors}));
+            }
+        }
+        if rx.changed().await.is_err() { break }
+    }
 }
 
 /// A preview the app builds itself on every change: the document as the export makes it,
@@ -486,6 +529,7 @@ impl Workspace {
             return Err(format!("Not a folder: {root}"));
         }
         self.root = Some(dir.clone());
+        self.typed_text.clear();
         self.known = self.files()?.into_iter().filter_map(|rel| Some((rel.clone(), self.read(&rel)?))).collect();
         self.baseline.clear();
         self.checkpoints.clear(); // `turn` goes on counting: the chat keeps the old folder's turns
@@ -493,7 +537,11 @@ impl Workspace {
         if let Some((_, task)) = self.watcher.take() {
             task.abort();
         }
-        self.watcher = Some(watch(dir)?);
+        self.watcher = Some(watch(dir.clone())?);
+        if let Some(main) = self.known.keys().find(|p| p.ends_with(".typ")) {
+            let main = dir.join(main);
+            tokio::task::spawn_blocking(move || engine::warm(&main, &dir));
+        }
         send(self.state());
         Ok(())
     }
@@ -596,6 +644,10 @@ impl Workspace {
                 }
             }
         }
+        if let Some(tx) = &self.diagnostic_tx {
+            let main = page(tx.borrow().main.strip_prefix(root).unwrap());
+            let _ = self.queue_diagnostics(&main, self.typed_generation);
+        }
         send(self.state());
         build
     }
@@ -615,6 +667,7 @@ impl Workspace {
         }
         (self.control, self.preview_shown, self.built) = (None, false, None);
         self.shadowed.clear();
+        self.diagnostic_tx = None;
         self.preview_id += 1;
         self.preview_id
     }
@@ -695,16 +748,32 @@ impl Workspace {
     /// The editor's text of a Typst file: the live preview shows it as typed, before auto save
     /// writes it, and keeps showing it until the file changes on disk some other way.
     fn typed(&mut self, rel: &str, content: &str) -> Result<(), String> {
+        let file = self.path(rel)?.to_string_lossy().into_owned();
+        self.typed_text.insert(rel.into(), content.into());
         if let Some(control) = &self.control {
-            let file = self.path(rel)?.to_string_lossy().into_owned();
             let _ = control.send(json!({"event": "updateMemoryFiles", "files": {file: content}}).to_string());
             self.shadowed.insert(rel.into());
         }
         Ok(())
     }
 
+    fn queue_diagnostics(&mut self, main: &str, generation: u64) -> Result<(), String> {
+        self.typed_generation = generation;
+        if lang_of(main) != Lang::Typst { return Ok(()) }
+        let input = DiagnosticInput { root: self.root()?.into(), main: self.path(main)?, text: self.typed_text.clone(), generation };
+        if let Some(tx) = &self.diagnostic_tx {
+            tx.send_replace(input);
+        } else {
+            let (tx, rx) = tokio::sync::watch::channel(input);
+            self.diagnostic_tx = Some(tx);
+            tokio::spawn(diagnose(rx));
+        }
+        Ok(())
+    }
+
     /// The live preview reads `rel` from the disk again.
     fn unshadow(&mut self, rel: &str) {
+        self.typed_text.remove(rel);
         if !self.shadowed.remove(rel) {
             return;
         }
@@ -946,11 +1015,21 @@ fn compile() {
     tokio::spawn(async move {
         loop {
             send(json!({"type": "build", "running": true}));
-            match convert(&file, &root, to, bib.clone(), &out).await {
-                Ok(()) => send(json!({"type": "build", "ok": true})),
-                Err(log) => send(json!({"type": "build", "ok": false, "log": log})),
-            }
+            let (generation, sources) = {
+                let w = ws();
+                (w.typed_generation, w.known.iter().filter(|(p, _)| p.ends_with(".tex")).map(|(p, s)| (p.clone(), s.clone())).collect::<BTreeMap<_, _>>())
+            };
+            let result = convert(&file, &root, to, bib.clone(), &out).await;
             let mut w = ws();
+            if w.built.as_ref().is_some_and(|b| b.id == id && !b.again) && w.typed_generation == generation {
+                let mut message = json!({"type": "build", "ok": result.is_ok(), "root": page(&root),
+                    "main": page(file.strip_prefix(&root).unwrap()), "generation": generation, "sources": sources});
+                if lang_of(&page(&file)) == Lang::Latex {
+                    message["diagnostics"] = json!(result.as_ref().err().map_or_else(Vec::new, |log| latex_diagnostics(log, &file, &root)));
+                }
+                if let Err(log) = result { message["log"] = log.into(); }
+                send(message);
+            }
             match &mut w.built {
                 Some(l) if l.id == id && l.again => l.again = false,
                 Some(l) if l.id == id => {
@@ -1428,6 +1507,26 @@ fn open_agent_setup(fix: &str) -> Result<(), String> {
     send(json!({"type": "setup_run", "id": "agent", "text": "A terminal window opened: finish the setup there, then come back."}));
     send(json!({"type": "setup_run_done", "id": "agent", "ok": true, "external": true}));
     Ok(())
+}
+
+/// TeX is run from the main file's directory. Accept only locations inside the project.
+fn latex_diagnostics(log: &str, main: &Path, root: &Path) -> Vec<Value> {
+    static LOCATION: LazyLock<Regex> = LazyLock::new(|| re(r"(?m)^(?:error:\s*)?(.+?\.(?:tex|sty|cls)):(\d+):\s*(.+)$"));
+    let mut seen = BTreeSet::new();
+    LOCATION.captures_iter(log).filter_map(|c| {
+        let file = resolve(&main.parent()?.join(c[1].trim()));
+        let path = page(file.strip_prefix(root).ok()?);
+        let line = c[2].parse::<usize>().ok()?.checked_sub(1)?;
+        if !seen.insert((path.clone(), line)) { return None }
+        let (message, hint) = match c[3].trim().trim_end_matches('.') {
+            "Undefined control sequence" => ("Unknown LaTeX command.", "Check the command's spelling and whether its package is loaded."),
+            "Missing $ inserted" => ("Math needs matching $ signs.", "Check that each math expression starts and ends with $."),
+            "Missing } inserted" => ("A closing brace is missing.", "Check the braces near this line."),
+            other => (other, "Check this line and the code just before it; Show log has the compiler's details."),
+        };
+        Some(json!({"path": path, "line": line, "col": 0, "end_line": line, "end_col": usize::MAX,
+            "message": message, "hints": [hint]}))
+    }).collect()
 }
 
 /// Compile with the writer's own TeX: latexmk (MacTeX, TeX Live) or else Tectonic. On failure,
@@ -2088,7 +2187,11 @@ async fn handle(msg: &Value) -> Result<(), String> {
             send(json!({"type": "file", "path": rel, "content": content, "baseline": w.baseline.get(rel)}));
         }
         "save" => ws().save(f("path")?, f("content")?, opt("baseline").map(String::from))?,
-        "typed" => ws().typed(f("path")?, f("content")?)?,
+        "typed" => {
+            let mut w = ws();
+            w.typed(f("path")?, f("content")?)?;
+            if let Some(main) = opt("main") { w.queue_diagnostics(main, msg["generation"].as_u64().unwrap_or(0))?; }
+        },
         "review" => {
             // Review decisions (accept/reject) while the text itself is not saved yet.
             let mut w = ws();
@@ -2536,6 +2639,23 @@ mod tests {
         }
         let _ = fs::remove_dir_all(&dir);
     }
+
+    #[test]
+    fn latex_diagnostics_find_project_files_and_lines() {
+        let root = resolve(&std::env::temp_dir().join("quire-latex-diagnostic-root"));
+        let main = root.join("latex/main.tex");
+        let errors = latex_diagnostics("error: main.tex:7: Undefined control sequence\nmain.tex:7: Undefined control sequence", &main, &root);
+        assert_eq!(errors.len(), 1, "duplicate log lines collapse");
+        assert_eq!(errors[0]["path"], "latex/main.tex");
+        assert_eq!(errors[0]["line"], 6);
+        assert!(errors[0]["message"].as_str().unwrap().contains("Unknown LaTeX command"));
+        let errors = latex_diagnostics("./chapters/intro.tex:12: Missing $ inserted.", &main, &root);
+        assert_eq!(errors[0]["path"], "latex/chapters/intro.tex");
+        assert_eq!(errors[0]["line"], 11);
+        assert!(latex_diagnostics("../../outside.tex:3: Error", &main, &root).is_empty(), "never jump outside the project");
+        assert!(latex_diagnostics("main.tex:0: Error", &main, &root).is_empty());
+    }
+
 }
 
 #[cfg(all(test, windows))]
