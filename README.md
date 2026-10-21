@@ -64,6 +64,9 @@ autocomplete, your own agent, Grammarly, themes, and how Quire compares with VS 
   Markdown preview, set the text in a book face with clean headings, tinted tables, quotes
   and code. Quarto documents keep Quarto's look and their own settings.
 - Explorer: new file, new folder, rename (F2), delete (moves to the macOS Trash), right-click menu.
+- Find in the open file: Cmd+F (or the search button), Enter / Shift+Enter and Cmd+G /
+  Cmd+Shift+G to move between matches. Match case or whole words; Cmd+Option+F opens
+  Replace and Replace All. Escape returns to the text.
 - Saving: auto save (default) or manual with Cmd+S; switch in the status bar. With auto save
   off, a dot marks unsaved changes and the app asks before closing them.
 - Formatting bar: headings, bold, italic, math, lists, links, citations, footnotes, figures,

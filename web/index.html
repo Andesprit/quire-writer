@@ -63,6 +63,7 @@
           <span class="tab-dirty" title="Unsaved changes (Cmd+S to save)"></span>
         </div>
         <div class="tab-actions">
+          <button class="icon-btn" id="open-find" title="Find in file (Cmd+F)" aria-label="Find in file" disabled><i class="codicon codicon-search"></i></button>
           <button class="icon-btn" id="export" title="Export as PDF, Word and more" aria-haspopup="menu"><i class="codicon codicon-export"></i></button>
           <button class="icon-btn" id="open-preview-side" title="Toggle preview (Cmd+\)"><i class="codicon codicon-open-preview"></i></button>
         </div>
@@ -70,6 +71,29 @@
       <div class="format-bar" id="format-bar" role="toolbar" aria-label="Formatting"></div>
       <div class="breadcrumbs" id="breadcrumbs"></div>
       <div id="editor-wrap">
+        <div id="find-box" role="search" aria-label="Find and replace in file" hidden>
+          <div class="find-row">
+            <button class="icon-btn" id="find-toggle-replace" title="Toggle replace (Cmd+Option+F)" aria-label="Toggle replace" aria-expanded="false"><i class="codicon codicon-chevron-right"></i></button>
+            <div class="find-field">
+              <input id="find-query" aria-label="Find" placeholder="Find" spellcheck="false" autocomplete="off" aria-describedby="find-count" />
+              <div class="find-options">
+                <button id="find-case" title="Match case" aria-label="Match case" aria-pressed="false">Aa</button>
+                <button id="find-word" title="Match whole word" aria-label="Match whole word" aria-pressed="false"><u>ab</u></button>
+              </div>
+            </div>
+            <div class="find-navigation">
+              <span id="find-count" role="status" aria-live="polite" aria-atomic="true"></span>
+              <button class="icon-btn" id="find-prev" title="Previous match (Shift+Enter)" aria-label="Previous match"><i class="codicon codicon-arrow-up"></i></button>
+              <button class="icon-btn" id="find-next" title="Next match (Enter)" aria-label="Next match"><i class="codicon codicon-arrow-down"></i></button>
+              <button class="icon-btn" id="find-close" title="Close find (Escape)" aria-label="Close find"><i class="codicon codicon-close"></i></button>
+            </div>
+          </div>
+          <div class="find-row" id="find-replace-row" hidden>
+            <input id="find-replacement" aria-label="Replace with" placeholder="Replace with" spellcheck="false" autocomplete="off" />
+            <button class="btn secondary sm" id="find-replace-one" title="Replace current match">Replace</button>
+            <button class="btn secondary sm" id="find-replace-all" title="Replace all matches">Replace All</button>
+          </div>
+        </div>
         <div id="editor">
           <div class="layer behind" id="hl" aria-hidden="true"></div>
           <textarea class="layer front" id="text" spellcheck="true" autocapitalize="sentences" aria-label="Document text"></textarea>

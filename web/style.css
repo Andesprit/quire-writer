@@ -439,6 +439,25 @@ body.resizing { cursor: ew-resize; user-select: none; }
 #editor-wrap { position: relative; flex: 1; min-height: 0; --gutter: 64px; }
 #editor { position: absolute; inset: 0; }
 
+#find-box { position: absolute; z-index: 12; top: 0; right: 16px; width: 440px; max-width: calc(100% - 16px); padding: 6px; border: 1px solid var(--widget-border); border-top: 2px solid var(--focus); border-radius: 0 0 4px 4px; color: var(--fg); background: var(--widget); box-shadow: var(--shadow); }
+.find-row { display: flex; flex-wrap: wrap; align-items: center; gap: 4px; }
+.find-navigation { display: flex; align-items: center; gap: 4px; margin-left: auto; }
+.find-row + .find-row { margin: 6px 0 0 24px; }
+.find-field { position: relative; flex: 1; min-width: 100px; }
+#find-box input { width: 100%; min-width: 0; height: 28px; padding: 3px 6px; color: var(--fg); background: var(--input); border: 1px solid var(--input-border); border-radius: 2px; font: 13px var(--ui); }
+#find-box #find-query { padding-right: 52px; }
+#find-box input:focus { outline: 1px solid var(--focus); outline-offset: -1px; }
+.find-options { position: absolute; right: 3px; top: 3px; display: flex; gap: 2px; }
+.find-options button { width: 22px; height: 22px; border: 1px solid transparent; border-radius: 2px; padding: 0; font: 12px var(--ui); color: var(--fg); background: transparent; cursor: pointer; }
+.find-options button:hover { background: var(--hover); }
+.find-options button[aria-pressed="true"] { border-color: var(--focus); background: color-mix(in srgb, var(--focus) 25%, var(--input)); }
+#find-box .icon-btn { flex: none; width: 22px; height: 26px; }
+#find-count { flex: none; min-width: 58px; text-align: center; font-size: 11px; color: var(--muted); white-space: nowrap; }
+#find-replacement { flex: 1; }
+#find-box .btn { flex: none; white-space: nowrap; }
+::highlight(find-match) { background-color: color-mix(in srgb, var(--warn) 35%, transparent); }
+::highlight(find-current) { background-color: color-mix(in srgb, var(--focus) 50%, transparent); }
+
 /* The editor is a plain text field (Grammarly works on it) over a colored copy of its text.
    Both layers must share every metric below, or the colors drift from the letters. */
 .layer {

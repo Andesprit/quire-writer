@@ -6,6 +6,7 @@ import "@fontsource/ia-writer-quattro/700-italic.css"
 import { Chunk } from "@codemirror/merge"
 import { highlightHTML, highlightLine, langOf, startState, sameState, type Lang, type State } from "./highlight"
 import { diagnosticRange, errorCount, isCurrentDiagnostic, type Diagnostic, type DiagnosticBatch } from "./diagnostics"
+import { findMatches, replacementEdit, type Match } from "./find"
 import { diff, minimalChange, rebase, type Diff } from "./merge"
 import { $, ask, esc, fileIcon, icon, toast } from "./ui"
 import { FORMAT_KEYS, buildFormatBar, connectEditor, insertAt, select, setHeading, syntaxOf } from "./format"
@@ -268,6 +269,7 @@ function render() {
   placeGhost()
   paintIssues()
   paintDiagnostics()
+  queueFindPaint()
   scheduleCheck()
   if (previewKind === "markdown") sendMarkdown()
   sendTyped()
@@ -314,6 +316,7 @@ ta.addEventListener("input", (e) => {
   menu.hidden = true
   scheduleRender()
   if (!fromDisk) scheduleSave()
+  scheduleFind()
   if (!programmatic) {
     lastTyped = Date.now()
     if ((e as InputEvent).inputType?.startsWith("insert")) scheduleComplete()
@@ -321,6 +324,7 @@ ta.addEventListener("input", (e) => {
 })
 ta.addEventListener("scroll", () => {
   hl.scrollTop = ta.scrollTop
+  queueFindPaint()
   showDiagnosticAtCaret()
   closeCard()
   menu.hidden = true
@@ -487,6 +491,7 @@ function applyContent(content: string, base: string | null, c = minimalChange(ta
 // The open file changes: nothing meant for the old one (a suggestion, an edit or a citation
 // on its way, a disk conflict) may land in the new one.
 function dropFileState() {
+  closeFind(false)
   clearGhost()
   closeCard()
   $("diagnostic-card").hidden = true
@@ -549,6 +554,7 @@ function setMode(m: "edit" | "review") {
   rv.hidden = m !== "review"
   for (const c of $("format-bar").querySelectorAll<HTMLButtonElement | HTMLSelectElement>("button, select")) c.disabled = m === "review"
   if (m === "review") {
+    closeFind(false)
     clearGhost()
     renderReview()
   }
@@ -1039,6 +1045,7 @@ function resetForFolder(newRoot: string) {
 
 function renderTab() {
   const has = !!current
+  $<HTMLButtonElement>("open-find").disabled = !has
   $("tab").hidden = !has
   $("welcome").hidden = has
   // No project yet: the start page in place of the watermark, and no preview next to it.
@@ -1805,6 +1812,7 @@ let menuTimer = 0
 function scheduleMenu() {
   clearTimeout(menuTimer)
   menu.hidden = true
+  if (!findBox.hidden) return
   menuTimer = window.setTimeout(placeMenu, 250)
 }
 
@@ -1938,6 +1946,188 @@ function nodeAt(pos: number): [Node, number] | null {
   }
   return null
 }
+
+// ---------- find and replace: native textarea selection and undo, mirrored highlights ----------
+
+const findBox = $("find-box")
+const findQuery = $<HTMLInputElement>("find-query")
+const findReplacement = $<HTMLInputElement>("find-replacement")
+let findList: Match[] = []
+let findIndex = -1
+let findSource = ""
+let findTimer = 0
+let findPaintQueued = false
+const findMarks = typeof Highlight === "function" ? new Highlight() : null
+const findCurrent = typeof Highlight === "function" ? new Highlight() : null
+if (findMarks && findCurrent) {
+  CSS.highlights.set("find-match", findMarks)
+  CSS.highlights.set("find-current", findCurrent)
+}
+
+function findCount() {
+  const n = findList.length
+  $("find-count").textContent = !findQuery.value ? "" : n ? `${findIndex + 1} of ${n > 1000 ? "1000+" : n}` : "No results"
+  $("find-count").title = n ? `${n.toLocaleString()} matches` : ""
+  for (const id of ["find-prev", "find-next", "find-replace-one", "find-replace-all"]) $<HTMLButtonElement>(id).disabled = !n
+}
+
+function refreshFind(selectMatch = false, at = ta.selectionStart) {
+  clearTimeout(findTimer)
+  findTimer = 0
+  if (findBox.hidden) return
+  findSource = ta.value
+  findList = findMatches(findSource, findQuery.value, $("find-case").getAttribute("aria-pressed") === "true", $("find-word").getAttribute("aria-pressed") === "true")
+  findIndex = findList.findIndex((m) => m.from >= at)
+  if (findIndex < 0 && findList.length) findIndex = 0
+  findCount()
+  if (selectMatch) selectFind(findIndex)
+  queueFindPaint()
+}
+
+function scheduleFind(selectMatch = false) {
+  if (findBox.hidden) return
+  clearTimeout(findTimer)
+  findTimer = window.setTimeout(() => refreshFind(selectMatch), 150)
+}
+
+function queueFindPaint() {
+  if (findBox.hidden || findPaintQueued) return
+  findPaintQueued = true
+  requestAnimationFrame(() => { findPaintQueued = false; paintFind() })
+}
+
+function paintFind() {
+  // Keep the last result until the new match list is ready; typing never builds ranges.
+  if (findBox.hidden || findSource !== ta.value) return
+  const top = ta.scrollTop - ta.clientHeight / 2, bottom = ta.scrollTop + ta.clientHeight * 1.5
+  const firstVisible = (y: number) => {
+    let lo = 0, hi = hl.children.length
+    while (lo < hi) {
+      const mid = (lo + hi) >> 1
+      const line = hl.children[mid] as HTMLElement
+      if (line.offsetTop + line.offsetHeight < y) lo = mid + 1
+      else hi = mid
+    }
+    return lo
+  }
+  const from = lineStarts[firstVisible(top)] ?? findSource.length
+  const to = lineStarts[firstVisible(bottom) + 1] ?? findSource.length
+  findMarks?.clear()
+  findCurrent?.clear()
+  const addRange = (m: Match, target: Highlight | null) => {
+    if (!target) return
+    const start = nodeAt(m.from), end = nodeAt(m.to)
+    if (!start || !end) return
+    const r = document.createRange()
+    r.setStart(...start)
+    r.setEnd(...end)
+    target.add(r)
+  }
+  let lo = 0, hi = findList.length
+  while (lo < hi) {
+    const mid = (lo + hi) >> 1
+    if (findList[mid].to < from) lo = mid + 1
+    else hi = mid
+  }
+  let painted = 0
+  for (let i = lo; i < findList.length; i++) {
+    const m = findList[i]
+    if (m.from > to || painted >= 500) break
+    addRange(m, findMarks)
+    painted++
+  }
+  const active = findList[findIndex]
+  if (active && active.to >= from && active.from <= to) addRange(active, findCurrent)
+}
+
+function selectFind(index: number) {
+  const m = findList[index]
+  if (!m) return
+  findIndex = index
+  ta.setSelectionRange(m.from, m.to)
+  const r = coordsAt(m.from), bounds = ta.getBoundingClientRect()
+  const top = bounds.top + findBox.offsetHeight + 12, bottom = bounds.bottom - 24
+  if (r.top < top || r.bottom > bottom) ta.scrollTop += r.top - (top + bottom) / 2
+  hl.scrollTop = ta.scrollTop
+  findCount()
+  queueFindPaint()
+}
+
+function openFind(replace = false) {
+  if (!current) return
+  clearTimeout(menuTimer)
+  menu.hidden = true
+  if (mode === "review") setMode("edit")
+  const selected = ta.value.slice(ta.selectionStart, ta.selectionEnd)
+  if (selected && selected.length <= 200 && !/[\r\n]/.test(selected)) findQuery.value = selected
+  findBox.hidden = false
+  if (replace) toggleFindReplace(true)
+  refreshFind(true)
+  findQuery.focus()
+  findQuery.select()
+}
+
+function closeFind(focus = true) {
+  clearTimeout(findTimer)
+  findTimer = 0
+  findBox.hidden = true
+  findList = []
+  findIndex = -1
+  findMarks?.clear()
+  findCurrent?.clear()
+  if (focus && current) ta.focus({ preventScroll: true })
+}
+
+function toggleFindReplace(show = $("find-replace-row").hidden) {
+  $("find-replace-row").hidden = !show
+  $("find-toggle-replace").setAttribute("aria-expanded", String(show))
+  $("find-toggle-replace").innerHTML = icon(show ? "chevron-down" : "chevron-right")
+}
+
+function stepFind(direction: number) {
+  if (findBox.hidden) openFind()
+  if (findSource !== ta.value || findTimer) refreshFind()
+  if (findList.length) selectFind((findIndex + direction + findList.length) % findList.length)
+}
+
+function replaceFind(all: boolean) {
+  refreshFind()
+  const match = findList[findIndex]
+  if (!match) return
+  const change = all ? replacementEdit(ta.value, findList, findReplacement.value)! : { ...match, insert: findReplacement.value }
+  // Keep replacement in the textarea's native undo history, without changing the review baseline.
+  findQuery.focus({ preventScroll: true })
+  edit(change.from, change.to, change.insert)
+  refreshFind(false, all ? change.from : change.from + change.insert.length)
+  selectFind(findIndex)
+  ta.focus({ preventScroll: true })
+}
+
+$("open-find").onclick = () => openFind()
+findQuery.oninput = () => scheduleFind(true)
+for (const id of ["find-case", "find-word"]) $(id).onclick = () => {
+  $(id).setAttribute("aria-pressed", String($(id).getAttribute("aria-pressed") !== "true"))
+  refreshFind(true)
+}
+$("find-toggle-replace").onclick = () => { toggleFindReplace(); findQuery.focus() }
+$("find-prev").onclick = () => stepFind(-1)
+$("find-next").onclick = () => stepFind(1)
+$("find-close").onclick = () => closeFind()
+$("find-replace-one").onclick = () => replaceFind(false)
+$("find-replace-all").onclick = () => replaceFind(true)
+document.addEventListener("keydown", (e) => {
+  if (e.isComposing || !current || !$("editor-group").contains(document.activeElement)) return
+  const mod = e.metaKey || e.ctrlKey, key = e.key.toLowerCase()
+  if (mod && (key === "f" || e.code === "KeyF") && !e.shiftKey) openFind(e.altKey)
+  else if (mod && key === "g" && !e.altKey) stepFind(e.shiftKey ? -1 : 1)
+  else if (!findBox.hidden && e.key === "Escape") closeFind()
+  else if (!findBox.hidden && (e.target === findQuery || e.target === findReplacement) && e.key === "Enter") {
+    if (e.target === findReplacement && !e.shiftKey) replaceFind(false)
+    else stepFind(e.shiftKey ? -1 : 1)
+  } else return
+  e.preventDefault()
+  e.stopPropagation()
+}, true)
 
 // Screen position of a text offset, measured on the colored layer.
 function coordsAt(pos: number): DOMRect {
