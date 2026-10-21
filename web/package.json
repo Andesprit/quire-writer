@@ -5,7 +5,7 @@
   "scripts": {
     "dev": "vite build --watch",
     "build": "vite build",
-    "check": "tsc -p . && node highlight.test.ts && node merge.test.ts && node suggest.test.ts && node diagnostics.test.ts && node find.test.ts"
+    "check": "tsc -p . && node highlight.test.ts && node merge.test.ts && node suggest.test.ts && node diagnostics.test.ts && node find.test.ts && node palette.test.ts"
   },
   "dependencies": {
     "@codemirror/merge": "^6.12.2",
