@@ -15,7 +15,13 @@ export function outline(text: string, lang: Lang, headingOf: HeadingOf): Heading
   let fence = "" // closing marker of the raw block we are inside, "" when outside
   let block = false // inside /* */ (Typst) or <!-- --> (Markdown)
   const lines = text.split("\n")
-  for (let i = 0; i < lines.length; i++) {
+  // YAML front matter at the very top: a "# comment" in it is not a heading.
+  let i = 0
+  if (lang !== "typst" && lang !== "latex" && lines[0].trimEnd() === "---") {
+    const close = lines.findIndex((l, k) => k > 0 && /^(---|\.\.\.)\s*$/.test(l))
+    if (close > 0) i = close + 1
+  }
+  for (; i < lines.length; i++) {
     const l = lines[i]
     if (fence) {
       if (lang === "latex" ? TEX_RAW_END.test(l) : l.trimStart().startsWith(fence)) fence = ""
