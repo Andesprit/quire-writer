@@ -554,10 +554,14 @@ impl Workspace {
         Ok(())
     }
 
-    /// `search` over the editor's text where it has one, else what editor and disk agree on.
-    fn find(&self, query: &str, case: bool, word: bool, cap: usize) -> (Vec<Value>, bool) {
+    /// `search` over the editor's text where it has one, else what editor and disk agree on;
+/// `open` is the file open in the editor with its text right now.
+    fn find(&self, query: &str, case: bool, word: bool, cap: usize, open: Option<(&str, &str)>) -> (Vec<Value>, bool) {
         let mut texts = self.known.clone();
         texts.extend(self.typed_text.clone());
+        if let Some((path, text)) = open.filter(|(path, _)| texts.contains_key(*path)) {
+            texts.insert(path.into(), text.into()); // the page's buffer, which may be newer than the last "typed"
+        }
         search(&texts, query, case, word, cap)
     }
 
@@ -2237,7 +2241,7 @@ async fn handle(msg: &Value) -> Result<(), String> {
             send(json!({"type": "file", "path": rel, "content": content, "baseline": w.baseline.get(rel)}));
         }
         "search" => {
-            let (hits, more) = ws().find(f("query")?, msg["case"].as_bool().unwrap_or(false), msg["word"].as_bool().unwrap_or(false), 2000);
+            let (hits, more) = ws().find(f("query")?, msg["case"].as_bool().unwrap_or(false), msg["word"].as_bool().unwrap_or(false), 2000, opt("path").zip(opt("content")));
             send(json!({"type": "search_result", "req": msg["req"], "hits": hits, "more": more}));
         }
         "save" => {
@@ -2510,14 +2514,15 @@ mod tests {
     fn search_finds_text_across_files() {
         let mut w = Workspace { known: map(&[("a.typ", "Yeast rises\r\nno yeasty here, yeast".to_string()), ("b/c.tex", "caf\u{e9} \u{1F600} yeast".to_string()), ("d.md", "bread".to_string())]), ..Default::default() };
         let cols = |(h, _): (Vec<Value>, bool)| h.iter().map(|x| (x["path"].as_str().unwrap().to_string(), x["line"].as_u64().unwrap(), x["col"].as_u64().unwrap())).collect::<Vec<_>>();
-        let all = cols(w.find("yeast", false, false, 99));
+        let all = cols(w.find("yeast", false, false, 99, None));
         assert_eq!(all, [("a.typ".into(), 0, 0), ("a.typ".into(), 1, 3), ("a.typ".into(), 1, 16), ("b/c.tex".into(), 0, 8)]); // emoji counts 2 in UTF-16
-        assert_eq!(cols(w.find("yeast", true, false, 99)).len(), 3); // match case drops "Yeast"
-        assert_eq!(cols(w.find("yeast", false, true, 99)).len(), 3); // whole word drops "yeasty"
-        assert_eq!(w.find("yeast", false, false, 2), (w.find("yeast", false, false, 2).0, true)); // capped
-        assert!(w.find("", false, false, 9).0.is_empty() && w.find("zzz", false, false, 9).0.is_empty());
+        assert_eq!(cols(w.find("yeast", true, false, 99, None)).len(), 3); // match case drops "Yeast"
+        assert_eq!(cols(w.find("yeast", false, true, 99, None)).len(), 3); // whole word drops "yeasty"
+        assert_eq!(w.find("yeast", false, false, 2, None), (w.find("yeast", false, false, 2, None).0, true)); // capped
+        assert!(w.find("", false, false, 9, None).0.is_empty() && w.find("zzz", false, false, 9, None).0.is_empty());
         w.typed_text.insert("d.md".into(), "unsaved yeast".into()); // typed text wins over disk
-        assert_eq!(cols(w.find("yeast", false, false, 99)).last().unwrap(), &("d.md".to_string(), 0, 8));
+        assert_eq!(cols(w.find("yeast", false, false, 99, None)).last().unwrap(), &("d.md".to_string(), 0, 8));
+        assert_eq!(cols(w.find("fresh", false, false, 99, Some(("d.md", "x fresh")))), [("d.md".to_string(), 0, 2)]); // the open buffer wins over typed text
     }
 
     #[test]
