@@ -1106,6 +1106,7 @@ function renderLabels() {
     nowhere.length && `${nowhere.length} reference${nowhere.length > 1 ? "s point" : " points"} nowhere`,
     unused && `${unused} unused`,
   ].filter(Boolean).join(", ")
+  $("labels-count").title = $("labels-count").textContent!
   $("labels").classList.toggle("closed", !open)
   const prev = document.getElementById("label-input") as HTMLInputElement | null
   const keep = prev && { value: prev.value, start: prev.selectionStart, end: prev.selectionEnd }
@@ -2386,7 +2387,7 @@ document.addEventListener("keydown", (e) => {
   const mod = e.metaKey || e.ctrlKey, key = e.key.toLowerCase()
   if (mod && (key === "f" || e.code === "KeyF") && !e.shiftKey) openFind(e.altKey)
   else if (mod && key === "g" && !e.altKey) stepFind(e.shiftKey ? -1 : 1)
-  else if (!findBox.hidden && e.key === "Escape") closeFind()
+  else if (!findBox.hidden && !refOpen && e.key === "Escape") closeFind() // an open reference list closes first
   else if (e.key === "Tab" && !$("find-replace-row").hidden && !findBox.hidden && !e.metaKey && !e.ctrlKey && !e.altKey && e.target === (e.shiftKey ? findReplacement : findQuery)) (e.shiftKey ? findQuery : findReplacement).focus()
   else if (!findBox.hidden && (e.target === findQuery || e.target === findReplacement) && e.key === "Enter") {
     if (e.target === findReplacement && !e.shiftKey) replaceFind(false)

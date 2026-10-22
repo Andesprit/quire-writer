@@ -369,7 +369,8 @@ body.resizing { cursor: ew-resize; user-select: none; }
   text-align: left;
   font-family: inherit;
 }
-.labels-head em { font-style: normal; font-weight: 400; text-transform: none; color: var(--warn); }
+.labels-head span { flex: none; }
+.labels-head em { flex: 0 1 auto; min-width: 0; margin-left: auto; overflow: hidden; white-space: nowrap; text-overflow: ellipsis; font-style: normal; font-weight: 400; text-transform: none; color: var(--warn); }
 #labels { flex: none; max-height: 40%; overflow: auto; padding-bottom: 8px; }
 #labels.closed { display: none; }
 .row.label .codicon[class] { color: var(--syn-label); }
