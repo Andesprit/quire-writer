@@ -181,7 +181,10 @@ let fromDisk = false // an edit that came from the agent or another program
 let lastTyped = 0
 let saveTimer = 0
 let saved = "" // the text as it is on disk
-let pendingSave: string | null = null // sent, waiting for the app to confirm
+// Saves sent, by request: each waits for the app to answer that the disk has its text, or why not.
+const saving = new Map<number, { path: string; text: string; done: (error: string) => void }>()
+let saveError: HTMLElement | null = null // the notice about the open file's failed save
+let leaving = 0 // the request replacing the open text: typing waits for its answer
 let holdSave = false // a disk conflict is waiting for the writer's choice
 let autosave = store.get("autosave") !== "off"
 
@@ -286,6 +289,7 @@ function markActive() {
 
 // Replace a range the way typing would, so the text field's own undo still works.
 function edit(from: number, to: number, text: string, disk = false) {
+  if (ta.readOnly && !disk) return // the open text is being replaced: see holdTyping
   const keep = { start: ta.selectionStart, end: ta.selectionEnd, scroll: ta.scrollTop, focus: document.activeElement }
   programmatic = true
   fromDisk = disk
@@ -396,13 +400,15 @@ function scheduleSave() {
 }
 
 // While a disk conflict waits for the writer, only Cmd+S and "Keep mine" (force) save.
-function flushSave(force = false) {
+// Resolves with why the save failed, or "" (saved, or nothing to report).
+function flushSave(force = false): Promise<string> {
   clearTimeout(saveTimer)
-  if (holdSave && !force) return
+  if ((holdSave && !force) || !current) return Promise.resolve("")
   holdSave = false
-  if (!current) return
-  pendingSave = ta.value
-  send({ type: "save", path: current, content: ta.value, baseline })
+  const req = ++reqSeq
+  const answer = new Promise<string>((done) => saving.set(req, { path: current!, text: ta.value, done }))
+  send({ type: "save", req, path: current, content: ta.value, baseline })
+  return answer
 }
 
 const sendReview = () => current && send({ type: "review", path: current, baseline })
@@ -415,23 +421,46 @@ function updateDirty() {
   document.title = (dirty ? "\u25cf " : "") + baseTitle
 }
 
-// Before another file replaces the open one. False means the writer cancelled.
+// Typing waits while the open text is being replaced, so nothing typed meanwhile can be lost.
+function holdTyping(on: boolean) {
+  ta.readOnly = on
+  if (!on) leaving = 0
+}
+
+// Before another file or folder replaces the open text. True once the disk has the text or the
+// writer chose Don't Save; false means they stay. Typing waits from here: see leaveThen.
 async function leaveCurrent(): Promise<boolean> {
-  if (!current || !isDirty()) return true
-  if (autosave && !holdSave) {
-    flushSave()
-    return true
+  holdTyping(true)
+  let answer = autosave && !holdSave ? "save" : ""
+  while (current && isDirty()) {
+    const name = baseName(current)
+    answer ||= await ask(`Save changes to ${name}?`, "If you don't save, your changes since the last save are lost.")
+    if (answer === "discard") {
+      clearTimeout(saveTimer)
+      ta.value = saved
+      invalidateDiagnostics()
+      render()
+      updateDirty()
+      break
+    }
+    if (answer !== "save") {
+      if (!leaving) holdTyping(false)
+      return false
+    }
+    const error = await flushSave(true)
+    answer = error
+      ? await ask(`${name} was not saved`, `${error} Your changes are still here. Save tries again. Don't Save drops them.`)
+      : autosave && !holdSave ? "save" : ""
   }
-  const answer = await ask(`Save changes to ${baseName(current)}?`, "If you don't save, your changes since the last save are lost.")
-  if (answer === "save") flushSave(true)
-  else if (answer === "discard") {
-    clearTimeout(saveTimer)
-    ta.value = saved
-    invalidateDiagnostics()
-    render()
-    updateDirty()
-  }
-  return answer === "save" || answer === "discard"
+  return true
+}
+
+// Open another file, a new file or another folder once the open text is safe. Typing waits
+// for the app's answer to this request ("done" or an error), not for a timer.
+async function leaveThen(msg: object) {
+  const ok = await leaveCurrent()
+  if (ok) send({ ...msg, req: (leaving = ++reqSeq) })
+  return ok
 }
 
 let conflict: HTMLElement | null = null // the question about a disk change where the writer typed
@@ -498,7 +527,7 @@ function dropFileState() {
   closeRewrite()
   menu.hidden = true
   holdSave = false
-  pendingSave = null
+  saveError?.remove()
   conflict?.remove()
   inlineWant = acWant = null
   box.hidden = true
@@ -506,8 +535,8 @@ function dropFileState() {
   renderAcStatus()
 }
 
+// Only after leaveCurrent: the open text is on disk or dropped by the writer.
 function openFile(path: string, content: string, base: string | null) {
-  if (autosave) flushSave()
   dropFileState()
   current = path
   lang = langOf(path)
@@ -803,9 +832,8 @@ function commitName() {
     } else {
       const path = joinPath(n.parent, name)
       // A new file opens, replacing the open one: ask first when that one has unsaved changes.
-      const go = () => send({ type: "create", path, folder: n.kind === "folder" })
-      if (n.kind === "folder") go()
-      else leaveCurrent().then((ok) => ok && go())
+      if (n.kind === "folder") send({ type: "create", path, folder: true })
+      else leaveThen({ type: "create", path, folder: false })
       selected = path
     }
   }
@@ -832,11 +860,7 @@ $("tree").onclick = (e) => {
   } else {
     renderTree()
     if (path === current) return
-    leaveCurrent().then((ok) => {
-      if (!ok) return
-      send({ type: "open_file", path })
-      if (innerWidth < 640) setPanel("sidebar", false)
-    })
+    leaveThen({ type: "open_file", path }).then((ok) => ok && innerWidth < 640 && setPanel("sidebar", false))
   }
 }
 $("tree").addEventListener("keydown", (e) => {
@@ -987,7 +1011,7 @@ $("labels").onclick = (e) => {
 
 $("open-folder").onclick = $("open-folder-2").onclick = $("start-open").onclick = async () => {
   // Unsaved typing belongs to the folder that is open now.
-  if (await leaveCurrent()) send({ type: "open_folder" })
+  leaveThen({ type: "open_folder" })
 }
 
 // New project: the kind here, then the app asks for the folder and puts a starter file in it.
@@ -996,7 +1020,7 @@ $("new-project").onclick = $("new-project-2").onclick = $("start-new").onclick =
   d.returnValue = ""
   d.showModal()
   const kind = await new Promise<string>((done) => d.addEventListener("close", () => done(d.returnValue), { once: true }))
-  if (kind && (await leaveCurrent())) send({ type: "new_project", kind })
+  if (kind) leaveThen({ type: "new_project", kind })
 }
 
 // ---------- start page: the projects opened last ----------
@@ -1022,7 +1046,7 @@ function renderRecent(list = recent()) {
 }
 $("recent").onclick = async (e) => {
   const path = (e.target as HTMLElement).closest<HTMLElement>("[data-open]")?.dataset.open
-  if (path && (await leaveCurrent())) send({ type: "open_folder", path: (opening = path) })
+  if (path && (await leaveThen({ type: "open_folder", path }))) opening = path // set before the app can answer
 }
 renderRecent()
 
@@ -1148,7 +1172,7 @@ $("sb-review").onclick = () => {
     return
   }
   const next = [...changed].find((f) => f !== current)
-  if (next) leaveCurrent().then((ok) => ok && send({ type: "open_file", path: next }))
+  if (next) leaveThen({ type: "open_file", path: next })
 }
 
 // ---------- agent & options ----------
@@ -2284,14 +2308,16 @@ $("export").onclick = () => {
 }
 
 async function exportAs(to: string) {
-  if (!current) return
+  const path = current
+  if (!path) return
   // The export reads the saved file.
   if (isDirty() && !autosave) {
-    const answer = await ask(`Save ${baseName(current)} before exporting?`, "The export uses the saved file.", "Save and Export")
+    const answer = await ask(`Save ${baseName(path)} before exporting?`, "The export uses the saved file.", "Save and Export")
     if (answer !== "save") return
   }
-  if (isDirty()) flushSave()
-  send({ type: "export", req: ++reqSeq, path: current, to })
+  // A failed save exports nothing: its notice says why, and the old text is not exported as new.
+  if (isDirty() && (await flushSave())) return
+  send({ type: "export", req: ++reqSeq, path, to })
 }
 
 let exporting: HTMLElement | null = null // the "Exporting…" notice
@@ -2493,7 +2519,7 @@ let followTimer = 0
 function goTo(path: string, line: number, col: number, utf16 = false) {
   if (path !== current) {
     pendingJump = { path, line, col, utf16 }
-    leaveCurrent().then((ok) => ok && send({ type: "open_file", path }))
+    leaveThen({ type: "open_file", path })
     return
   }
   pendingJump = null
@@ -2569,17 +2595,17 @@ $("sb-autosave").onclick = () => {
 renderAutosave()
 window.addEventListener("beforeunload", (e) => {
   // The page reloads: save now when it can be; otherwise ask to stay.
-  if (autosave && !holdSave) return flushSave()
+  if (autosave && !holdSave) return void flushSave()
   if (isDirty()) {
     e.preventDefault()
     e.returnValue = ""
   }
 })
-// Before the app quits or restarts: ask about unsaved changes and let the last save land.
+// Before the app quits or restarts: the text is on disk, or the writer chose Don't Save.
 async function readyToQuit() {
-  if (!(await leaveCurrent())) return false
-  for (let i = 0; i < 20 && pendingSave != null; i++) await new Promise((r) => setTimeout(r, 100))
-  return true
+  const ok = await leaveCurrent()
+  holdTyping(false) // nothing replaces the text: the window closes, or the writer stays
+  return ok
 }
 // Closing the window sends no "beforeunload", so it asks here instead.
 tauri.window.getCurrentWindow().onCloseRequested(async (e: Event) => {
@@ -2614,6 +2640,9 @@ function onMessage(msg: any) {
       renderAgentStatus()
       break
     case "folder":
+      // Another folder is open: the old text was saved or dropped first, and the agent may
+      // still be starting (the request's "done" waits for it).
+      if (msg.root !== root) holdTyping(false)
       if (root && msg.root && msg.root !== root) resetForFolder(msg.root)
       if (msg.root && msg.root !== root) renderRecent([msg.root, ...recent().filter((p) => p !== msg.root)].slice(0, 8))
       if (msg.root) opening = ""
@@ -2696,12 +2725,22 @@ function onMessage(msg: any) {
     case "exported":
       exported(msg.path)
       break
-    case "saved":
-      if (msg.path === current && pendingSave != null) {
-        saved = pendingSave
-        pendingSave = null
+    case "saved": {
+      // Only this save's text is on disk: a later save may still fail. Not ok: the disk had
+      // another program's text first, and file_changed already brought it here.
+      const s = saving.get(msg.req)
+      if (!s) break
+      saving.delete(msg.req)
+      if (msg.ok && s.path === current) {
+        saved = s.text
+        saveError?.remove()
         updateDirty()
       }
+      s.done("")
+      break
+    }
+    case "done":
+      if (msg.req === leaving) holdTyping(false)
       break
     case "renamed": {
       invalidateDiagnostics()
@@ -2841,24 +2880,35 @@ function onMessage(msg: any) {
       goTo(msg.path, msg.line, msg.col)
       break
     case "error":
+      if (msg.req && msg.req === leaving) holdTyping(false) // the open text stays, and the writer can type again
       if (msg.op === "export") exporting?.remove()
       if (msg.op === "open_folder" && opening) {
         // A recent project that is gone or cannot be read: do not offer it again.
         renderRecent(recent().filter((p) => p !== opening))
         opening = ""
       }
-      if (msg.op === "warm" && msg.kind === "check") {
-        ckError = msg.message.replace(/^warm: /, "")
+      if (msg.op === "save") {
+        const s = saving.get(msg.req)
+        saving.delete(msg.req)
+        // One notice at a time, however often auto save tries again.
+        if (s?.path === current && !saveError?.isConnected) {
+          saveError = toast(`${baseName(s.path)} was not saved. ${msg.message} Your text is still here.`, "error", [
+            { label: "Try again", run: () => flushSave(true) },
+          ])
+        }
+        s?.done(msg.message)
+      } else if (msg.op === "warm" && msg.kind === "check") {
+        ckError = msg.message
         renderCkStatus()
       } else if (msg.op === "warm") {
         // Autocomplete could not start yet: say so where it lives, without a notice.
         $("sb-ac").title = `Autocomplete is not ready: ${msg.message}`
       } else if (msg.req && rw?.req === msg.req) {
-        rwStatus(msg.message.replace(/^inline: /, ""), "error")
+        rwStatus(msg.message, "error")
       } else if (msg.req && ckWant?.req === msg.req) {
         // A wrong key or model fails on every paragraph: said once, in the suggestions settings.
         ckWant = null
-        ckError = msg.message.replace(/^check: /, "")
+        ckError = msg.message
         renderCkStatus()
       } else if (msg.op === "check") {
         // Nobody waits for it any more.
@@ -2867,15 +2917,17 @@ function onMessage(msg: any) {
         acWant = null
         acBusy = false
         // A wrong key or model would fail on every pause: say it once, in the autocomplete settings.
-        if (acApi()) acError = msg.message.replace(/^complete: /, "")
+        if (acApi()) acError = msg.message
         renderAcStatus()
       } else if (msg.op === "complete") {
         // A suggestion nobody waits for any more: its error is not news.
       } else {
+        // A file's error is about that file: not the chat's, and not why the agent did not start.
+        const agent = !["open_file", "typed", "review", "create", "rename", "delete", "preview", "restore", "cite", "export", "reveal"].includes(msg.op)
         // The agent's own errors (no op) go to the chat too, as when it stopped and starts again.
-        if (running || !msg.op) add("chat-error", `${icon("error")}<span>${esc(msg.message)}</span>`)
+        if (agent && (running || !msg.op)) add("chat-error", `${icon("error")}<span>${esc(msg.message)}</span>`)
         toast(msg.message)
-        if (agentState === "starting") {
+        if (agent && agentState === "starting") {
           agentState = "none"
           agentError = msg.message
           renderAgentStatus("Agent failed to start")

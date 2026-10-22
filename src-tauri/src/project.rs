@@ -44,8 +44,13 @@ fn ws() -> MutexGuard<'static, Workspace> {
     lock(&WS)
 }
 
+#[cfg(test)]
+static SENT: Mutex<Vec<Value>> = Mutex::new(Vec::new()); // what the page would hear
+
 /// A message to the page.
 pub fn send(msg: Value) {
+    #[cfg(test)]
+    lock(&SENT).push(msg.clone());
     if let Some(app) = APP.get() {
         let _ = app.emit("message", msg);
     }
@@ -56,7 +61,11 @@ fn re(pattern: &str) -> Regex {
 }
 
 fn err(e: std::io::Error) -> String {
-    e.to_string()
+    // The writer sees this: plain words for the usual cause, not the system's error number.
+    match e.kind() {
+        ErrorKind::PermissionDenied | ErrorKind::ReadOnlyFilesystem => "Permission denied: it may be read-only, or Quire is not allowed to use it.".into(),
+        _ => e.to_string(),
+    }
 }
 
 fn is_text_ext(p: &Path) -> bool {
@@ -559,7 +568,8 @@ impl Workspace {
         })
     }
 
-    fn save(&mut self, rel: &str, content: &str, baseline: Option<String>) -> Result<(), String> {
+    /// Whether the disk now has `content`.
+    fn save(&mut self, rel: &str, content: &str, baseline: Option<String>) -> Result<bool, String> {
         let p = self.path(rel)?;
         let disk = self.read(rel);
         if let Some(disk) = &disk {
@@ -567,7 +577,7 @@ impl Workspace {
                 // Someone else wrote the file since we last looked: keep their
                 // version and show it as a change instead of overwriting it.
                 self.external(rel, disk.clone());
-                return Ok(());
+                return Ok(false);
             }
         }
         // The same text: no write, so the watcher and the LaTeX preview stay quiet.
@@ -576,8 +586,7 @@ impl Workspace {
         }
         self.known.insert(rel.into(), content.into());
         self.set_baseline(rel, Some(content), baseline);
-        send(json!({"type": "saved", "path": rel}));
-        Ok(())
+        Ok(true)
     }
 
     fn set_baseline(&mut self, rel: &str, content: Option<&str>, baseline: Option<String>) {
@@ -2187,7 +2196,11 @@ async fn handle(msg: &Value) -> Result<(), String> {
             let content = w.read(rel).ok_or_else(|| format!("Cannot open {rel}"))?;
             send(json!({"type": "file", "path": rel, "content": content, "baseline": w.baseline.get(rel)}));
         }
-        "save" => ws().save(f("path")?, f("content")?, opt("baseline").map(String::from))?,
+        "save" => {
+            // Each save hears back by its `req`: the page keeps its text as unsaved until then.
+            let ok = ws().save(f("path")?, f("content")?, opt("baseline").map(String::from))?;
+            send(json!({"type": "saved", "path": f("path")?, "req": msg["req"], "ok": ok}));
+        }
         "typed" => {
             let mut w = ws();
             w.typed(f("path")?, f("content")?)?;
@@ -2293,10 +2306,17 @@ async fn handle(msg: &Value) -> Result<(), String> {
     Ok(())
 }
 
+// Requests that replace the page's open text. The page holds typing until one answers, with
+// "done" or an error: a closed folder chooser answers too.
+const REPLACING: [&str; 4] = ["open_file", "create", "open_folder", "new_project"];
+
 async fn safe(msg: Value) {
-    if let Err(e) = handle(&msg).await {
-        let t = msg["type"].as_str().unwrap_or("");
-        send(json!({"type": "error", "message": format!("{t}: {e}"), "req": msg["req"], "op": t, "kind": msg["kind"]}));
+    let t = msg["type"].as_str().unwrap_or("");
+    match handle(&msg).await {
+        // The message is for the writer: `op` says which request failed.
+        Err(e) => send(json!({"type": "error", "message": e, "req": msg["req"], "op": t, "kind": msg["kind"]})),
+        Ok(()) if REPLACING.contains(&t) && !msg["req"].is_null() => send(json!({"type": "done", "req": msg["req"]})),
+        Ok(()) => {}
     }
 }
 
@@ -2520,14 +2540,30 @@ mod tests {
             let before = map(&[("main.typ", Some("old".to_string())), ("new.typ", None)]);
             assert_eq!(w.checkpoints, BTreeMap::from([(1, before)]));
 
-            // A save from a stale editor must not overwrite a newer disk version.
+            // A save from a stale editor must not overwrite a newer disk version, and says it wrote nothing.
             fs::write(root.join("main.typ"), "agent again").unwrap();
-            w.save("main.typ", "stale editor text", Some("old".into())).unwrap();
+            assert_eq!(w.save("main.typ", "stale editor text", Some("old".into())), Ok(false));
             assert_eq!(text("main.typ"), "agent again");
 
             // Accepting everything clears the baseline.
-            w.save("main.typ", "agent again", None).unwrap();
+            assert_eq!(w.save("main.typ", "agent again", None), Ok(true));
             assert!(!w.baseline.contains_key("main.typ"));
+
+            // A read-only file: the save fails in plain words and the disk keeps its text.
+            let locked = root.join("locked.typ");
+            fs::write(&locked, "kept").unwrap();
+            w.known.insert("locked.typ".into(), "kept".into());
+            let mut perms = fs::metadata(&locked).unwrap().permissions();
+            perms.set_readonly(true);
+            fs::set_permissions(&locked, perms.clone()).unwrap();
+            let e = w.save("locked.typ", "new words", None).unwrap_err();
+            assert!(e.contains("read-only") && !e.contains("os error"), "{e}");
+            assert_eq!(text("locked.typ"), "kept");
+            #[allow(clippy::permissions_set_readonly_false)]
+            perms.set_readonly(false);
+            fs::set_permissions(&locked, perms).unwrap();
+            fs::remove_file(&locked).unwrap();
+            w.known.remove("locked.typ");
 
             // Restore puts files back to before turn 1 and removes created ones.
             fs::write(root.join("new.typ"), "created").unwrap();
@@ -2581,6 +2617,18 @@ mod tests {
         let save = json!({"type": "save", "root": "/some/other/folder", "path": "main.typ", "content": "x"});
         assert!(handle(&save).await.is_err());
         assert_eq!(text("main.typ"), "old");
+
+        // Each save, and each request that replaces the page's text, hears back by its `req`;
+        // a failure is in the writer's words, without the request's name.
+        let here = page(&root);
+        let answers = |req: u64| lock(&SENT).iter().filter(|m| m["req"] == req).cloned().collect::<Vec<_>>();
+        safe(json!({"type": "save", "root": here, "req": 101, "path": "main.typ", "content": "saved"})).await;
+        assert_eq!(answers(101), [json!({"type": "saved", "path": "main.typ", "req": 101, "ok": true})]);
+        assert_eq!(text("main.typ"), "saved");
+        safe(json!({"type": "open_file", "root": here, "req": 102, "path": "main.typ"})).await;
+        assert_eq!(answers(102), [json!({"type": "done", "req": 102})]);
+        safe(json!({"type": "open_file", "root": here, "req": 103, "path": "gone.typ"})).await;
+        assert_eq!(answers(103), [json!({"type": "error", "message": "Cannot open gone.typ", "req": 103, "op": "open_file", "kind": null})]);
 
         // Labels: definitions, uses, and look-alikes in comments, raw text, math and e-mails.
         let found = labels(&map(&[
