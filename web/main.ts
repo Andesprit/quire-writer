@@ -13,6 +13,7 @@ import { refChoices, refTrigger, type RefChoice, type RefTrigger } from "./refco
 import { diff, minimalChange, rebase, type Diff } from "./merge"
 import { $, ask, esc, fileIcon, icon, toast } from "./ui"
 import { FORMAT_KEYS, buildFormatBar, connectEditor, insertAt, select, setHeading, syntaxOf } from "./format"
+import { figureSnippet } from "./figure"
 import { labelAt, labelProblem, nameProblem } from "./names"
 import { elsewhere, gatherProblems, problemLines } from "./preflight"
 import { changes, paragraphs, readFixes, type Fix } from "./suggest"
@@ -3246,6 +3247,107 @@ renderCkSource()
 renderEdSource()
 renderChSource()
 
+// ---------- pictures: drop or paste to add a figure ----------
+
+const PICTURE = /\.(png|jpe?g|gif|svg|webp|pdf)$/i
+const MAX_PICTURE = 20_000_000
+const pictureReplies = new Map<number, (reply: any) => void>()
+let addingPicture = false
+
+// The app copies the picture into figures/ (or finds it in the project) and says how this file writes its path.
+const askPicture = (msg: object) =>
+  new Promise<any>((done) => {
+    const req = ++reqSeq
+    pictureReplies.set(req, done)
+    tauri.core.invoke("message", { msg: { ...msg, req, path: current, root } }).catch((e: unknown) => {
+      pictureReplies.delete(req)
+      done({ error: String(e) })
+    })
+  })
+
+// The text position under a screen point, read from the highlight copy of the text behind the field.
+function posAtPoint(x: number, y: number): number {
+  ta.style.pointerEvents = "none"
+  const range = document.caretRangeFromPoint?.(x, y)
+  ta.style.pointerEvents = ""
+  const div = range && hl.contains(range.startContainer) ? ([...hl.children].find((d) => d.contains(range.startContainer)) as Element | undefined) : undefined
+  if (!range || !div) return ta.selectionEnd
+  const before = document.createRange()
+  before.setStart(div, 0)
+  before.setEnd(range.startContainer, range.startOffset)
+  return Math.min(lineStarts[[...hl.children].indexOf(div)] + before.toString().length, ta.value.length)
+}
+
+// One figure block per picture, after the line at `at`, as one undoable edit. Typing waits meanwhile,
+// so no reply lands in the middle of new typing.
+async function addPictures(adds: object[], at: number) {
+  if (!current || !syntax() || addingPicture || leaving) {
+    toast(!current || !syntax() ? "Open a Typst, LaTeX, Markdown or Quarto file to add a picture." : "Wait a moment, then try again.")
+    return
+  }
+  const path = current
+  addingPicture = true
+  ta.readOnly = true
+  const blocks: string[] = []
+  const said: string[] = []
+  for (const add of adds) {
+    const r = await askPicture(add)
+    if (r.error) toast(r.error)
+    else {
+      blocks.push(figureSnippet(syntax()!.figure, r.rel, lang))
+      said.push(r.copied ? `${r.path}` : `${r.path} (already in the project)`)
+    }
+  }
+  addingPicture = false
+  if (!leaving) ta.readOnly = false
+  if (!blocks.length) return
+  if (current !== path || ta.readOnly) {
+    toast(`${said.join(", ")} was added, but the figure was not inserted because you changed file. Use the Figure button to insert it.`)
+    return
+  }
+  const t = ta.value
+  const nl = t.indexOf("\n", Math.min(at, t.length))
+  const end = nl < 0 ? t.length : nl
+  const lineStart = t.lastIndexOf("\n", end - 1) + 1
+  const text = (t.slice(lineStart, end).trim() ? "\n\n" : "") + blocks.join("\n\n")
+  edit(end, end, text)
+  const i = end + text.indexOf("Caption")
+  select(i, i + "Caption".length)
+  toast(`Added ${said.join(", ")}. Undo removes the figure from the text; the picture stays in the project.`, "info")
+}
+
+ta.addEventListener("paste", (e) => {
+  const file = [...(e.clipboardData?.files ?? [])].find((f) => f.type.startsWith("image/") || f.type === "application/pdf")
+  if (!file) return // plain text pastes as always
+  e.preventDefault()
+  if (file.size > MAX_PICTURE) return void toast("That picture is larger than 20 MB, so it was not added. Shrink it and try again.")
+  const reader = new FileReader()
+  reader.onload = () => addPictures([{ type: "paste_image", name: file.name, mime: file.type, data: String(reader.result).split(",")[1] ?? "" }], ta.selectionEnd)
+  reader.readAsDataURL(file)
+})
+
+// Files dragged in from Finder reach the page as Tauri events with paths, not as HTML drop events.
+const overEditor = (p: { x: number; y: number }) => {
+  const b = ta.getBoundingClientRect()
+  const [x, y] = [p.x / devicePixelRatio, p.y / devicePixelRatio]
+  return x >= b.left && x <= b.right && y >= b.top && y <= b.bottom ? [x, y] : null
+}
+const dropCue = (on: boolean) => $("editor").classList.toggle("dropping", on)
+tauri.event.listen("tauri://drag-over", ({ payload }: { payload: any }) => dropCue(!!overEditor(payload.position)))
+tauri.event.listen("tauri://drag-leave", () => dropCue(false))
+tauri.event.listen("tauri://drag-drop", ({ payload }: { payload: any }) => {
+  dropCue(false)
+  const at = overEditor(payload.position)
+  if (!at) return
+  const paths: string[] = payload.paths ?? []
+  const pictures = paths.filter((p) => PICTURE.test(p))
+  if (pictures.length < paths.length) {
+    const n = paths.length - pictures.length
+    toast(`${n === 1 ? "That file is" : `${n} files are`} not a picture Quire can add. Use PNG, JPG, GIF, SVG, WebP or PDF.`)
+  }
+  if (pictures.length) addPictures(pictures.map((from) => ({ type: "import_image", from })), posAtPoint(at[0], at[1]))
+})
+
 // ---------- messages from the app ----------
 
 // Listen first, then ask for the state: nothing sent in between is missed.
@@ -3370,6 +3472,10 @@ function onMessage(msg: any) {
       s.done("")
       break
     }
+    case "image_added":
+      pictureReplies.get(msg.req)?.(msg)
+      pictureReplies.delete(msg.req)
+      break
     case "done":
       if (msg.req === leaving) holdTyping(false)
       break

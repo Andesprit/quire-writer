@@ -464,6 +464,7 @@ body.resizing { cursor: ew-resize; user-select: none; }
 
 #editor-wrap { position: relative; flex: 1; min-height: 0; --gutter: 64px; }
 #editor { position: absolute; inset: 0; }
+#editor.dropping { outline: 2px dashed var(--focus); outline-offset: -3px; }
 
 #find-box { position: absolute; z-index: 12; top: 0; right: 16px; width: 440px; max-width: calc(100% - 16px); padding: 6px; border: 1px solid var(--widget-border); border-top: 2px solid var(--focus); border-radius: 0 0 4px 4px; color: var(--fg); background: var(--widget); box-shadow: var(--shadow); }
 .find-row { display: flex; flex-wrap: wrap; align-items: center; gap: 4px; }

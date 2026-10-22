@@ -88,6 +88,18 @@ fn safe_stem(s: &str) -> String {
     if stem.is_empty() { "image".into() } else { stem }
 }
 
+/// `target` as written in the document `base` (both project paths): relative to its folder.
+fn relative_to(base: &str, target: &str) -> String {
+    let mut from: Vec<&str> = base.split('/').collect();
+    from.pop();
+    let mut to: Vec<&str> = target.split('/').collect();
+    while !from.is_empty() && to.len() > 1 && from[0] == to[0] {
+        from.remove(0);
+        to.remove(0);
+    }
+    from.iter().map(|_| "..").chain(to).collect::<Vec<_>>().join("/")
+}
+
 fn is_text_ext(p: &Path) -> bool {
     p.extension().and_then(|e| e.to_str()).is_some_and(|e| TEXT_EXT.contains(&e))
 }
@@ -738,6 +750,19 @@ impl Workspace {
             }
         }
         unreachable!()
+    }
+
+    /// The page's answer to a dropped or pasted picture. `rel` is the path as the open document
+    /// writes it: Typst, Markdown and Quarto read paths from their own folder, LaTeX from the
+    /// folder of the main file the build starts at.
+    fn image_reply(&self, req: &Value, open: &str, added: Result<(String, bool), String>) -> Value {
+        match added {
+            Ok((path, copied)) => {
+                let base = if lang_of(open) == Lang::Latex { self.latex_main(open) } else { open.to_string() };
+                json!({"type": "image_added", "req": req, "path": path, "rel": relative_to(&base, &path), "copied": copied})
+            }
+            Err(error) => json!({"type": "image_added", "req": req, "error": error}),
+        }
     }
 
     fn rename(&mut self, old: &str, new: &str) -> Result<(), String> {
@@ -2441,7 +2466,7 @@ async fn send_apple() {
 
 // Messages that read or write files. Each carries the folder the page is showing, so a
 // page still showing another folder can never write into this one.
-const FILE_OPS: [&str; 12] = ["open_file", "save", "typed", "review", "create", "rename", "rename_label", "delete", "preview", "restore", "cite", "export"];
+const FILE_OPS: [&str; 14] = ["import_image", "paste_image", "open_file", "save", "typed", "review", "create", "rename", "rename_label", "delete", "preview", "restore", "cite", "export"];
 
 fn field<'a>(msg: &'a Value, key: &str) -> Result<&'a str, String> {
     msg[key].as_str().ok_or_else(|| format!("'{key}' is missing"))
@@ -2514,6 +2539,19 @@ async fn handle(msg: &Value) -> Result<(), String> {
         }
         "create" => ws().create(f("path")?, msg["folder"].as_bool().unwrap_or(false))?,
         "rename" => ws().rename(f("from")?, f("to")?)?,
+        "import_image" => {
+            let mut w = ws();
+            let added = w.import_image(f("from")?);
+            send(w.image_reply(&msg["req"], f("path")?, added));
+        }
+        "paste_image" => {
+            let mut w = ws();
+            let added = match unbase64(f("data")?) {
+                Some(bytes) => w.paste_image(f("name")?, f("mime")?, &bytes).map(|p| (p, true)),
+                None => Err("That picture could not be read.".into()),
+            };
+            send(w.image_reply(&msg["req"], f("path")?, added));
+        }
         "rename_label" => {
             // The answer carries the reason when it is refused: the page shows it by the name box.
             let result = ws().rename_label(f("path")?, f("from")?, f("to")?);
@@ -3029,6 +3067,28 @@ mod tests {
             std::os::unix::fs::symlink(&out, root.join("figures")).unwrap();
             assert!(w.paste_image("x.png", "image/png", &png).is_err());
             assert!(!out.join("x.png").exists());
+        }
+        // The reply names the picture as the open document writes it.
+        let w = Workspace { root: Some(root.clone()), known: map(&[("latex/main.tex", "\\documentclass{article}".to_string()), ("latex/ch/one.tex", "% !TEX root = ../main.tex\nHi".to_string()), ("chap/a.typ", String::new())]), ..Default::default() };
+        let r = |w: &Workspace, open: &str, added: Result<(String, bool), String>| w.image_reply(&json!(7), open, added);
+        let ok = |p: &str| Ok((p.to_string(), true));
+        assert_eq!(r(&w, "main.typ", ok("figures/a.png"))["rel"], "figures/a.png");
+        assert_eq!(r(&w, "chap/a.typ", ok("figures/a.png"))["rel"], "../figures/a.png");
+        assert_eq!(r(&w, "latex/ch/one.tex", ok("latex/figures/a.png"))["rel"], "figures/a.png"); // from main.tex, not one.tex
+        assert_eq!(r(&w, "latex/main.tex", ok("figures/a.png"))["rel"], "../figures/a.png");
+        assert_eq!(r(&w, "main.typ", Err("nope".into()))["error"], "nope");
+        if let Ok(out) = std::env::var("QUIRE_DUMP") {
+            let replies = json!({
+                "typst": r(&w, "main.typ", ok("figures/results.png")),
+                "typst_sub": r(&w, "chap/a.typ", ok("figures/results.png")),
+                "latex_chapter": r(&w, "latex/ch/one.tex", ok("latex/figures/results.png")),
+                "markdown": r(&w, "markdown/notes.md", ok("figures/my-plot.png")),
+                "quarto": r(&w, "quarto/report.qmd", ok("figures/my-plot.png")),
+                "inside": r(&w, "main.typ", Ok(("img/a.png".into(), false))),
+                "unsupported": r(&w, "main.typ", Workspace { root: Some(root.clone()), ..Default::default() }.import_image("/tmp/notes.txt")),
+                "oversized": r(&w, "main.typ", Err(Workspace::default().paste_image("big.png", "image/png", &big).unwrap_err())),
+            });
+            fs::write(format!("{out}/image-replies.json"), replies.to_string()).unwrap();
         }
         let _ = fs::remove_dir_all(&dir);
     }

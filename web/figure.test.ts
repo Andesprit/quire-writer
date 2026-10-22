@@ -1,11 +1,6 @@
 import assert from "node:assert/strict"
-import { figureSnippet, relativePath } from "./figure.ts"
+import { figureSnippet } from "./figure.ts"
 
-assert.equal(relativePath("main.typ", "figures/a.png"), "figures/a.png")
-assert.equal(relativePath("latex/main.tex", "figures/a.png"), "../figures/a.png")
-assert.equal(relativePath("quarto/report.qmd", "quarto/img/a.png"), "img/a.png")
-assert.equal(relativePath("a/b/c.typ", "a/figures/x.png"), "../figures/x.png")
-assert.equal(relativePath("chapters/one.typ", "figures/a.png"), "../figures/a.png")
 
 const typst = '#figure(\n  image("image.png", width: 80%),\n  caption: [Caption],\n) <fig:name>'
 const latex = "\\begin{figure}[ht]\n  \\includegraphics[width=0.8\\linewidth]{image.png}\n  \\label{fig:name}\n\\end{figure}"
