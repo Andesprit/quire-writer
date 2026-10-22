@@ -2760,7 +2760,7 @@ fn add_entry(text: &str, entry: &str, want: Option<&str>) -> Result<(String, Str
         Some(k) if !re(r"^[A-Za-z0-9_:.+/-]+$").is_match(k) => {
             return Err(format!("{k} cannot be a citation key. Use letters, digits and - _ : . only."));
         }
-        Some(k) if taken.contains(k) => return Err(format!("{k} is already used for a different paper in the bibliography.")),
+        Some(k) if taken.iter().any(|t| t.eq_ignore_ascii_case(k)) => return Err(format!("{k} is already used for a different paper in the bibliography.")),
         Some(k) => k.to_string(),
         None => cite_key(entry, &taken),
     };
@@ -2801,6 +2801,7 @@ async fn cite(ident: &str, from: &str, want: Option<&str>) -> Result<Value, Stri
     fs::write(&p, &new).map_err(err)?;
     if tracked {
         send(json!({"type": "file_changed", "path": rel, "content": new, "baseline": w.baseline.get(&rel)}));
+        send(w.state()); // the keys the project cites are judged again: a citation for the new entry no longer points nowhere
     }
     Ok(json!({"key": key, "bib": rel, "linked": linked, "added": true, "wanted": want}))
 }
@@ -4193,6 +4194,8 @@ mod tests {
             assert!(add_entry("", entry, Some(bad)).unwrap_err().contains("cannot be a citation key"), "{bad}");
         }
         assert!(add_entry("", entry, Some("fig:a-b_c.1+2")).is_ok());
+        // BibTeX compares keys without case.
+        assert!(add_entry("@book{Knuth1984, title={Other}}", entry, Some("knuth1984")).is_err());
         // doi.org sent something that is not BibTeX.
         assert!(add_entry("", "<html>", Some("k")).is_err());
     }

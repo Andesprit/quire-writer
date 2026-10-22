@@ -1349,9 +1349,14 @@ function keyChoices(n: Nowhere): string[] {
   return suggestKeys(n.key, n.kind === "cite" ? cites : lang === "typst" || lang === "quarto" ? [...own, ...cites] : own)
 }
 
+// A citation with no similar key can still be added from its DOI, under the key the text already uses.
+function doiButton(n: Nowhere, i: number): string {
+  return n.kind === "cite" ? `<button class="fix" data-doi="${i}" title="Look up a paper and add it to the bibliography as ${esc(n.key)}">Add from DOI…</button>` : ""
+}
+
 function fixRow(n: Nowhere, i: number): string {
   const [top, ...more] = keyChoices(n)
-  if (!top) return `<div class="fixes"><span class="muted">No similar ${n.kind === "cite" ? "citation" : "label"}</span></div>`
+  if (!top) return `<div class="fixes"><span class="muted">No similar ${n.kind === "cite" ? "citation" : "label"}</span>${doiButton(n, i)}</div>`
   return `<div class="fixes"><button class="fix" data-fix="${i}" data-key="${esc(top)}" title="Replace ${esc(n.key)} with ${esc(top)}">Did you mean ${esc(top)}?</button>` +
     more.map((k) => `<button class="fix alt" data-fix="${i}" data-key="${esc(k)}" title="Replace ${esc(n.key)} with ${esc(k)}">${esc(k)}</button>`).join("") + "</div>"
 }
@@ -1500,6 +1505,7 @@ $("labels-head").onclick = () => {
 }
 $("labels").onclick = (e) => {
   const fix = (e.target as HTMLElement).closest<HTMLElement>(".fix")
+  if (fix?.dataset.doi) return void addFromDoi(nowhere[Number(fix.dataset.doi)])
   if (fix) return void applyKeyFix(nowhere[Number(fix.dataset.fix)], fix.dataset.key!)
   const row = (e.target as HTMLElement).closest<HTMLElement>(".row")
   const l = row?.dataset.m ? nowhere[Number(row.dataset.m)] : labels[Number(row?.dataset.i)]
@@ -2938,10 +2944,30 @@ function inlineStatus(text: string, kind: "" | "busy" | "error" = "") {
 
 // The same box asks the agent for an edit, or takes a DOI or arXiv ID to cite.
 let inlineKind: "edit" | "cite" = "edit"
+// Set when the cite box was opened on a citation that points nowhere: the paper is added under that key.
+let citeFor: Nowhere | null = null
+// The existing key the box offers instead of adding the same paper twice.
+let citeSwap: string | null = null
 
-function openInline(kind: "edit" | "cite" = "edit") {
+// Open the cite box at a citation that points nowhere. The jump is a place to come Back to.
+async function addFromDoi(n: Nowhere) {
+  if (!n) return
+  if (n.path !== current) {
+    pendingFix = { path: n.path, run: () => addFromDoi(n) }
+    pendingJump = { path: n.path, line: n.line, col: n.col }
+    leaveThen({ type: "open_file", path: n.path }).then((ok) => { if (!ok) pendingFix = null })
+    return
+  }
+  if (ta.readOnly || leaving) return void toast("Wait a moment, then try again.")
+  if (!(await goTo(n.path, n.line, n.col))) return
+  openInline("cite", n)
+}
+
+function openInline(kind: "edit" | "cite" = "edit", forKey: Nowhere | null = null) {
   if (!current || mode !== "edit") return
   inlineKind = kind
+  citeFor = forKey
+  citeSwap = null
   render() // make sure the colored layer matches before measuring
   const empty = ta.selectionStart === ta.selectionEnd
   const at = coordsAt(ta.selectionStart)
@@ -2951,8 +2977,8 @@ function openInline(kind: "edit" | "cite" = "edit") {
   box.hidden = false
   $("inline-icon").className = `codicon codicon-${kind === "cite" ? "library" : "sparkle"}`
   if (kind === "cite") {
-    inlineInput.placeholder = "DOI or arXiv ID"
-    inlineStatus(`The paper goes into your .bib file, and ${syntax()?.cite ?? "@key"} into the text.`)
+    inlineInput.placeholder = forKey ? `DOI or arXiv ID for ${forKey.key}` : "DOI or arXiv ID"
+    inlineStatus(forKey ? `The paper goes into your .bib file as ${forKey.key}. The text stays as it is.` : `The paper goes into your .bib file, and ${syntax()?.cite ?? "@key"} into the text.`)
   } else {
     inlineInput.placeholder = empty ? "Write at the cursor" : "Edit selection"
     inlineStatus(empty ? "Nothing selected: the text goes in at the cursor." : "")
@@ -2964,6 +2990,7 @@ function openInline(kind: "edit" | "cite" = "edit") {
 function closeInline() {
   box.hidden = true
   inlineWant = null
+  citeFor = citeSwap = null
   ta.focus()
 }
 
@@ -2973,14 +3000,21 @@ inlineInput.oninput = () => {
 }
 inlineInput.onkeydown = (e) => {
   if (e.key === "Escape") return closeInline()
+  if (e.key === "Enter" && citeSwap && citeFor && !e.isComposing) {
+    e.preventDefault() // the box offered the key the paper already has
+    const [n, key] = [citeFor, citeSwap]
+    closeInline()
+    return applyKeyFix(n, key)
+  }
   if (e.key !== "Enter" || e.shiftKey || e.isComposing || !inlineInput.value.trim()) return
   e.preventDefault()
+  citeSwap = null
   const from = ta.selectionStart
   const to = ta.selectionEnd
   const doc = ta.value
   inlineWant = { req: ++reqSeq, from, to, selected: doc.slice(from, to) }
   if (inlineKind === "cite") {
-    send({ type: "cite", req: inlineWant.req, id: inlineInput.value.trim(), path: current })
+    send({ type: "cite", req: inlineWant.req, id: inlineInput.value.trim(), path: current, ...(citeFor && { key: citeFor.key }) })
     return inlineStatus("Looking it up…", "busy")
   }
   const why = edWhy()
@@ -3017,8 +3051,17 @@ function applyInline(req: number, text: string) {
   goToChunk(0)
 }
 
-function applyCite(msg: { req: number; key: string; bib: string; linked: boolean; added: boolean }) {
+function applyCite(msg: { req: number; key: string; bib: string; linked: boolean; added: boolean; wanted?: string }) {
   if (inlineWant?.req !== msg.req) return
+  if (citeFor) {
+    if (!msg.added && msg.wanted && msg.key !== msg.wanted) { // already in the bibliography under another key
+      citeSwap = msg.key
+      inlineStatus(`${msg.bib} already has this paper as ${msg.key}. Press Enter to use ${msg.key} in the text instead of ${msg.wanted}, or Escape to keep it.`)
+      return
+    }
+    closeInline()
+    return void toast(msg.added ? `Added ${msg.key} to ${msg.bib}.` : `${msg.key} is already in ${msg.bib}.`, "info")
+  }
   box.hidden = true
   inlineWant = null
   insertAt((syntax()?.cite ?? "@key").replace("key", msg.key), msg.key)
@@ -3895,7 +3938,7 @@ function renderProblems() {
     const fix = p.diag ? errorFix(p.diag) : null
     const key = p.nowhere ? keyChoices(p.nowhere)[0] : undefined
     html += `<div class="problems-item"><button type="button" class="problems-row" data-i="${i}" title="Go to this problem"><span class="problems-line">Line ${p.line + 1}</span> ${esc(p.text)}</button>` +
-      (fix ? `<button type="button" class="fix" data-i="${i}" data-fix="1">${esc(fix.label)}</button>` : key ? `<button type="button" class="fix" data-i="${i}" data-fix="1">Did you mean ${esc(key)}?</button>` : "") + "</div>"
+      (fix ? `<button type="button" class="fix" data-i="${i}" data-fix="1">${esc(fix.label)}</button>` : key ? `<button type="button" class="fix" data-i="${i}" data-fix="1">Did you mean ${esc(key)}?</button>` : p.nowhere?.kind === "cite" ? `<button type="button" class="fix" data-i="${i}" data-doi="1">Add from DOI…</button>` : "") + "</div>"
   })
   box.innerHTML = html
   if (had >= 0) (box.querySelectorAll("button")[Math.min(had, box.querySelectorAll("button").length - 1)] as HTMLElement | undefined)?.focus()
@@ -3927,6 +3970,7 @@ $("problems").addEventListener("click", (e) => {
   const p = b && problemList()[Number(b.dataset.i)]
   if (!p) return
   closeProblems(false)
+  if (b.dataset.doi) return void addFromDoi(p.nowhere!)
   if (!b.dataset.fix) return void goTo(p.path, p.line, p.col, p.utf16)
   const fix = p.diag && errorFix(p.diag)
   const key = p.nowhere && keyChoices(p.nowhere)[0]
