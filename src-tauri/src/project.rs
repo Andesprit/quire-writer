@@ -360,6 +360,108 @@ fn apply_rename(texts: &BTreeMap<String, String>, edits: &[(String, usize, usize
     out.into_iter().map(|(path, lines)| (path, lines.join("\n"))).collect()
 }
 
+// Paths in documents. Typst: #include/#import "x", image("x"), bibliography("x"), read("x") and the
+// data loaders. LaTeX: \input, \include, \includegraphics, \bibliography, \addbibresource. Markdown
+// and Quarto: ![](x), [](x) and the {{< include x >}} shortcode.
+static TYPST_PATH: LazyLock<Regex> =
+    LazyLock::new(|| re(r#"\b(?:include|import|image|bibliography|read|csv|json|yaml|toml|xml|cbor)\b\s*\(?\s*"([^"\n]+)""#));
+static TEX_PATH: LazyLock<Regex> =
+    LazyLock::new(|| re(r"\\(include|input|includegraphics|bibliography|addbibresource)\*?(?:\[[^\]]*\])?\{([^}\n]+)\}"));
+static MD_PATH: LazyLock<Regex> = LazyLock::new(|| re(r"\]\(\s*<?([^)\s>]+)|\{\{<\s*include\s+([^\s>]+)"));
+
+/// One rewritten path: the file (as named now), the 0-based line, the byte range of the old path in
+/// that file's text, and what replaces it.
+#[derive(Debug, PartialEq)]
+#[cfg_attr(not(test), allow(dead_code))]
+struct LinkEdit {
+    file: String,
+    line: usize,
+    range: (usize, usize),
+    text: String,
+}
+
+/// `p` after moving `old` (a file or folder) to `new`.
+fn moved(p: &str, old: &str, new: &str) -> String {
+    match p.strip_prefix(old) {
+        Some("") => new.into(),
+        Some(rest) if rest.starts_with('/') => format!("{new}{rest}"),
+        _ => p.into(),
+    }
+}
+
+/// `dir`/`path` without `.` and `..`; None when it climbs out of the project.
+fn join_path(dir: &str, path: &str) -> Option<String> {
+    let mut out: Vec<&str> = dir.split('/').filter(|s| !s.is_empty()).collect();
+    for s in path.split('/') {
+        match s {
+            "" | "." => {}
+            ".." => {
+                out.pop()?;
+            }
+            s => out.push(s),
+        }
+    }
+    Some(out.join("/"))
+}
+
+fn ext_of(p: &str) -> &str {
+    Path::new(p).extension().and_then(|e| e.to_str()).unwrap_or("")
+}
+
+/// Where moving `old` to `new` changes a path written in a document, without writing anything. A path
+/// is judged where its file is now (`latex_main` gives the file LaTeX resolves from), and the edit
+/// keeps its style: the extension or not, a leading "./", "/" from the project root. A document that
+/// moves with the file is covered too: its own paths to files that stay are rewritten. Comments, raw
+/// and code are skipped, and paths that match no file in `files` are left alone.
+#[cfg_attr(not(test), allow(dead_code))]
+fn link_edits(texts: &BTreeMap<String, String>, files: &[String], latex_main: impl Fn(&str) -> String, old: &str, new: &str) -> Vec<LinkEdit> {
+    let mut out = vec![];
+    for (file, text) in texts {
+        let lang = lang_of(file);
+        let (re, base) = match lang {
+            Lang::Typst => (&*TYPST_PATH, file.clone()),
+            Lang::Latex => (&*TEX_PATH, latex_main(file)),
+            Lang::Quarto | Lang::Markdown => (&*MD_PATH, file.clone()),
+            Lang::Text => continue,
+        };
+        let (dir, new_dir) = (base.rsplit_once('/').map_or("", |d| d.0), moved(&base, old, new));
+        let new_dir = new_dir.rsplit_once('/').map_or("", |d| d.0);
+        let blank = blank_hidden(text, lang);
+        for c in re.captures_iter(&blank) {
+            let g = c.iter().skip(1).flatten().last().unwrap(); // the path is the last group that matched
+            let parts: Vec<&str> = if lang == Lang::Latex && &c[1] == "bibliography" { g.as_str().split(',').collect() } else { vec![g.as_str()] };
+            for part in parts {
+                let start = g.start() + (part.as_ptr() as usize - g.as_str().as_ptr() as usize) + part.len() - part.trim_start().len();
+                let path = part.trim().split('#').next().unwrap();
+                if path.is_empty() || path.contains("://") || path.starts_with("mailto:") {
+                    continue;
+                }
+                let want = if lang != Lang::Latex { None } else { match &c[1] { "bibliography" | "addbibresource" => Some("bib"), "input" | "include" => Some("tex"), _ => None } };
+                let rooted = path.starts_with('/') && lang == Lang::Typst;
+                let Some(target) = join_path(if rooted { "" } else { dir }, path) else { continue };
+                // The file it names: as written, or (LaTeX \input{chapter}) with the extension left off.
+                let bare = ext_of(path).is_empty() || (lang == Lang::Latex && !matches!(ext_of(path), "tex" | "bib" | "png" | "jpg" | "jpeg" | "pdf" | "eps" | "svg"));
+                let real = files.iter().find(|f| **f == target).or_else(|| if bare { files.iter().find(|f| f.rsplit_once('.').is_some_and(|(s, e)| s == target && want.is_none_or(|w| w == e))) } else { None });
+                let Some(real) = real else { continue };
+                let after = moved(real, old, new);
+                if after == *real && new_dir == dir {
+                    continue;
+                }
+                let shown = if *real != target && ext_of(&after) == ext_of(real) { after.strip_suffix(&format!(".{}", ext_of(&after))).unwrap_or(&after) } else { &after };
+                let mut written = if rooted { format!("/{shown}") } else { relative_to(&join_path(new_dir, "x").unwrap(), shown) };
+                if path.starts_with("./") && !written.starts_with("../") && !rooted {
+                    written.insert_str(0, "./");
+                }
+                if written != path {
+                    let line = text[..start].matches('\n').count();
+                    out.push(LinkEdit { file: file.clone(), line, range: (start, start + path.len()), text: written });
+                }
+            }
+        }
+    }
+    out
+}
+
 static TYPST_NAME: LazyLock<Regex> = LazyLock::new(|| re(r"^[\w:.-]+$"));
 static TEX_NAME: LazyLock<Regex> = LazyLock::new(|| re(r"^[^\s{}%,\\]+$"));
 static QMD_NAME: LazyLock<Regex> = LazyLock::new(|| re(r"^[A-Za-z][\w:.-]*$"));
@@ -2990,6 +3092,47 @@ mod tests {
         let mut out = texts.clone();
         out.extend(apply_rename(texts, &rename_edits(texts, home, from, to).unwrap(), from, to));
         out
+    }
+
+    fn planted() -> (BTreeMap<String, String>, Vec<String>) {
+        let texts = map(&[
+            ("main.typ", "#include \"chapters/one.typ\"\n#image(\"figures/plot.png\")\n#image(\"./figures/plot.png\")\n// #image(\"figures/plot.png\")\n```\n#image(\"figures/plot.png\")\n```\n#image(\"figures/plot2.png\")\n#image(\"/figures/plot.png\")".to_string()),
+            ("chapters/one.typ", "#image(\"../figures/plot.png\")\n#image(\"../figures/plot2.png\")".to_string()),
+            ("paper.tex", "\\documentclass{article}\n\\input{tex/two}\n\\includegraphics[width=3cm]{figures/plot}\n\\includegraphics{figures/plot2}\n% \\includegraphics{figures/plot}\n\\bibliography{lit/a,figures/plot}".to_string()),
+            ("tex/two.tex", "% !TEX root = ../paper.tex\n\\includegraphics{figures/plot.png}".to_string()),
+            ("notes.md", "![a](figures/plot.png)\n`![](figures/plot.png)`\n[site](https://x.org/figures/plot.png)\n{{< include chapters/one.typ >}}".to_string()),
+        ]);
+        let mut files: Vec<String> = texts.keys().cloned().collect();
+        files.extend(["figures/plot.png".into(), "figures/plot2.png".into(), "lit/a.bib".into()]);
+        (texts, files)
+    }
+
+    fn edits(old: &str, new: &str) -> Vec<(String, usize, String)> {
+        let (texts, files) = planted();
+        let main = |f: &str| if f == "tex/two.tex" { "paper.tex".into() } else { f.to_string() };
+        let found = link_edits(&texts, &files, main, old, new);
+        for e in &found {
+            assert_eq!(&texts[&e.file][e.range.0..e.range.1].is_empty(), &false);
+        }
+        found.into_iter().map(|e| (e.file, e.line, e.text)).collect()
+    }
+
+    #[test]
+    fn link_edits_for_a_renamed_file_and_a_moved_folder() {
+        let s = |f: &str, l: usize, t: &str| (f.to_string(), l, t.to_string());
+        assert_eq!(
+            edits("figures/plot.png", "figures/results.png"),
+            vec![s("chapters/one.typ", 0, "../figures/results.png"), s("main.typ", 1, "figures/results.png"), s("main.typ", 2, "./figures/results.png"),
+                 s("main.typ", 8, "/figures/results.png"), s("notes.md", 0, "figures/results.png"), s("paper.tex", 2, "figures/results"), s("tex/two.tex", 1, "figures/results.png")]
+        );
+        let tex = edits("figures/plot.png", "pics/plot.png");
+        assert!(tex.contains(&s("paper.tex", 2, "pics/plot")) && tex.contains(&s("tex/two.tex", 1, "pics/plot.png")), "{tex:?}");
+        // Moving a folder: references into it follow, and so do paths a moved document wrote.
+        let moved = edits("figures", "media/img");
+        assert!(moved.contains(&s("main.typ", 1, "media/img/plot.png")) && moved.contains(&s("paper.tex", 2, "media/img/plot")), "{moved:?}");
+        assert!(!moved.iter().any(|e| e.2.contains("plot2") && e.0 == "main.typ" && e.1 != 7), "{moved:?}");
+        let chapter = edits("chapters", "ch/deep");
+        assert_eq!(chapter, vec![s("chapters/one.typ", 0, "../../figures/plot.png"), s("chapters/one.typ", 1, "../../figures/plot2.png"), s("main.typ", 0, "ch/deep/one.typ"), s("notes.md", 3, "ch/deep/one.typ")]);
     }
 
     #[test]
