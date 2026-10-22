@@ -73,6 +73,21 @@ fn err(e: std::io::Error) -> String {
     }
 }
 
+const MAX_IMAGE: u64 = 20_000_000;
+
+/// The picture type of a file name, lower case, or None for anything Quire does not add.
+fn image_ext(p: &Path) -> Option<&'static str> {
+    let e = p.extension()?.to_str()?.to_ascii_lowercase();
+    ["png", "jpg", "jpeg", "gif", "svg", "webp", "pdf"].into_iter().find(|k| *k == e)
+}
+
+/// A file name stem with only a-z, 0-9 and "-": accents lose their mark, spaces and the rest become "-".
+fn safe_stem(s: &str) -> String {
+    let ascii: String = s.nfd().filter(|c| c.is_ascii()).map(|c| if c.is_ascii_alphanumeric() { c.to_ascii_lowercase() } else { '-' }).collect();
+    let stem = ascii.split('-').filter(|p| !p.is_empty()).collect::<Vec<_>>().join("-");
+    if stem.is_empty() { "image".into() } else { stem }
+}
+
 fn is_text_ext(p: &Path) -> bool {
     p.extension().and_then(|e| e.to_str()).is_some_and(|e| TEXT_EXT.contains(&e))
 }
@@ -660,6 +675,69 @@ impl Workspace {
             send(json!({"type": "file", "path": rel, "content": "", "baseline": null}));
         }
         Ok(())
+    }
+
+    /// A picture the writer dropped (an absolute path) or pasted (bytes) becomes a file in
+    /// figures/ under a name that is safe and new; a picture already in the project is only
+    /// referenced. Returns the project-relative path and whether a file was written.
+    fn import_image(&mut self, from: &str) -> Result<(String, bool), String> {
+        let src = Path::new(from);
+        let name = src.file_name().and_then(|n| n.to_str()).unwrap_or("that file");
+        let ext = image_ext(src).ok_or_else(|| format!("{name} is not a picture Quire can add. Use PNG, JPG, GIF, SVG, WebP or PDF."))?;
+        let src = src.canonicalize().map_err(|e| format!("{name} could not be added. {}", err(e)))?;
+        if !src.is_file() {
+            return Err(format!("{name} is not a file."));
+        }
+        if let Ok(rel) = src.strip_prefix(self.root()?) {
+            return Ok((page(rel), false));
+        }
+        if fs::metadata(&src).map_err(err)?.len() > MAX_IMAGE {
+            return Err(format!("{name} is larger than 20 MB, so it was not added. Shrink it and try again."));
+        }
+        let bytes = fs::read(&src).map_err(|e| format!("{name} could not be read. {}", err(e)))?;
+        let stem = src.file_stem().and_then(|n| n.to_str()).unwrap_or("");
+        Ok((self.store_image(stem, ext, &bytes)?, true))
+    }
+
+    fn paste_image(&mut self, name: &str, mime: &str, bytes: &[u8]) -> Result<String, String> {
+        let ext = match mime {
+            "image/png" => "png",
+            "image/jpeg" => "jpg",
+            "image/gif" => "gif",
+            "image/svg+xml" => "svg",
+            "image/webp" => "webp",
+            "application/pdf" => "pdf",
+            _ => return Err("That is not a picture Quire can add. Use PNG, JPG, GIF, SVG, WebP or PDF.".into()),
+        };
+        if bytes.len() as u64 > MAX_IMAGE {
+            return Err("That picture is larger than 20 MB, so it was not added. Shrink it and try again.".into());
+        }
+        let stem = Path::new(name).file_stem().and_then(|n| n.to_str()).unwrap_or("");
+        self.store_image(stem, ext, bytes)
+    }
+
+    /// Writes figures/<stem>.<ext>, or <stem>-2 and so on; never over an existing file.
+    fn store_image(&mut self, stem: &str, ext: &str, bytes: &[u8]) -> Result<String, String> {
+        let dir = self.path("figures")?;
+        fs::create_dir_all(&dir).map_err(|e| format!("The figures folder could not be made. {}", err(e)))?;
+        let stem = safe_stem(stem);
+        for n in 1.. {
+            let file = if n == 1 { format!("{stem}.{ext}") } else { format!("{stem}-{n}.{ext}") };
+            let path = dir.join(&file);
+            match fs::File::create_new(&path) {
+                Ok(mut f) => {
+                    if let Err(e) = std::io::Write::write_all(&mut f, bytes) {
+                        let _ = fs::remove_file(&path);
+                        return Err(format!("{file} could not be saved. {}", err(e)));
+                    }
+                    send(self.state());
+                    return Ok(format!("figures/{file}"));
+                }
+                Err(e) if e.kind() == ErrorKind::AlreadyExists => {}
+                Err(e) => return Err(format!("{file} could not be saved. {}", err(e))),
+            }
+        }
+        unreachable!()
     }
 
     fn rename(&mut self, old: &str, new: &str) -> Result<(), String> {
@@ -2902,6 +2980,57 @@ mod tests {
         w.typed("a.typ", "unsaved").unwrap();
         w.forget("a.typ", Some("renamed.typ"));
         assert!(!w.typed_text.contains_key("a.typ"), "a renamed file must not survive in the diagnostic overlay");
+    }
+
+    #[test]
+    fn pictures_go_to_figures_safely() {
+        let dir = std::env::temp_dir().join(format!("quire-img-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&dir);
+        let (root, out) = (dir.join("proj"), dir.join("outside"));
+        fs::create_dir_all(&root).unwrap();
+        fs::create_dir_all(&out).unwrap();
+        let root = root.canonicalize().unwrap();
+        let out = out.canonicalize().unwrap();
+        let mut w = Workspace { root: Some(root.clone()), ..Default::default() };
+        let png = [0x89, b'P', b'N', b'G'];
+        // A name that is taken gets -2, -3; the first file is untouched.
+        assert_eq!(w.paste_image("results.png", "image/png", &png).unwrap(), "figures/results.png");
+        fs::write(root.join("figures/results.png"), "mine").unwrap();
+        assert_eq!(w.paste_image("results.png", "image/png", &png).unwrap(), "figures/results-2.png");
+        assert_eq!(w.paste_image("results.png", "image/png", &png).unwrap(), "figures/results-3.png");
+        assert_eq!(fs::read_to_string(root.join("figures/results.png")).unwrap(), "mine");
+        // Spaces, accents and symbols; a pasted screenshot with no usable name.
+        assert_eq!(w.paste_image("Gráfico final (v2).PNG", "image/png", &png).unwrap(), "figures/grafico-final-v2.png");
+        assert_eq!(w.paste_image("日本語.png", "image/png", &png).unwrap(), "figures/image.png");
+        assert_eq!(w.paste_image("", "image/jpeg", &png).unwrap(), "figures/image.jpg");
+        // Not a picture, and too big: refused in plain words, nothing written.
+        let before = fs::read_dir(root.join("figures")).unwrap().count();
+        assert!(w.paste_image("a.zip", "application/zip", &png).unwrap_err().contains("not a picture"));
+        let big = vec![0u8; MAX_IMAGE as usize + 1];
+        assert!(w.paste_image("big.png", "image/png", &big).unwrap_err().contains("20 MB"));
+        assert_eq!(fs::read_dir(root.join("figures")).unwrap().count(), before);
+        // A dropped file from outside is copied; a second drop of the same name does not overwrite.
+        fs::write(out.join("Plot 1.jpeg"), "x").unwrap();
+        fs::write(out.join("notes.txt"), "x").unwrap();
+        assert_eq!(w.import_image(out.join("Plot 1.jpeg").to_str().unwrap()).unwrap(), ("figures/plot-1.jpeg".into(), true));
+        assert_eq!(w.import_image(out.join("Plot 1.jpeg").to_str().unwrap()).unwrap(), ("figures/plot-1-2.jpeg".into(), true));
+        assert!(w.import_image(out.join("notes.txt").to_str().unwrap()).unwrap_err().contains("not a picture"));
+        assert!(w.import_image(out.join("missing.png").to_str().unwrap()).unwrap_err().contains("not found"));
+        // A picture already in the project is only referenced, even through a ..
+        fs::create_dir_all(root.join("img")).unwrap();
+        fs::write(root.join("img/a.png"), "x").unwrap();
+        let inside = format!("{}/img/../img/a.png", root.display());
+        assert_eq!(w.import_image(&inside).unwrap(), ("img/a.png".into(), false));
+        assert!(!root.join("figures/a.png").exists());
+        // A figures folder that is a link out of the project is never written through.
+        #[cfg(unix)]
+        {
+            fs::remove_dir_all(root.join("figures")).unwrap();
+            std::os::unix::fs::symlink(&out, root.join("figures")).unwrap();
+            assert!(w.paste_image("x.png", "image/png", &png).is_err());
+            assert!(!out.join("x.png").exists());
+        }
+        let _ = fs::remove_dir_all(&dir);
     }
 
     #[test]
