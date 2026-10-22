@@ -1,6 +1,6 @@
 import assert from "node:assert/strict"
 import fs from "node:fs"
-import { DOC_SHORTCUTS, HINTS, SHORTCUTS, docShortcut, filterShortcuts, keyCaps, keysForCommand, keyText } from "./shortcuts.ts"
+import { DOC_SHORTCUTS, HINTS, SHORTCUTS, docShortcut, filterShortcuts, keyCaps, keysForCommand, keyText, placeKey } from "./shortcuts.ts"
 
 const ids = SHORTCUTS.map((s) => s.id)
 assert.equal(new Set(ids).size, ids.length, "ids are unique")
@@ -35,4 +35,16 @@ assert.deepEqual(keyCaps(SHORTCUTS.find((s) => s.id === "rename")!, true), ["F2"
 assert.ok(filterShortcuts("find", true).length >= 4)
 assert.ok(filterShortcuts("⇧p", true).some((s) => s.id === "commands"))
 assert.equal(filterShortcuts("zzz", true).length, 0)
+// Back and Forward: Cmd+[ ] on a Mac, Alt+Arrow elsewhere, and neither takes the other's keys.
+const k = (key: string, o: object = {}) => ({ key, shiftKey: false, metaKey: false, ctrlKey: false, altKey: false, ...o })
+assert.equal(placeKey(k("[", { metaKey: true }), true), "back")
+assert.equal(placeKey(k("]", { metaKey: true }), true), "forward")
+assert.equal(placeKey(k("ArrowLeft", { altKey: true }), true), undefined, "Alt+Left is a word jump on a Mac")
+assert.equal(placeKey(k("ArrowLeft", { altKey: true }), false), "back")
+assert.equal(placeKey(k("ArrowRight", { altKey: true }), false), "forward")
+assert.equal(placeKey(k("-", { ctrlKey: true }), false), undefined, "Ctrl+- stays zoom")
+assert.equal(placeKey(k("[", { ctrlKey: true }), false), undefined)
+assert.equal(keysForCommand("back", true), "⌘[")
+assert.equal(keysForCommand("back", false), "Alt+←")
+assert.deepEqual(keyCaps(SHORTCUTS.find((s) => s.id === "forward")!, false), ["Alt+", "→"])
 console.log("shortcuts ok")

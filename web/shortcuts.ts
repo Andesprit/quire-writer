@@ -7,6 +7,7 @@ export type Shortcut = {
   action: string
   group: string
   keys: string // "Mod" is Cmd (or Ctrl); a single character after it is a key
+  win?: string // the keys off the Mac, when they are not the same keys with Ctrl
   cmd?: string // the command in the quick input that shows this key
   doc?: Press // handled for the whole window, from any focus
   src?: string // text the editor's own handlers must contain (checked by shortcuts.test.ts)
@@ -20,6 +21,8 @@ export const SHORTCUTS = [
   { id: "label-prefix", action: "Go to label (type # in the open-a-file box)", group: "Go to", keys: "#" },
   { id: "rename-label", action: "Rename the label under the caret", group: "Go to", keys: "F2", cmd: "rename-label", src: '"F2"' },
   { id: "outline-move", action: "Move the focused Outline section up or down", group: "Go to", keys: "⌥↑↓", src: 'e.altKey && (e.key === "ArrowUp"' },
+  { id: "back", action: "Go back to the previous place", group: "Go to", keys: "Mod[", win: "Alt+←", cmd: "back", src: "placeKey(" },
+  { id: "forward", action: "Go forward to the next place", group: "Go to", keys: "Mod]", win: "Alt+→", cmd: "forward", src: "placeKey(" },
   { id: "save", action: "Save", group: "File", keys: "ModS", cmd: "save", doc: { key: "s", shift: false } },
   { id: "find", action: "Find in file", group: "Find", keys: "ModF", cmd: "find", src: 'key === "f"' },
   { id: "replace", action: "Find and replace", group: "Find", keys: "Mod⌥F", src: "openFind(e.altKey)" },
@@ -61,9 +64,23 @@ export function docShortcut(e: KeyLike): DocShortcutId | undefined {
 }
 
 export const modKey = (mac: boolean) => (mac ? "⌘" : "Ctrl+")
-export const keyText = (s: Shortcut, mac: boolean) => s.keys.replace("Mod", modKey(mac))
+export const keyText = (s: Shortcut, mac: boolean) => (mac ? s.keys : s.win ?? s.keys).replace("Mod", modKey(mac))
+
+// Back and Forward are not window shortcuts above: Ctrl+[ is left to the text, and Alt+Arrow is a
+// word jump on a Mac, so the Mac keys are Cmd+[ and Cmd+], the others Alt+Left and Alt+Right.
+export function placeKey(e: KeyLike & { code?: string }, mac: boolean): "back" | "forward" | undefined {
+  if (e.shiftKey) return
+  if (mac) {
+    if (!e.metaKey || e.ctrlKey || e.altKey) return
+    if (e.key === "[" || e.code === "BracketLeft") return "back"
+    if (e.key === "]" || e.code === "BracketRight") return "forward"
+    return
+  }
+  if (!e.altKey || e.metaKey || e.ctrlKey) return
+  return e.key === "ArrowLeft" ? "back" : e.key === "ArrowRight" ? "forward" : undefined
+}
 // "⌘⇧P" as ["⌘", "⇧", "P"] for kbd boxes; Tab, Esc, F2 and Ctrl+ stay whole.
-export const keyCaps = (s: Shortcut, mac: boolean) => keyText(s, mac).match(/Ctrl\+|Tab|Esc|F\d|[^]/gu) ?? []
+export const keyCaps = (s: Shortcut, mac: boolean) => keyText(s, mac).match(/Ctrl\+|Alt\+|Tab|Esc|F\d|[^]/gu) ?? []
 
 export const shortcutFor = (id: string) => SHORTCUTS.find((s) => s.id === id)
 export const keysForCommand = (cmd: string, mac: boolean) => {

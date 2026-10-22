@@ -18,7 +18,8 @@ import { FORMAT_KEYS, buildFormatBar, connectEditor, insertAt, select, setHeadin
 import { figureSnippet } from "./figure"
 import { changeCount, diffLines, whenText, type Line } from "./history"
 import { MAX_GOAL, goalProgress, parseGoal, readGoal, type Goal } from "./goal"
-import { HINTS, SHORTCUTS, docShortcut, filterShortcuts, keyCaps, keysForCommand, keyText, shortcutFor, type DocShortcutId, type Shortcut } from "./shortcuts"
+import { goBack, goForward, leave, newTrail, rename as renameTrail, type Place } from "./places"
+import { HINTS, SHORTCUTS, docShortcut, filterShortcuts, keyCaps, keysForCommand, keyText, placeKey, shortcutFor, type DocShortcutId, type Shortcut } from "./shortcuts"
 import { labelAt, labelProblem, nameProblem } from "./names"
 import { elsewhere, gatherProblems, problemLines } from "./preflight"
 import { changes, paragraphs, readFixes, type Fix } from "./suggest"
@@ -179,6 +180,12 @@ document.addEventListener(
   "keydown",
   (e) => {
     if (e.isComposing || palette.open) return
+    const nav = placeKey(e, mac)
+    if (nav && (e.target === ta || !(e.target as HTMLElement).closest?.("input, textarea"))) {
+      e.preventDefault()
+      e.stopPropagation()
+      return void goPlace(nav)
+    }
     const id = docShortcut(e)
     // Cmd+B and Cmd+I are bold and italic in the text; Chrome keeps Cmd+L for itself.
     if (!id) return
@@ -672,6 +679,8 @@ function dropFileState() {
 
 // Only after leaveCurrent: the open text is on disk or dropped by the writer.
 function openFile(path: string, content: string, base: string | null) {
+  const from = current && current !== path ? here() : null
+  savePos()
   dropFileState()
   current = path
   rememberFile(path)
@@ -684,6 +693,10 @@ function openFile(path: string, content: string, base: string | null) {
   ta.scrollTop = 0
   setMode(base != null ? "review" : "edit")
   render()
+  const jump = pendingJump?.path === path ? pendingJump : null
+  const spot = jump || base != null ? null : loadPos()[path]
+  if (spot) restorePos(spot)
+  if (from && jump?.track !== false) leave(trail, from, { path, line: jump?.line ?? spot?.line ?? 0, col: jump?.col ?? spot?.col ?? 0 })
   renderTree()
   renderTab()
   renderLabels() // its hint is for this file's language
@@ -697,7 +710,7 @@ function openFile(path: string, content: string, base: string | null) {
     previewing = target
     requestPreview(target)
   }
-  if (pendingJump?.path === path) goTo(path, pendingJump.line, pendingJump.col, pendingJump.utf16, pendingJump.len)
+  if (jump) goTo(path, jump.line, jump.col, jump.utf16, jump.len, false)
   if (historyFor === path) openHistory(path)
 }
 
@@ -1714,6 +1727,7 @@ renderRecent()
 // Another folder was opened: nothing from the previous one may stay on screen.
 function resetForFolder(newRoot: string) {
   lastOp = null
+  trail = newTrail()
   closePalette(false)
   clearTimeout(saveTimer)
   closeFile()
@@ -3287,6 +3301,8 @@ function quickCommands(): QuickItem[] {
   }
   if (current) commands.push(
     { id: "goal", label: "Set writing goal…", run: () => { goalAsk = true; openPalette() } },
+    { id: "back", label: "Go back", keys: kc("back"), run: () => goPlace("back") },
+    { id: "forward", label: "Go forward", keys: kc("forward"), run: () => goPlace("forward") },
     { id: "find", label: "Find in file", keys: kc("find"), run: click("open-find") },
     { id: "save", label: "Save file", keys: kc("save"), run: () => flushSave(true) },
     { id: "history", label: "File history…", run: () => openHistory() },
@@ -3831,18 +3847,82 @@ ta.addEventListener("keydown", (e) => { if (e.key === "F2" && !e.isComposing && 
 
 // ---------- preview sync: a click in the preview shows that text; the preview follows the caret ----------
 
-let pendingJump: { path: string; line: number; col: number; utf16?: boolean; len?: number } | null = null
+let pendingJump: { path: string; line: number; col: number; utf16?: boolean; len?: number; track?: boolean } | null = null
 let followed = "" // the caret line the preview last scrolled to
 let followTimer = 0
 
+// ---------- places: where the caret was in each file, and Back / Forward between jumps ----------
+
+let trail = newTrail()
+type Spot = { line: number; col: number; top: number } // top: the first line in view
+const here = (): Place => {
+  const line = lineOf(ta.selectionStart)
+  return { path: current!, line, col: ta.selectionStart - lineStarts[line] }
+}
+const posKey = () => `pos.${root}`
+function loadPos(): Record<string, Spot> {
+  try {
+    const o: unknown = JSON.parse(store.get(posKey()) ?? "{}")
+    return o && typeof o === "object" && !Array.isArray(o) ? (o as Record<string, Spot>) : {}
+  } catch { return {} }
+}
+function savePosAll(all: Record<string, Spot>) {
+  const keys = Object.keys(all)
+  for (const k of keys.slice(0, Math.max(0, keys.length - 30))) delete all[k]
+  store.set(posKey(), JSON.stringify(all))
+}
+function topLine() {
+  let lo = 0
+  let hi = hl.children.length - 1
+  while (lo < hi) {
+    const mid = (lo + hi + 1) >> 1
+    if ((hl.children[mid] as HTMLElement).offsetTop <= ta.scrollTop) lo = mid
+    else hi = mid - 1
+  }
+  return lo
+}
+// The 30 most recent files are kept. Called when the caret settles and when the file is left. Most recent last.
+function savePos() {
+  if (!root || !current || mode !== "edit" || !files.includes(current)) return
+  const all = loadPos()
+  delete all[current]
+  all[current] = { ...here(), top: topLine() }
+  savePosAll(all)
+}
+let posTimer = 0
+const settle = () => { clearTimeout(posTimer); posTimer = window.setTimeout(savePos, 400) }
+document.addEventListener("selectionchange", () => { if (document.activeElement === ta) settle() })
+ta.addEventListener("scroll", settle)
+addEventListener("pagehide", savePos)
+// Put the caret and the view back, clamped to a text that may have changed since.
+function restorePos(s: Spot) {
+  const num = (n: unknown) => (Number.isFinite(n) ? Math.max(0, Math.floor(n as number)) : 0)
+  const line = Math.min(num(s.line), lineStarts.length - 1)
+  const end = (l: number) => (l + 1 < lineStarts.length ? lineStarts[l + 1] - 1 : ta.value.length)
+  const pos = Math.min(lineStarts[line] + num(s.col), end(line))
+  ta.setSelectionRange(pos, pos)
+  const top = hl.children[Math.min(num(s.top), hl.children.length - 1)] as HTMLElement | undefined
+  ta.scrollTop = top ? top.offsetTop : 0
+  hl.scrollTop = ta.scrollTop
+}
+function goPlace(dir: "back" | "forward") {
+  if (!current) return void toast("Open a file first.")
+  const p = (dir === "back" ? goBack : goForward)(trail, here(), (path) => files.includes(path))
+  if (!p) return void toast(dir === "back" ? "Nothing to go back to." : "Nothing to go forward to.")
+  goTo(p.path, p.line, p.col, true, 0, false)
+}
+
 // tinymist counts columns in characters; the text field counts UTF-16 units.
-function goTo(path: string, line: number, col: number, utf16 = false, len = 0) {
+// track: the jump is a place to come Back to (false for Back and Forward themselves, and for the second half
+// of a jump that opened its file, which openFile has already recorded).
+function goTo(path: string, line: number, col: number, utf16 = false, len = 0, track = true) {
   if (path !== current) {
-    pendingJump = { path, line, col, utf16, len }
+    pendingJump = { path, line, col, utf16, len, track }
     leaveThen({ type: "open_file", path })
     return
   }
   pendingJump = null
+  if (track) leave(trail, here(), { path, line, col })
   if (mode === "review") setMode("edit")
   const l = Math.min(line, lineStarts.length - 1)
   const text = lineText(l)
@@ -4231,6 +4311,8 @@ function onMessage(msg: any) {
       if (msg.req && msg.req === leaving) holdTyping(false)
       invalidateDiagnostics()
       const move = (p: string) => (within(p, msg.from) ? msg.to + p.slice(msg.from.length) : p)
+      renameTrail(trail, msg.from, msg.to)
+      savePosAll(Object.fromEntries(Object.entries(loadPos()).map(([p, v]) => [move(p), v])))
       if (current && within(current, msg.from)) {
         current = move(current)
         lang = langOf(current) // x.txt renamed to x.md is Markdown now
