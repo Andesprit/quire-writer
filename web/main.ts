@@ -1254,8 +1254,12 @@ $("tree").addEventListener("focusin", (e) => {
 
 type MenuItem = { label: string; keys?: string; run: () => void } | "-"
 
+let menuFrom: HTMLElement | null = null // where focus goes back to when the menu closes
+let keyMenuRow: HTMLElement | null = null // the row a key opened the menu on (the explorer redraws its rows first)
 function showMenu(x: number, y: number, items: MenuItem[]) {
   const m = $("ctx-menu")
+  if (m.hidden) menuFrom = keyMenuRow ?? (document.activeElement as HTMLElement | null)
+  keyMenuRow = null
   m.replaceChildren(
     ...items.map((it) => {
       if (it === "-") return document.createElement("hr")
@@ -1274,7 +1278,25 @@ function showMenu(x: number, y: number, items: MenuItem[]) {
   m.style.top = `${Math.min(y, innerHeight - m.offsetHeight - 4)}px`
   m.querySelector("button")?.focus()
 }
-const hideMenu = () => ($("ctx-menu").hidden = true)
+const hideMenu = () => {
+  const m = $("ctx-menu")
+  const had = m.contains(document.activeElement)
+  m.hidden = true
+  if (!had || !menuFrom) return
+  const path = menuFrom.dataset.path
+  const back = menuFrom.isConnected ? menuFrom : path ? document.querySelector<HTMLElement>(`#tree .row[data-path="${CSS.escape(path)}"]`) : null
+  back?.focus({ preventScroll: true })
+}
+// Shift+F10 or the menu key: the menu a right click would open, at the focused row.
+document.addEventListener("keydown", (e) => {
+  if (!(e.key === "ContextMenu" || (e.key === "F10" && e.shiftKey)) || e.altKey || e.metaKey || e.ctrlKey) return
+  const row = (document.activeElement as HTMLElement | null)?.closest<HTMLElement>("#tree .row, #outline .row, #labels .row")
+  if (!row) return
+  e.preventDefault()
+  keyMenuRow = row
+  const b = row.getBoundingClientRect()
+  row.dispatchEvent(new MouseEvent("contextmenu", { bubbles: true, cancelable: true, clientX: b.left + 24, clientY: b.bottom }))
+})
 document.addEventListener("mousedown", (e) => {
   if (!$("ctx-menu").hidden && !$("ctx-menu").contains(e.target as Node)) hideMenu()
 })
@@ -1554,11 +1576,12 @@ function markOutlineHere() {
   const row = box.querySelector<HTMLElement>(`.row[data-i="${n}"]`)
   row?.classList.add("here")
   row?.setAttribute("aria-current", "location")
-  // Reach the tab stop for the section the caret is in.
+  // Reach the tab stop for the section the caret is in; above the first heading, the first row.
   box.querySelectorAll<HTMLElement>(".row[tabindex='0']").forEach((r) => (r.tabIndex = -1))
-  if (row) {
-    row.tabIndex = 0
-    if (!box.contains(document.activeElement)) row.scrollIntoView({ block: "nearest" })
+  const stop = row ?? box.querySelector<HTMLElement>(".row[data-i]")
+  if (stop) {
+    stop.tabIndex = 0
+    if (row && !box.contains(document.activeElement)) row.scrollIntoView({ block: "nearest" })
   }
 }
 function renderOutline() {
@@ -3700,7 +3723,7 @@ function showHistory(req: number, path: string, versions: { at: number; text: st
   $("history-title").textContent = `File history: ${baseName(path)}`
   $("history-empty").hidden = historyRows.length > 0
   $("history-body").hidden = historyRows.length === 0
-  $("history-list").innerHTML = historyRows.map((r, i) => `<button class="history-row" role="option" data-i="${i}"><span>${esc(whenText(r.at, now))}</span><span class="history-count"></span></button>`).join("")
+  $("history-list").innerHTML = historyRows.map((r, i) => `<button class="history-row" role="option" tabindex="-1" data-i="${i}"><span>${esc(whenText(r.at, now))}</span><span class="history-count"></span></button>`).join("")
   hist.showModal()
   const editor = $("editor-group").getBoundingClientRect()
   const width = Math.min(620, innerWidth - 16)
@@ -3736,7 +3759,7 @@ function pickVersion(i: number) {
   const r = compared(historyAt)
   countCell(historyAt)
   const rows = [...$("history-list").children] as HTMLElement[]
-  rows.forEach((el, n) => { el.classList.toggle("on", n === historyAt); el.setAttribute("aria-selected", String(n === historyAt)) })
+  rows.forEach((el, n) => { el.classList.toggle("on", n === historyAt); el.setAttribute("aria-selected", String(n === historyAt)); el.tabIndex = n === historyAt ? 0 : -1 })
   rows[historyAt].scrollIntoView({ block: "nearest" })
   rows[historyAt].focus({ preventScroll: true })
   // Only the lines that differ, with two lines around each change.
@@ -3971,7 +3994,9 @@ function closeProblems(focusEditor = true) {
   if ($("problems").hidden) return
   $("problems").hidden = true
   renderProblems()
-  if (focusEditor && mode === "edit" && current) ta.focus({ preventScroll: true })
+  if (!focusEditor) return
+  if (current) ta.focus({ preventScroll: true })
+  else if (!$("sb-errors").hidden) $("sb-errors").focus()
 }
 
 $("problems").addEventListener("click", (e) => {
