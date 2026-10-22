@@ -5,7 +5,7 @@ import "@fontsource/ia-writer-quattro/700.css"
 import "@fontsource/ia-writer-quattro/700-italic.css"
 import { Chunk } from "@codemirror/merge"
 import { highlightHTML, highlightLine, langOf, startState, sameState, type Lang, type State } from "./highlight"
-import { diagnosticRange, errorCount, missingTool, isCurrentDiagnostic, type Diagnostic, type DiagnosticBatch } from "./diagnostics"
+import { diagnosticRange, errorCount, missingTool, isCurrentDiagnostic, shiftDiagnostics, type Diagnostic, type DiagnosticBatch } from "./diagnostics"
 import { findMatches, replacementEdit, type Match } from "./find"
 import { fuzzyMatch, rankFiles } from "./palette"
 import { headingTitle, outline } from "./outline"
@@ -339,7 +339,7 @@ function edit(from: number, to: number, text: string, disk = false) {
 
 ta.addEventListener("input", (e) => {
   docVersion++
-  invalidateDiagnostics()
+  shiftDiagnosticsForTyping()
   ghost = null
   closeCard()
   menu.hidden = true
@@ -2842,8 +2842,21 @@ function invalidateDiagnostics() {
   renderDiagnostics()
 }
 
+// While the writer types, the errors stay (moved along with the edit, dimmed) until the next result:
+// hiding them on every key made the banner blink and the preview jump by its height.
+let diagnosticAt: { path: string; text: string } | null = null // the file and text the errors were placed on
+function shiftDiagnosticsForTyping() {
+  if (!compileDiagnostics.length || !current || diagnosticAt?.path !== current) return invalidateDiagnostics()
+  diagnosticGeneration++
+  compileDiagnostics = shiftDiagnostics(diagnosticAt.text, minimalChange(diagnosticAt.text, ta.value), current, compileDiagnostics)
+  diagnosticAt.text = ta.value
+  if (!compileDiagnostics.length) compileLog = ""
+  renderDiagnostics(true)
+}
+
 function receiveDiagnostics(batch: DiagnosticBatch, log = "", tool = "") {
   if (!isCurrentDiagnostic(batch, root, previewing, diagnosticGeneration, current, ta.value)) return false
+  diagnosticAt = current ? { path: current, text: ta.value } : null
   compileMain = batch.main
   compileTool = tool
   if (!batch.diagnostics.length && !tool) compiledMains.add(batch.main)
@@ -2860,7 +2873,8 @@ $("sb-errors").onclick = () => jumpToDiagnostic()
 $("compile-jump").onclick = () => jumpToDiagnostic()
 $("compile-setup").onclick = () => send({ type: "check_setup" })
 
-function renderDiagnostics() {
+function renderDiagnostics(pending = false) {
+  document.body.classList.toggle("errors-pending", pending)
   const first = compileDiagnostics[0]
   const n = errorCount(compileDiagnostics)
   const status = $("sb-errors") as HTMLButtonElement
