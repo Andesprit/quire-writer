@@ -1109,6 +1109,7 @@ function resetForFolder(newRoot: string) {
   closeFile()
   invalidateDiagnostics()
   compileMain = null
+  compiledMains.clear()
   typedSent = ""
   previewing = null
   previewKind = ""
@@ -2756,6 +2757,7 @@ let diagnosticGeneration = 0
 let compileMain: string | null = null
 let compileDiagnostics: Diagnostic[] = []
 let compileLog = ""
+const compiledMains = new Set<string>() // previews that have shown a good version since this folder opened
 const compileMarks = typeof Highlight === "function" ? new Highlight() : null
 if (compileMarks) CSS.highlights.set("compile-error", compileMarks)
 
@@ -2769,6 +2771,7 @@ function invalidateDiagnostics() {
 function receiveDiagnostics(batch: DiagnosticBatch, log = "") {
   if (!isCurrentDiagnostic(batch, root, previewing, diagnosticGeneration, current, ta.value)) return false
   compileMain = batch.main
+  if (!batch.diagnostics.length) compiledMains.add(batch.main)
   compileDiagnostics = batch.diagnostics
   compileLog = log
   renderDiagnostics()
@@ -2790,6 +2793,9 @@ function renderDiagnostics() {
   status.innerHTML = `${icon("error")} <span>${n} error${n === 1 ? "" : "s"}</span>`
   status.title = first ? `${first.message} — Go to the first error` : ""
   $("compile-banner").hidden = !first
+  $("compile-note").textContent = compileMain && compiledMains.has(compileMain)
+    ? "The preview shows the last version that compiled."
+    : "Nothing has compiled yet, so there is no preview."
   if (first) {
     const jump = $("compile-jump") as HTMLButtonElement
     jump.textContent = first.path
