@@ -27,6 +27,9 @@ const formatKeys = [...fs.readFileSync("format.ts", "utf8").matchAll(/^  ("?[a-z
 assert.deepEqual(formatKeys.sort(), ["/", "b", "i"])
 for (const [k, id] of [["b", "bold"], ["i", "italic"], ["/", "comment"]]) assert.equal(keyText(SHORTCUTS.find((s) => s.id === id)!, true), "⌘" + k.toUpperCase())
 
+const om = SHORTCUTS.find((s) => s.id === "outline-move")!
+assert.equal(keyText(om, false), "Alt+↑↓")
+assert.equal(keyText(om, true), "⌥↑↓")
 assert.equal(keysForCommand("sections", true), "⌘⇧O")
 assert.equal(keysForCommand("sections", false), "Ctrl+⇧O")
 assert.equal(keysForCommand("export", true), undefined)

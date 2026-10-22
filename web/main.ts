@@ -1687,8 +1687,8 @@ $("outline").oncontextmenu = (e) => {
     { label: "Promote Section", keys: kc("outline-promote"), run: () => shiftHeading(i, -1) },
     { label: "Demote Section", keys: kc("outline-demote"), run: () => shiftHeading(i, 1) },
     "-",
-    { label: "Move Section Up", keys: "⌥↑", run: () => moveHeadingBy(i, -1) },
-    { label: "Move Section Down", keys: "⌥↓", run: () => moveHeadingBy(i, 1) },
+    { label: "Move Section Up", keys: mac ? "⌥↑" : "Alt+↑", run: () => moveHeadingBy(i, -1) },
+    { label: "Move Section Down", keys: mac ? "⌥↓" : "Alt+↓", run: () => moveHeadingBy(i, 1) },
     "-",
     { label: showCounts() ? "Hide Word Counts" : "Show Word Counts", run: toggleCounts },
   ])

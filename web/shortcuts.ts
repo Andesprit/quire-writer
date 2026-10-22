@@ -20,7 +20,7 @@ export const SHORTCUTS = [
   { id: "sections", action: "Go to section", group: "Go to", keys: "Mod⇧O", cmd: "sections", doc: { key: "o", shift: true } },
   { id: "label-prefix", action: "Go to label (type # in the open-a-file box)", group: "Go to", keys: "#" },
   { id: "rename-label", action: "Rename the label under the caret", group: "Go to", keys: "F2", cmd: "rename-label", src: '"F2"' },
-  { id: "outline-move", action: "Move the focused Outline section up or down", group: "Go to", keys: "⌥↑↓", src: 'e.altKey && (e.key === "ArrowUp"' },
+  { id: "outline-move", action: "Move the focused Outline section up or down", group: "Go to", keys: "⌥↑↓", win: "Alt+↑↓", src: 'e.altKey && (e.key === "ArrowUp"' },
   { id: "outline-promote", action: "Promote the focused Outline section with what is inside it", group: "Go to", keys: "⌥⇧←", win: "Alt+Shift+←", src: 'e.altKey && e.shiftKey && (e.key === "ArrowLeft"' },
   { id: "outline-demote", action: "Demote the focused Outline section with what is inside it", group: "Go to", keys: "⌥⇧→", win: "Alt+Shift+→", src: '"ArrowRight") && !e.metaKey' },
   { id: "item-menu", action: "Open the menu for the focused file or Outline row", group: "Go to", keys: "⇧F10", win: "Shift+F10", src: '"F10"' },
