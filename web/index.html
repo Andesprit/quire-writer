@@ -260,6 +260,17 @@
     <p id="keys-empty" hidden>No shortcut matches.</p>
   </dialog>
 
+  <dialog id="history-sheet" aria-labelledby="history-title">
+    <div class="quick-head"><span id="history-title">File history</span><button class="icon-btn small" id="history-close" title="Close (Escape)" aria-label="Close file history"><i class="codicon codicon-close"></i></button></div>
+    <p id="history-empty" hidden>No earlier versions yet. Quire keeps a version each time this file is changed.</p>
+    <div id="history-body">
+      <div id="history-list" role="listbox" aria-label="Earlier versions, newest first"></div>
+      <p id="history-note"></p>
+      <div id="history-diff" tabindex="0" aria-label="Changes against the text now"></div>
+      <div class="history-foot"><button class="btn primary" id="history-restore">Restore this version</button></div>
+    </div>
+  </dialog>
+
   <dialog id="quick-input" aria-labelledby="quick-title">
     <div class="quick-head"><label id="quick-title" for="quick-query">Open a file</label><button class="icon-btn small" id="quick-close" title="Close (Escape)" aria-label="Close quick input"><i class="codicon codicon-close"></i></button></div>
     <input id="quick-query" role="combobox" aria-label="Search project files" aria-autocomplete="list" aria-expanded="true" aria-controls="quick-list" aria-describedby="quick-help quick-count" placeholder="Search files by name. Type > for commands, @ for sections, # for labels" spellcheck="false" autocomplete="off" />

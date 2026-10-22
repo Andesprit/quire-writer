@@ -15,6 +15,7 @@ import { diff, minimalChange, rebase, type Diff } from "./merge"
 import { $, ask, esc, fileIcon, icon, toast } from "./ui"
 import { FORMAT_KEYS, buildFormatBar, connectEditor, insertAt, select, setHeading, syntaxOf } from "./format"
 import { figureSnippet } from "./figure"
+import { changeCount, diffLines, whenText, type Line } from "./history"
 import { MAX_GOAL, goalProgress, parseGoal, readGoal, type Goal } from "./goal"
 import { HINTS, SHORTCUTS, docShortcut, filterShortcuts, keyCaps, keysForCommand, keyText, shortcutFor, type DocShortcutId, type Shortcut } from "./shortcuts"
 import { labelAt, labelProblem, nameProblem } from "./names"
@@ -693,6 +694,7 @@ function openFile(path: string, content: string, base: string | null) {
     requestPreview(target)
   }
   if (pendingJump?.path === path) goTo(path, pendingJump.line, pendingJump.col, pendingJump.utf16, pendingJump.len)
+  if (historyFor === path) openHistory(path)
 }
 
 function closeFile(message?: string) {
@@ -1274,6 +1276,7 @@ $("tree").oncontextmenu = (e) => {
       "-",
       { label: "Rename…", keys: kc("rename"), run: () => startRename(path) },
       { label: "Move to Folder…", run: () => openPalette(MOVE, path) },
+      ...(files.includes(path) ? [{ label: "File History…", run: () => openHistory(path) }] : []),
       { label: "Move to Trash", keys: kc("trash"), run: () => trash(path) },
       "-",
       { label: "Copy Relative Path", run: () => navigator.clipboard?.writeText(path) },
@@ -3096,6 +3099,7 @@ function quickCommands(): QuickItem[] {
     { id: "goal", label: "Set writing goal…", run: () => { goalAsk = true; openPalette() } },
     { id: "find", label: "Find in file", keys: kc("find"), run: click("open-find") },
     { id: "save", label: "Save file", keys: kc("save"), run: () => flushSave(true) },
+    { id: "history", label: "File history…", run: () => openHistory() },
   )
   if (current && syntax()) commands.push({ id: "sections", label: "Go to section…", keys: kc("sections"), run: () => openPalette("@") })
   if (root) commands.push({ id: "labels", label: "Go to label…", run: () => openPalette("#") })
@@ -3368,6 +3372,102 @@ sheetQuery.oninput = renderSheet
 sheet.addEventListener("cancel", (e) => { e.preventDefault(); closeShortcuts() })
 $("keys-close").onclick = closeShortcuts
 $("sb-keys").onclick = openShortcuts
+
+// ---------- file history: earlier versions of the open file, and restoring one ----------
+const hist = $<HTMLDialogElement>("history-sheet")
+let historyFor: string | null = null // a file to show the history of once it is open
+let historyReq = 0
+let historyRows: { at: number; text: string; lines: Line[]; coarse: boolean }[] = []
+let historyAt = 0
+let historyOpener: HTMLElement | null = null
+
+function openHistory(path = current) {
+  if (!root || !path) return
+  if (document.querySelector("dialog[open]")) return
+  if (path !== current) {
+    historyFor = path
+    leaveThen({ type: "open_file", path }).then((ok) => { if (!ok) historyFor = null })
+    return
+  }
+  historyFor = null
+  historyOpener = document.activeElement as HTMLElement | null
+  send({ type: "list_history", req: (historyReq = ++reqSeq), path })
+}
+function showHistory(req: number, path: string, versions: { at: number; text: string }[]) {
+  if (req !== historyReq || path !== current) return
+  const now = Date.now()
+  historyRows = versions.map((v) => ({ ...v, ...diffLines(ta.value, v.text) }))
+  historyAt = 0
+  $("history-title").textContent = `File history: ${baseName(path)}`
+  $("history-empty").hidden = historyRows.length > 0
+  $("history-body").hidden = historyRows.length === 0
+  $("history-list").innerHTML = historyRows.map((r, i) => {
+    const c = changeCount(r.lines)
+    return `<button class="history-row" role="option" data-i="${i}"><span>${esc(whenText(r.at, now))}</span><span class="history-count"><b class="add">+${c.added}</b> <b class="del">\u2212${c.removed}</b></span></button>`
+  }).join("")
+  hist.showModal()
+  const editor = $("editor-group").getBoundingClientRect()
+  const width = Math.min(620, innerWidth - 16)
+  const centre = editor.width > 320 ? editor.left + editor.width / 2 : innerWidth / 2
+  hist.style.width = width + "px"
+  hist.style.left = Math.max(8, Math.min(centre - width / 2, innerWidth - width - 8)) + "px"
+  hist.style.top = $("titlebar").getBoundingClientRect().bottom + 8 + "px"
+  if (historyRows.length) pickVersion(0)
+  else $("history-close").focus()
+  placePreview()
+}
+function pickVersion(i: number) {
+  historyAt = Math.max(0, Math.min(i, historyRows.length - 1))
+  const r = historyRows[historyAt]
+  const rows = [...$("history-list").children] as HTMLElement[]
+  rows.forEach((el, n) => { el.classList.toggle("on", n === historyAt); el.setAttribute("aria-selected", String(n === historyAt)) })
+  rows[historyAt].scrollIntoView({ block: "nearest" })
+  rows[historyAt].focus({ preventScroll: true })
+  // Only the lines that differ, with two lines around each change.
+  const show = r.lines.map((l, n) => l.op !== " " || r.lines.slice(Math.max(0, n - 2), n + 3).some((m) => m.op !== " "))
+  let html = "", gap = false
+  r.lines.forEach((l, n) => {
+    if (!show[n]) return void (gap = true)
+    if (gap && html) html += `<div class="dl gap">\u2026</div>`
+    gap = false
+    html += `<div class="dl ${l.op === "+" ? "add" : l.op === "-" ? "del" : ""}"><i>${l.op === " " ? "" : l.op === "+" ? "+" : "\u2212"}</i>${esc(l.text) || " "}</div>`
+  })
+  const same = r.lines.every((l) => l.op === " ")
+  $("history-diff").innerHTML = same ? `<p class="history-same">This version is the same as the text now.</p>` : html
+  $("history-note").textContent = r.coarse
+    ? "This file changed too much to compare line by line: the text now is shown removed and this version added."
+    : "Restoring adds the green lines and removes the red ones. One Undo brings the text now back."
+  $<HTMLButtonElement>("history-restore").disabled = same
+}
+function closeHistory() {
+  if (!hist.open) return
+  hist.close()
+  ;(historyOpener?.isConnected ? historyOpener : ta).focus({ preventScroll: true })
+  placePreview()
+}
+function restoreVersion() {
+  const r = historyRows[historyAt]
+  if (!r || !current) return
+  if (ta.readOnly) return void toast("Quire is still saving. Wait a moment, then try again.", "info")
+  send({ type: "snapshot", path: current, content: ta.value }) // the text now stays in the history
+  const when = whenText(r.at, Date.now())
+  closeHistory() // first: the editor is out of reach while the dialog is open, and its undo would not see the edit
+  edit(0, ta.value.length, r.text)
+  flushSave(true)
+  toast(`Restored the version from ${when}. Press Undo to bring back the text from before.`, "info")
+}
+$("history-list").onclick = (e) => {
+  const row = (e.target as HTMLElement).closest<HTMLElement>(".history-row")
+  if (row) pickVersion(Number(row.dataset.i))
+}
+$("history-list").onkeydown = (e) => {
+  if (e.key !== "ArrowDown" && e.key !== "ArrowUp") return
+  e.preventDefault()
+  pickVersion(historyAt + (e.key === "ArrowDown" ? 1 : -1))
+}
+$("history-restore").onclick = restoreVersion
+$("history-close").onclick = closeHistory
+hist.addEventListener("cancel", (e) => { e.preventDefault(); closeHistory() })
 $("welcome-keys").onclick = openShortcuts
 $("shortcuts").innerHTML = HINTS.map((id) => {
   const s = shortcutFor(id)!
@@ -3377,7 +3477,7 @@ $("shortcuts").innerHTML = HINTS.map((id) => {
 
 // The web view sits over #preview. A native view covers whatever the page floats over it, so
 // it steps aside while a dialog or menu would sit under it, and notices go to its left.
-const floating = ["quick-input", "keys-sheet", "ask", "new-project-ask", "setup", "ac-settings", "ck-settings", "ed-settings", "ch-settings", "inline-box", "fix-card", "diagnostic-card", "rewrite-menu", "rewrite-card", "ref-list", "ctx-menu", "toasts", "sidebar", "chat"].map((id) => $(id))
+const floating = ["quick-input", "keys-sheet", "history-sheet", "ask", "new-project-ask", "setup", "ac-settings", "ck-settings", "ed-settings", "ch-settings", "inline-box", "fix-card", "diagnostic-card", "rewrite-menu", "rewrite-card", "ref-list", "ctx-menu", "toasts", "sidebar", "chat"].map((id) => $(id))
 let placing = 0
 let placed = "" // the place last sent
 let bgSent = "" // the theme's preview background last sent: the web view shows it while a preview loads
@@ -4070,6 +4170,9 @@ function onMessage(msg: any) {
       break
     case "cite_result":
       applyCite(msg)
+      break
+    case "history":
+      showHistory(msg.req, msg.path, msg.versions ?? [])
       break
     case "search_result":
       showSearch(msg.req, msg.hits ?? [], !!msg.more)

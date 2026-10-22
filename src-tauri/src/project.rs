@@ -3621,6 +3621,11 @@ mod tests {
         // The editor's text right before a restore, as the page sends it.
         w.keep("a.md", "typed but not saved", true);
         assert_eq!(texts(&w, "a.md")[0], "typed but not saved");
+        if let Ok(out) = std::env::var("QUIRE_DUMP") {
+            // What the page hears for "File history" on a.md (with these versions), and on a file with none.
+            fs::write(format!("{out}/history-reply.json"), json!({"type": "history", "req": 1, "path": "a.md", "versions": w.versions("a.md")}).to_string()).unwrap();
+            fs::write(format!("{out}/history-empty.json"), json!({"type": "history", "req": 1, "path": "a.md", "versions": w.versions("none.md")}).to_string()).unwrap();
+        }
         // A renamed file takes its history along.
         let old = texts(&w, "a.md");
         w.rename("a.md", "c.md", &json!(1)).unwrap();
