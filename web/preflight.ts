@@ -1,7 +1,7 @@
 import type { Diagnostic } from "./diagnostics.ts"
 
 export interface Nowhere { kind: "ref" | "cite"; key: string; path: string; line: number; col: number }
-export interface Problem { path: string; line: number; col: number; text: string; utf16: boolean } // utf16: compile errors count UTF-16 units, references count characters
+export interface Problem { path: string; line: number; col: number; text: string; utf16: boolean; nowhere?: Nowhere } // utf16: compile errors count UTF-16 units, references count characters
 
 // What the page already knows against the document about to be exported. Compile errors count when
 // they belong to this document (it is the one compiled, so errors in files it pulls in break it too);
@@ -18,7 +18,7 @@ export function gatherProblems(path: string, compileMain: string | null, diagnos
     : []
   const missing = nowhere
     .filter((n) => n.path === path)
-    .map((n) => ({ path: n.path, line: n.line, col: n.col, utf16: false, text: `${n.kind === "cite" ? "Citation" : "Reference"} ${n.key} points nowhere` }))
+    .map((n) => ({ path: n.path, line: n.line, col: n.col, utf16: false, nowhere: n, text: `${n.kind === "cite" ? "Citation" : "Reference"} ${n.key} points nowhere` }))
   return [...errors, ...missing]
 }
 

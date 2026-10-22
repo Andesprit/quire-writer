@@ -1,5 +1,3 @@
-import { fuzzyMatch } from "./palette.ts"
-
 // Closest existing keys for a reference or citation that points nowhere.
 // The caller picks the pool (labels for a reference, bib keys for a citation), so kinds never mix.
 
@@ -15,6 +13,9 @@ function distance(a: string, b: string) {
   return d[a.length][b.length]
 }
 
+/** The letters of `k` appear in `n` in order. */
+const spread = (n: string, k: string) => { let i = 0; for (const c of n) if (c === k[i]) i++; return i === k.length }
+
 /** Up to three keys from `pool` the writer most likely meant by `key`, best first. */
 export function suggestKeys(key: string, pool: string[]): string[] {
   const k = key.toLowerCase()
@@ -25,7 +26,7 @@ export function suggestKeys(key: string, pool: string[]): string[] {
     if (name === key) continue
     const near = distance(k, n)
     // 0 same letters in another case, 1 one is the start of the other, 2 a typo, 3 the typed letters spread out in it
-    const tier = n === k ? 0 : k.length >= 4 && n.length >= 4 && (n.startsWith(k) || k.startsWith(n)) ? 1 : k.length >= 3 && near <= slack ? 2 : k.length >= 5 && n.length <= 2 * k.length && fuzzyMatch(n, k) ? 3 : 4
+    const tier = n === k ? 0 : k.length >= 4 && n.length >= 4 && (n.startsWith(k) || k.startsWith(n)) ? 1 : k.length >= 3 && near <= slack ? 2 : k.length >= 5 && n.length <= 2 * k.length && spread(n, k) ? 3 : 4
     if (tier < 4) ranked.push({ name, tier, cost: tier === 1 ? Math.abs(n.length - k.length) : near })
   }
   ranked.sort((a, b) => a.tier - b.tier || a.cost - b.cost || a.name.localeCompare(b.name))
@@ -38,5 +39,7 @@ export function suggestKeys(key: string, pool: string[]): string[] {
  */
 export function keySpan(line: string, col: number, key: string): { from: number; to: number } | null {
   const from = Array.from(line).slice(0, col).join("").length
-  return line.startsWith(key, from) ? { from, to: from + key.length } : null
+  const to = from + key.length
+  // The next character must not continue the key: sec:intro is not the start of sec:introduction.
+  return line.startsWith(key, from) && !/^[\p{L}\p{N}_:-]/u.test(line.slice(to, to + 2)) ? { from, to } : null
 }

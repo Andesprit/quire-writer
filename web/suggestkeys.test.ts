@@ -25,4 +25,6 @@ assert.deepEqual(keySpan("\\cref{a,sec:nope}", 8, "sec:nope"), { from: 8, to: 16
 const wide = "Ünï 😀 see @fig-resuls"
 assert.equal(wide.slice(keySpan(wide, 11, "fig-resuls")!.from), "fig-resuls") // the emoji is 2 UTF-16 units, 1 character
 assert.equal(keySpan("see @other", 5, "fig-resuls"), null) // moved: do not touch
+assert.equal(keySpan("see @sec:introduction", 5, "sec:intro"), null) // already fixed: the key is only the start of a longer one
+assert.deepEqual(keySpan("(@sec:intro).", 2, "sec:intro"), { from: 2, to: 11 })
 console.log("suggestkeys ok")

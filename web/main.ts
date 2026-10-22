@@ -5,6 +5,7 @@ import "@fontsource/ia-writer-quattro/700.css"
 import "@fontsource/ia-writer-quattro/700-italic.css"
 import { Chunk } from "@codemirror/merge"
 import { highlightHTML, highlightLine, langOf, startState, sameState, type Lang, type State } from "./highlight"
+import { suggestKeys, keySpan } from "./suggestkeys"
 import { diagnosticRange, errorCount, missingTool, isCurrentDiagnostic, shiftDiagnostics, type Diagnostic, type DiagnosticBatch } from "./diagnostics"
 import { findMatches, replacementEdit, type Match } from "./find"
 import { fuzzyMatch, rankFiles } from "./palette"
@@ -1311,6 +1312,21 @@ const LABEL_HINT: Record<Lang, string> = {
   text: "",
 }
 
+// The keys the writer most likely meant. Typst and Quarto write a citation like a reference (@key), so they offer labels
+// and bibliography keys; LaTeX \ref gets labels only and a citation gets bibliography keys only, so the kinds never mix.
+function keyChoices(n: Nowhere): string[] {
+  const lang = langOf(n.path)
+  const own = labels.filter((l) => langOf(l.path) === lang).map((l) => l.name)
+  return suggestKeys(n.key, n.kind === "cite" ? cites : lang === "typst" || lang === "quarto" ? [...own, ...cites] : own)
+}
+
+function fixRow(n: Nowhere, i: number): string {
+  const [top, ...more] = keyChoices(n)
+  if (!top) return `<div class="fixes"><span class="muted">No similar ${n.kind === "cite" ? "citation" : "label"}</span></div>`
+  return `<div class="fixes"><button class="fix" data-fix="${i}" data-key="${esc(top)}" title="Replace ${esc(n.key)} with ${esc(top)}">Did you mean ${esc(top)}?</button>` +
+    more.map((k) => `<button class="fix alt" data-fix="${i}" data-key="${esc(k)}" title="Replace ${esc(n.key)} with ${esc(k)}">${esc(k)}</button>`).join("") + "</div>"
+}
+
 function renderLabels() {
   const open = store.get("labels") !== "closed"
   const unused = labels.filter((l) => !l.refs).length
@@ -1330,7 +1346,8 @@ function renderLabels() {
       nowhere.map((n, i) =>
         `<button class="row label broken" data-m="${i}" title="${esc(`${n.path}, line ${n.line + 1}. No ${n.kind === "cite" ? "citation" : "label"} named ${n.key}. ${NOWHERE_HINT}`)}">` +
         `${icon("warning")}<span class="name">${esc(n.key)}</span>` +
-        `<span class="refs">${n.kind === "cite" ? "citation" : "reference"} · ${esc(n.path.split("/").pop()!)}:${n.line + 1}</span></button>`).join("")
+        `<span class="refs">${n.kind === "cite" ? "citation" : "reference"} · ${esc(n.path.split("/").pop()!)}:${n.line + 1}</span></button>` +
+        fixRow(n, i)).join("")
     : ""
   $("labels").innerHTML = broken + (labels.length
     ? labels
@@ -1453,6 +1470,8 @@ $("labels-head").onclick = () => {
   renderLabels()
 }
 $("labels").onclick = (e) => {
+  const fix = (e.target as HTMLElement).closest<HTMLElement>(".fix")
+  if (fix) return void applyKeyFix(nowhere[Number(fix.dataset.fix)], fix.dataset.key!)
   const row = (e.target as HTMLElement).closest<HTMLElement>(".row")
   const l = row?.dataset.m ? nowhere[Number(row.dataset.m)] : labels[Number(row?.dataset.i)]
   if (l) goTo(l.path, l.line, l.col)
@@ -2809,11 +2828,14 @@ async function exportAs(to: string) {
   const problems = gatherProblems(path, compileMain, compileDiagnostics, document.body.classList.contains("errors-pending"), nowhere)
   if (problems.length) {
     const lines = problemLines(path, problems)
+    const choice = problems.map((p) => p.nowhere && keyChoices(p.nowhere)[0])
+    choice.slice(0, lines.length).forEach((k, i) => { if (k) lines[i] += `. Did you mean ${k}?` })
     const more = elsewhere(path, compileMain, nowhere)
     if (more) lines.push(`${more} more reference${more > 1 ? "s" : ""} point${more > 1 ? "" : "s"} nowhere in other files (see Labels).`)
     const n = problems.length
-    const answer = await ask(`${baseName(path)} has ${n} problem${n > 1 ? "s" : ""}`, lines.join("\n"), "Export anyway", undefined, "Go to first problem")
-    if (answer === "extra") goTo(problems[0].path, problems[0].line, problems[0].col, problems[0].utf16)
+    const fix = choice[0] // the first problem is a broken key with a likely fix: offer it where "Go to first problem" would be
+    const answer = await ask(`${baseName(path)} has ${n} problem${n > 1 ? "s" : ""}`, lines.join("\n"), "Export anyway", undefined, fix ? `Fix ${problems[0].nowhere!.key} to ${fix}` : "Go to first problem")
+    if (answer === "extra") fix ? applyKeyFix(problems[0].nowhere!, fix) : goTo(problems[0].path, problems[0].line, problems[0].col, problems[0].utf16)
     if (answer !== "save") return
   }
   send({ type: "export", req: ++reqSeq, path, to })
@@ -3543,6 +3565,27 @@ function goTo(path: string, line: number, col: number, utf16 = false, len = 0) {
   showDiagnosticAtCaret()
 }
 
+// Replace a key that points nowhere with the one the writer picked, as one undo step. In another file the file
+// opens first (the same save question as any file change) and the key is replaced once it is open; the page never
+// writes to a file it has not opened.
+let pendingFix: { n: Nowhere; key: string } | null = null
+function applyKeyFix(n: Nowhere, key: string) {
+  if (!n) return
+  if (n.path !== current) {
+    pendingFix = { n, key }
+    pendingJump = { path: n.path, line: n.line, col: n.col }
+    leaveThen({ type: "open_file", path: n.path }).then((ok) => { if (!ok) pendingFix = null })
+    return
+  }
+  if (ta.readOnly) return void toast("Wait a moment, then try again.")
+  if (mode === "review") setMode("edit")
+  const span = n.line < lineStarts.length ? keySpan(lineText(n.line), n.col, n.key) : null
+  if (!span) return void toast(`${n.key} has moved. Open it to fix by hand.`)
+  const at = lineStarts[n.line] + span.from
+  edit(at, lineStarts[n.line] + span.to, key)
+  ta.setSelectionRange(at, at + key.length)
+}
+
 function followCaret() {
   clearTimeout(followTimer)
   followTimer = window.setTimeout(() => {
@@ -3867,6 +3910,11 @@ function onMessage(msg: any) {
       break
     case "done":
       if (msg.req === leaving) holdTyping(false)
+      if (pendingFix && !ta.readOnly) { // the file a fix waits for is open and typing is free again
+        const fix = pendingFix
+        pendingFix = null
+        if (fix.n.path === current) applyKeyFix(fix.n, fix.key)
+      }
       break
     case "label_renamed": {
       if (msg.req === leaving) holdTyping(false)
