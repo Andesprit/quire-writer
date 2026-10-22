@@ -13,7 +13,7 @@ import { refChoices, refTrigger, type RefChoice, type RefTrigger } from "./refco
 import { diff, minimalChange, rebase, type Diff } from "./merge"
 import { $, ask, esc, fileIcon, icon, toast } from "./ui"
 import { FORMAT_KEYS, buildFormatBar, connectEditor, insertAt, select, setHeading, syntaxOf } from "./format"
-import { nameProblem } from "./names"
+import { labelAt, labelProblem, nameProblem } from "./names"
 import { elsewhere, gatherProblems, problemLines } from "./preflight"
 import { changes, paragraphs, readFixes, type Fix } from "./suggest"
 import { add, connectChat, onFolderOpened, onPermission, onTurnEnd, onTurnStart, onUpdate, renderChips, running, setAgentReady } from "./chat"
@@ -1106,6 +1106,8 @@ function renderLabels() {
     unused && `${unused} unused`,
   ].filter(Boolean).join(", ")
   $("labels").classList.toggle("closed", !open)
+  const prev = document.getElementById("label-input") as HTMLInputElement | null
+  const keep = prev && { value: prev.value, start: prev.selectionStart, end: prev.selectionEnd }
   const broken = nowhere.length
     ? `<div class="labels-group" title="${esc(NOWHERE_HINT)}">Points nowhere</div>` +
       nowhere.map((n, i) =>
@@ -1117,13 +1119,114 @@ function renderLabels() {
     ? labels
         .map(
           (l, i) =>
-            `<button class="row label${l.refs ? "" : " unused"}" data-i="${i}" ` +
+            labelNaming?.name === l.name && labelNaming.path === l.path
+              ? `<div class="row naming label-naming"><span class="twist"></span>${icon("tag")}` +
+                `<input class="tree-input" id="label-input" value="${esc(labelNaming.draft)}" spellcheck="false" autocomplete="off" aria-label="New name for ${esc(l.name)}"${labelNaming.error ? ' aria-invalid="true"' : ""} aria-describedby="label-msg"></div>` +
+                `<div class="name-msg" id="label-msg" role="alert"${labelNaming.error ? "" : " hidden"}>${esc(labelNaming.error)}</div>`
+              : `<button class="row label${l.refs ? "" : " unused"}" data-i="${i}" ` +
             `title="${esc(`${l.path}, line ${l.line + 1}${l.refs ? "" : ". Nothing refers to this label."}`)}">` +
             `${icon("tag")}<span class="name">${esc(l.name)}</span>` +
             `<span class="refs">${l.refs ? `${l.refs} use${l.refs > 1 ? "s" : ""}` : "unused"}</span></button>`,
         )
         .join("")
     : nowhere.length ? "" : `<p class="muted labels-empty">No labels yet. ${esc(LABEL_HINT[lang])}</p>`)
+  const input = document.getElementById("label-input") as HTMLInputElement | null
+  if (!input) return
+  input.focus()
+  if (keep) {
+    input.value = keep.value
+    input.setSelectionRange(keep.start, keep.end)
+  } else input.select()
+}
+
+// ---------- rename a label everywhere ----------
+
+// The name box in the Labels panel: `name` defined in `path` is being renamed.
+let labelNaming: { name: string; path: string; draft: string; error: string } | null = null
+let pendingRename: { name: string; path: string; to: string } | null = null
+const sameLanguage = (path: string) => labels.filter((l) => langOf(l.path) === langOf(path)).map((l) => l.name)
+
+function startLabelRename(name: string, path: string, draft = name, error = "") {
+  if (!root) return
+  labelNaming = { name, path, draft, error }
+  store.set("labels", "open")
+  if (sidebar.classList.contains("searching")) showExplorer()
+  setPanel("sidebar", true)
+  renderLabels()
+}
+
+// F2 in the editor, or the command: the label under the caret, defined in a file of this language.
+function renameLabelAtCaret(): boolean {
+  const own = labels.filter((l) => langOf(l.path) === lang)
+  const name = current && labelAt(ta.value, ta.selectionStart, own.map((l) => l.name))
+  const l = own.find((l) => l.name === name)
+  if (l) startLabelRename(l.name, l.path)
+  return !!l
+}
+
+function cancelLabelRename() {
+  labelNaming = null
+  renderLabels()
+}
+
+function showLabelProblem(problem: string) {
+  const msg = document.getElementById("label-msg")
+  const input = document.getElementById("label-input")
+  if (!msg || !input) return
+  msg.hidden = !problem
+  msg.textContent = problem
+  if (problem) input.setAttribute("aria-invalid", "true")
+  else input.removeAttribute("aria-invalid")
+}
+
+async function commitLabelRename() {
+  const n = labelNaming
+  const input = document.getElementById("label-input") as HTMLInputElement | null
+  if (!n || !input) return
+  const to = input.value.trim()
+  const problem = labelProblem(to, n.name, langOf(n.path), sameLanguage(n.path))
+  if (problem) return showLabelProblem(problem) // Enter does nothing else
+  labelNaming = null
+  renderLabels()
+  // The open text goes to disk first, and typing waits until the app answers.
+  holdTyping(true)
+  const error = await flushSave(true)
+  if (error) {
+    holdTyping(false)
+    toast(`${baseName(current!)} was not saved, so nothing was renamed. ${error} Your text is still here.`)
+    return startLabelRename(n.name, n.path, to)
+  }
+  pendingRename = { name: n.name, path: n.path, to }
+  send({ type: "rename_label", req: (leaving = ++reqSeq), path: n.path, from: n.name, to })
+}
+
+$("labels").addEventListener("keydown", (e) => {
+  const el = e.target as HTMLElement
+  if (el.id === "label-input") {
+    if (e.isComposing) return
+    if (e.key === "Enter") commitLabelRename()
+    else if (e.key === "Escape") cancelLabelRename()
+    else return
+    e.preventDefault()
+    e.stopPropagation()
+  } else if (e.key === "F2" && el.dataset.i) {
+    e.preventDefault()
+    const l = labels[Number(el.dataset.i)]
+    if (l) startLabelRename(l.name, l.path)
+  }
+})
+$("labels").addEventListener("input", (e) => {
+  const n = labelNaming
+  if (n && (e.target as HTMLElement).id === "label-input") showLabelProblem(labelProblem((e.target as HTMLInputElement).value.trim(), n.name, langOf(n.path), sameLanguage(n.path)))
+})
+$("labels").addEventListener("focusout", (e) => {
+  if ((e.target as HTMLElement).id === "label-input" && labelNaming && !(e.relatedTarget as HTMLElement | null)?.closest?.("#labels")) cancelLabelRename()
+})
+$("labels").oncontextmenu = (e) => {
+  const l = labels[Number((e.target as HTMLElement).closest<HTMLElement>(".row[data-i]")?.dataset.i)]
+  if (!l) return
+  e.preventDefault()
+  showMenu(e.clientX, e.clientY, [{ label: "Rename…", keys: "F2", run: () => startLabelRename(l.name, l.path) }])
 }
 
 $("breadcrumbs").onclick = (e) => { if ((e.target as HTMLElement).closest(".section-crumb")) openPalette("@") }
@@ -2660,6 +2763,7 @@ function quickCommands(): QuickItem[] {
   )
   if (current && syntax()) commands.push({ id: "sections", label: "Go to section…", keys: commandKey + "⇧O", run: () => openPalette("@") })
   if (root) commands.push({ id: "labels", label: "Go to label…", run: () => openPalette("#") })
+  if (root && labels.length) commands.push({ id: "rename-label", label: "Rename label…", keys: "F2", run: () => { if (!renameLabelAtCaret()) { renamePick = true; openPalette("#") } } })
   if (current && syntax()) commands.push({ id: "export", label: "Export document…", run: click("export") })
   if (previewing && files.includes(previewing)) for (const [as, label] of Object.entries(PREVIEW_AS)) commands.push({
     id: "preview-" + as, label: "Preview as " + label,
@@ -2677,6 +2781,7 @@ function markedText(text: string, positions: number[], offset = 0) {
 
 type QuickKind = "files" | "commands" | "sections" | "labels"
 let quickKind: QuickKind = "files"
+let renamePick = false // the "#" list picks the label to rename instead of going to it
 const QUICK = {
   files: { title: "Open a file", aria: "Search project files", noun: "file", icon: (id: string) => fileIcon(id) },
   commands: { title: "Run a command", aria: "Search commands", noun: "command", icon: () => icon("chevron-right") },
@@ -2703,7 +2808,7 @@ function renderPalette() {
   const [kind, query] = quickMode(paletteQuery.value)
   quickKind = kind
   const q = QUICK[kind]
-  $("quick-title").textContent = q.title
+  $("quick-title").textContent = kind === "labels" && renamePick ? "Rename a label" : q.title
   paletteQuery.setAttribute("aria-label", q.aria)
   if (kind === "commands") quickItems = quickCommands().flatMap((c) => {
     const match = fuzzyMatch(c.label, query)
@@ -2721,13 +2826,14 @@ function renderPalette() {
     quickItems = query.trim() ? items.sort((a, b) => b.score - a.score) : items // document order when nothing is typed
     if (!query.trim() && quickIndex === 0) quickIndex = Math.max(0, items.findIndex((i) => i.here))
   } else if (kind === "labels") {
-    const broken = nowhere.flatMap((n) => {
+    const broken = renamePick ? [] : nowhere.flatMap((n) => {
       const match = fuzzyMatch(n.key, query)
       return match ? [{ id: "missing-" + n.path + ":" + n.line + ":" + n.col, label: n.key, dir: n.path, detail: "points nowhere", score: match.score, positions: match.positions, run: () => goTo(n.path, n.line, n.col) }] : []
     })
+    const pick = renamePick
     quickItems = labels.flatMap((l) => {
       const match = fuzzyMatch(l.name, query)
-      return match ? [{ id: "label-" + l.path + ":" + l.line + ":" + l.name, label: l.name, dir: l.path, detail: l.refs ? `${l.refs} use${l.refs > 1 ? "s" : ""}` : "unused", score: match.score, positions: match.positions, run: () => goTo(l.path, l.line, l.col) }] : []
+      return match ? [{ id: "label-" + l.path + ":" + l.line + ":" + l.name, label: l.name, dir: l.path, detail: l.refs ? `${l.refs} use${l.refs > 1 ? "s" : ""}` : "unused", score: match.score, positions: match.positions, run: () => pick ? startLabelRename(l.name, l.path) : goTo(l.path, l.line, l.col) }] : []
     })
     if (query.trim()) {
       quickItems.push(...broken)
@@ -2805,6 +2911,7 @@ function openPalette(prefix = "") {
 
 function closePalette(restore = true) {
   if (!palette.open) return
+  renamePick = false // the list's rows already know whether they rename
   palette.close()
   if (restore) {
     const opener = quickOpener?.isConnected ? quickOpener : [...$("tree").querySelectorAll<HTMLElement>("[data-path]")].find((el) => el.dataset.path === quickOpenerPath)
@@ -3024,6 +3131,7 @@ function showDiagnosticAtCaret() {
 }
 ta.addEventListener("blur", () => { $("diagnostic-card").hidden = true })
 ta.addEventListener("keydown", (e) => { if (e.key === "Escape") $("diagnostic-card").hidden = true })
+ta.addEventListener("keydown", (e) => { if (e.key === "F2" && !e.isComposing && renameLabelAtCaret()) e.preventDefault() })
 
 // ---------- preview sync: a click in the preview shows that text; the preview follows the caret ----------
 
@@ -3265,6 +3373,17 @@ function onMessage(msg: any) {
     case "done":
       if (msg.req === leaving) holdTyping(false)
       break
+    case "label_renamed": {
+      if (msg.req === leaving) holdTyping(false)
+      const p = pendingRename
+      pendingRename = null
+      const r = msg.result
+      const n = (count: number, noun: string) => `${count} ${noun}${count === 1 ? "" : "s"}`
+      if (r.ok) toast(`Renamed ${msg.from} to ${msg.to} in ${n(r.files, "file")} (${n(r.places, "place")}). Review the changes.`, "info")
+      else if (p) startLabelRename(p.name, p.path, p.to, r.error)
+      else toast(r.error)
+      break
+    }
     case "renamed": {
       invalidateDiagnostics()
       const move = (p: string) => (within(p, msg.from) ? msg.to + p.slice(msg.from.length) : p)
