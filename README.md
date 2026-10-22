@@ -50,6 +50,9 @@ autocomplete, your own agent, Grammarly, themes, and how Quire compares with VS 
     and LaTeX start as PDF, Quarto and Markdown as HTML; each kind remembers its choice. The
     other views are the export, made again on every save. Quarto and Markdown as PDF need Quarto.
   - The export button next to them saves the document in the format the preview shows.
+- Outline: the open file's headings under the explorer, indented by level, with the section
+  the caret is in highlighted. Click one to go there. Drag a heading, or press Alt+Up / Alt+Down
+  on it, to move the whole section with its subsections; one Cmd+Z undoes the move.
 - Labels: a list under the explorer of every label in the project (Typst `<name>`, LaTeX
   `\label{name}`, Quarto `{#sec-name}`), how often it is used, and which ones nothing refers
   to. Click one to go to it. Uses that match no label (or, when a `.bib` file is found, no

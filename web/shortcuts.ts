@@ -19,6 +19,7 @@ export const SHORTCUTS = [
   { id: "sections", action: "Go to section", group: "Go to", keys: "Mod⇧O", cmd: "sections", doc: { key: "o", shift: true } },
   { id: "label-prefix", action: "Go to label (type # in the open-a-file box)", group: "Go to", keys: "#" },
   { id: "rename-label", action: "Rename the label under the caret", group: "Go to", keys: "F2", cmd: "rename-label", src: '"F2"' },
+  { id: "outline-move", action: "Move the focused Outline section up or down", group: "Go to", keys: "⌥↑↓", src: 'e.altKey && (e.key === "ArrowUp"' },
   { id: "save", action: "Save", group: "File", keys: "ModS", cmd: "save", doc: { key: "s", shift: false } },
   { id: "find", action: "Find in file", group: "Find", keys: "ModF", cmd: "find", src: 'key === "f"' },
   { id: "replace", action: "Find and replace", group: "Find", keys: "Mod⌥F", src: "openFind(e.altKey)" },

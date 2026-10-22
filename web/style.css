@@ -376,6 +376,18 @@ body.resizing { cursor: ew-resize; user-select: none; }
 .labels-head em { flex: 0 1 auto; min-width: 0; margin-left: auto; overflow: hidden; white-space: nowrap; text-overflow: ellipsis; font-style: normal; font-weight: 400; text-transform: none; color: var(--warn); }
 #labels { flex: none; max-height: 40%; overflow: auto; padding-bottom: 8px; }
 #labels.closed { display: none; }
+#outline { flex: none; max-height: 40%; overflow: auto; padding-bottom: 8px; position: relative; }
+#outline.closed { display: none; }
+#outline-head em { color: var(--muted); }
+.row.outline { width: 100%; text-align: left; }
+.row.outline .name { flex: 1; min-width: 0; overflow: hidden; white-space: nowrap; text-overflow: ellipsis; }
+.row.outline .codicon[class] { color: var(--muted); font-size: 12px; }
+.row.outline.here { background: var(--active); color: var(--fg-strong); font-weight: 600; }
+.row.outline.dragged { opacity: .5; }
+.row.outline.drop-before { box-shadow: inset 0 2px 0 var(--focus); }
+.row.outline.drop-after { box-shadow: inset 0 -2px 0 var(--focus); }
+.outline-empty { padding: 4px 20px; }
+.outline-empty code { font-family: monospace; }
 .row.label .codicon[class] { color: var(--syn-label); }
 .row.label .refs { flex: none; font-size: 11px; color: var(--muted); }
 .row.label.unused .refs { color: var(--warn); }

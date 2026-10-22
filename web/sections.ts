@@ -1,5 +1,9 @@
 import type { Heading } from "./outline.ts"
 
+// Lines that belong to the whole document, not to the section above them: they end it and stay
+// where they are. LaTeX \end{document}, \appendix and bibliography commands; Typst #bibliography(.
+const CLOSES = /^\s*(\\(end\{document\}|appendix\b|bibliography\{|printbibliography\b|begin\{thebibliography\})|#bibliography\()/
+
 // Where a section ends: the line before the next heading of the same or a higher level.
 function sectionEnd(heads: Heading[], i: number, total: number): number {
   for (let j = i + 1; j < heads.length; j++) if (heads[j].level <= heads[i].level) return heads[j].line
@@ -22,8 +26,7 @@ export function moveSection(text: string, heads: Heading[], from: number, to: nu
   const finalNL = text.endsWith("\n")
   const lines = (finalNL ? text.slice(0, -1) : text).split("\n")
   const start = heads[from].line
-  // LaTeX: \end{document} closes the last section; it is never part of one.
-  const stop = lines.findIndex((l, i) => i > start && /^\s*\\end\{document\}/.test(l))
+  const stop = lines.findIndex((l, i) => i > start && CLOSES.test(l))
   const cap = stop < 0 ? lines.length : stop
   const end = Math.min(sectionEnd(heads, from, lines.length), cap)
   const dst = to >= heads.length ? cap : heads[to].line

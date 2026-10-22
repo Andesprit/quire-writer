@@ -9,7 +9,8 @@ import { suggestKeys, keySpan } from "./suggestkeys"
 import { diagnosticRange, errorCount, missingTool, isCurrentDiagnostic, shiftDiagnostics, type Diagnostic, type DiagnosticBatch } from "./diagnostics"
 import { findMatches, replacementEdit, type Match } from "./find"
 import { fuzzyMatch, rankFiles } from "./palette"
-import { headingTitle, outline } from "./outline"
+import { headingTitle, outline, type Heading } from "./outline"
+import { moveSection } from "./sections"
 import { refChoices, refTrigger, type RefChoice, type RefTrigger } from "./refcomplete"
 import { diff, minimalChange, rebase, type Diff } from "./merge"
 import { $, ask, esc, fileIcon, icon, toast } from "./ui"
@@ -395,6 +396,7 @@ ta.addEventListener("input", (e) => {
   closeCard()
   menu.hidden = true
   scheduleRender()
+  scheduleOutline()
   if (!fromDisk) scheduleSave()
   scheduleFind()
   if (!programmatic) {
@@ -423,6 +425,7 @@ const onCaret = () => {
   if (refOpen && ta.selectionStart !== refOpen.caret) closeRefs()
   scheduleMenu()
   markActive()
+  markOutlineHere()
   scheduleInfo()
   followCaret()
   showDiagnosticAtCaret()
@@ -684,6 +687,7 @@ function openFile(path: string, content: string, base: string | null) {
   renderTree()
   renderTab()
   renderLabels() // its hint is for this file's language
+  renderOutline()
   // Take the keyboard only if the writer is not typing somewhere else (a name box, the chat).
   const busy = document.activeElement?.matches("input, textarea, select") && document.activeElement !== ta
   if (mode === "edit" && !busy) ta.focus({ preventScroll: true })
@@ -706,6 +710,7 @@ function closeFile(message?: string) {
   setMode("edit")
   render()
   renderTab()
+  renderOutline()
   if (message) toast(message, "info")
 }
 
@@ -1479,6 +1484,191 @@ $("labels").onclick = (e) => {
   const l = row?.dataset.m ? nowhere[Number(row.dataset.m)] : labels[Number(row?.dataset.i)]
   if (l) goTo(l.path, l.line, l.col)
 }
+
+// ---------- outline: the open file's headings, a map that also moves whole sections ----------
+
+const OUTLINE_HINT: Record<Lang, string> = {
+  typst: "Start a line with = and a space, like = Introduction.",
+  latex: "Write \\section{Introduction}.",
+  quarto: "Start a line with # and a space, like # Introduction.",
+  markdown: "Start a line with # and a space, like # Introduction.",
+  text: "",
+}
+let heads: Heading[] = []
+let outlineTimer = 0
+let outlineStale = false // the text changed since the list was drawn
+let outlineHere = -1 // the heading whose section holds the caret
+
+const scheduleOutline = () => {
+  outlineStale = true
+  clearTimeout(outlineTimer)
+  outlineTimer = window.setTimeout(renderOutline, 200)
+}
+const hereIndex = () => {
+  const caret = lineOf(ta.selectionStart)
+  let n = -1
+  while (n + 1 < heads.length && heads[n + 1].line <= caret) n++
+  return n
+}
+function markOutlineHere() {
+  const n = hereIndex()
+  if (n === outlineHere) return
+  outlineHere = n
+  const box = $("outline")
+  box.querySelector(".here")?.classList.remove("here")
+  box.querySelector(".here")?.removeAttribute("aria-current")
+  const row = box.querySelector<HTMLElement>(`.row[data-i="${n}"]`)
+  row?.classList.add("here")
+  row?.setAttribute("aria-current", "location")
+  // Reach the tab stop for the section the caret is in.
+  box.querySelectorAll<HTMLElement>(".row[tabindex='0']").forEach((r) => (r.tabIndex = -1))
+  if (row) {
+    row.tabIndex = 0
+    if (!box.contains(document.activeElement)) row.scrollIntoView({ block: "nearest" })
+  }
+}
+function renderOutline() {
+  clearTimeout(outlineTimer)
+  outlineStale = false
+  const open = store.get("outline") !== "closed"
+  const refocus = $("outline").contains(document.activeElement) ? (document.activeElement as HTMLElement).dataset.i : undefined
+  heads = current && syntax() ? outline(ta.value, lang, syntax()!.headingOf) : []
+  outlineHere = -2
+  $("outline-head").hidden = $("outline").hidden = !root
+  $("outline-head").setAttribute("aria-expanded", String(open))
+  $("outline-head").querySelector(".codicon")!.className = `codicon codicon-chevron-${open ? "down" : "right"}`
+  $("outline-count").textContent = heads.length ? String(heads.length) : ""
+  $("outline").classList.toggle("closed", !open)
+  const top = Math.min(...heads.map((h) => h.level), 9)
+  $("outline").innerHTML = heads.length
+    ? heads.map((h, i) => {
+        const title = headingTitle(lang, h.title)
+        return `<button class="row outline" data-i="${i}" tabindex="-1" style="--depth:${h.level - top + 1}" title="${esc(`${title}, line ${h.line + 1}`)}"><span class="name">${esc(title)}</span></button>`
+      }).join("")
+    : `<p class="muted outline-empty">${!current ? "Open a file to see its sections." : lang === "text" ? "Plain text files have no outline." : `No headings yet. ${esc(OUTLINE_HINT[lang])}`}</p>`
+  markOutlineHere()
+  if (refocus !== undefined) $("outline").querySelector<HTMLElement>(`.row[data-i="${refocus}"]`)?.focus({ preventScroll: true })
+}
+$("outline-head").onclick = () => {
+  store.set("outline", store.get("outline") === "closed" ? "open" : "closed")
+  renderOutline()
+}
+
+// Move heading `from` before heading `to` (to === heads.length: the end). One edit, so one undo step.
+function moveHeading(from: number, to: number): boolean {
+  if (ta.readOnly) return void toast("Wait a moment, then try again."), false
+  if (outlineStale) return void renderOutline(), false // typed a moment ago: the list was out of date
+  const r = moveSection(ta.value, heads, from, to)
+  if (r === "same") return false
+  if (r === "inside") return void toast("A section cannot go inside itself."), false
+  if (mode === "review") setMode("edit")
+  edit(r.at, r.at + r.cut, r.put)
+  let p = 0
+  for (let n = 0; n < r.line; n++) p = ta.value.indexOf("\n", p) + 1
+  ta.setSelectionRange(p, p)
+  const div = hl.children[r.line] as HTMLElement | undefined
+  if (div) ta.scrollTop = Math.max(0, div.offsetTop - ta.clientHeight / 3)
+  renderOutline()
+  const i = heads.findIndex((h) => h.line === r.line)
+  $("outline").querySelector<HTMLElement>(`.row[data-i="${i}"]`)?.focus({ preventScroll: true })
+  return true
+}
+// Alt+Up / Alt+Down: before the previous sibling, or after the next one.
+function moveHeadingBy(i: number, step: -1 | 1) {
+  const lvl = heads[i].level
+  let j = i + step
+  while (heads[j] && heads[j].level > lvl) j += step // a deeper heading belongs to the section next door
+  if (!heads[j] || heads[j].level < lvl) return
+  if (step < 0) return void moveHeading(i, j)
+  let to = j + 1
+  while (heads[to] && heads[to].level > lvl) to++
+  moveHeading(i, to)
+}
+
+$("outline").addEventListener("keydown", (e) => {
+  const row = (e.target as HTMLElement).closest<HTMLElement>(".row[data-i]")
+  if (!row) return
+  const i = Number(row.dataset.i)
+  if ((e.metaKey || e.ctrlKey) && !e.altKey && e.key.toLowerCase() === "z") {
+    // A moved section is undone from where the writer is: the outline has no undo of its own.
+    e.preventDefault()
+    ta.focus({ preventScroll: true })
+    document.execCommand(e.shiftKey ? "redo" : "undo")
+  } else if (e.altKey && (e.key === "ArrowUp" || e.key === "ArrowDown") && !e.metaKey && !e.ctrlKey && !e.shiftKey) {
+    e.preventDefault()
+    moveHeadingBy(i, e.key === "ArrowUp" ? -1 : 1)
+  } else if (!e.altKey && !e.metaKey && !e.ctrlKey && ["ArrowUp", "ArrowDown", "Home", "End"].includes(e.key)) {
+    e.preventDefault()
+    const n = e.key === "Home" ? 0 : e.key === "End" ? heads.length - 1 : i + (e.key === "ArrowUp" ? -1 : 1)
+    $("outline").querySelector<HTMLElement>(`.row[data-i="${Math.max(0, Math.min(heads.length - 1, n))}"]`)?.focus()
+  }
+})
+$("outline").onclick = (e) => {
+  const row = (e.target as HTMLElement).closest<HTMLElement>(".row[data-i]")
+  const h = row && heads[Number(row.dataset.i)]
+  if (h && current) goTo(current, h.line, 0)
+}
+
+// Dragging a heading onto another place moves its section. The same pointer pattern as the file tree:
+// below 4 px it is still a click.
+$("outline").addEventListener("pointerdown", (e) => {
+  const row = (e.target as HTMLElement).closest<HTMLElement>(".row[data-i]")
+  if (!row || e.button !== 0) return
+  const from = Number(row.dataset.i)
+  const x = e.clientX, y = e.clientY
+  let drag = false
+  let to = -1 // drop before heading `to`; heads.length is after the last row
+  const rows = () => [...$("outline").querySelectorAll<HTMLElement>(".row[data-i]")]
+  const clear = () => {
+    for (const r of rows()) r.classList.remove("drop-before", "drop-after", "dragged")
+    document.body.classList.remove("drag-refused")
+  }
+  const aim = (m: PointerEvent) => {
+    const all = rows()
+    const over = all.find((r) => { const b = r.getBoundingClientRect(); return m.clientY >= b.top && m.clientY < b.bottom })
+    to = -1
+    if (over) {
+      const b = over.getBoundingClientRect()
+      to = Number(over.dataset.i) + (m.clientY < b.top + b.height / 2 ? 0 : 1)
+    } else if (all.length && m.clientY >= all[all.length - 1].getBoundingClientRect().bottom && $("outline").contains(m.target as Node)) to = all.length
+    for (const r of all) r.classList.remove("drop-before", "drop-after")
+    const verdict = to < 0 ? "same" : moveSection(ta.value, heads, from, to)
+    document.body.classList.toggle("drag-refused", verdict === "inside")
+    if (typeof verdict === "object") (to < all.length ? all[to].classList.add("drop-before") : all[all.length - 1].classList.add("drop-after"))
+    else to = -1
+  }
+  const move = (m: PointerEvent) => {
+    if (!drag && Math.hypot(m.clientX - x, m.clientY - y) < 4) return
+    if (!drag) {
+      drag = true
+      row.classList.add("dragged")
+      document.body.classList.add("dragging")
+    }
+    aim(m)
+  }
+  const end = (u: PointerEvent) => {
+    document.removeEventListener("pointermove", move)
+    document.removeEventListener("pointerup", end)
+    document.removeEventListener("keydown", esc, true)
+    document.body.classList.remove("dragging")
+    const go = drag && u.type === "pointerup" ? to : -1
+    clear()
+    if (!drag) return
+    const stop = (c: Event) => c.stopPropagation()
+    document.addEventListener("click", stop, { capture: true, once: true })
+    setTimeout(() => document.removeEventListener("click", stop, true))
+    if (go >= 0) moveHeading(from, go)
+  }
+  const esc = (k: KeyboardEvent) => {
+    if (k.key === "Escape" && drag) {
+      k.preventDefault()
+      end(new PointerEvent("pointercancel"))
+    }
+  }
+  document.addEventListener("pointermove", move)
+  document.addEventListener("pointerup", end)
+  document.addEventListener("keydown", esc, true)
+})
 
 $("open-folder").onclick = $("open-folder-2").onclick = $("start-open").onclick = async () => {
   // Unsaved typing belongs to the folder that is open now.
@@ -3771,6 +3961,7 @@ tauri.window.getCurrentWindow().onCloseRequested(async (e: Event) => {
 render()
 renderTree()
 renderLabels()
+renderOutline()
 renderTab()
 renderAgentStatus()
 renderAcSource()

@@ -55,6 +55,14 @@ assert.ok((lxm as any).text.endsWith("\\label{a}\nx\n\\subsection{A1}\ny\n\\end{
 assert.equal(mv(lx, "latex", tex, 0, 3), mv(lx, "latex", tex, 0, 3))
 assert.ok((mv(lx, "latex", tex, 0, 3) as string).endsWith("\\label{a}\nx\n\\subsection{A1}\ny\n\\end{document}\n"), "moving to the end lands before \\end{document}")
 
+// Bibliography and appendix lines close a section and stay put, in LaTeX and Typst.
+for (const tail of ["\\appendix\n", "\\bibliography{refs}\n", "\\printbibliography\n", "\\begin{thebibliography}{9}\n\\end{thebibliography}\n"]) {
+  const d = `\\section{A}\na\n\\section{B}\nb\n${tail}\\end{document}\n`
+  assert.equal(mv(d, "latex", tex, 0, 2), `\\section{B}\nb\n\\section{A}\na\n${tail}\\end{document}\n`, tail)
+  assert.equal(mv(d, "latex", tex, 1, 0), `\\section{B}\nb\n\\section{A}\na\n${tail}\\end{document}\n`, tail)
+}
+assert.equal(mv("= A\na\n= B\nb\n#bibliography(\"r.bib\")\n", "typst", marked("="), 0, 2), "= B\nb\n= A\na\n#bibliography(\"r.bib\")\n")
+
 // Markdown: a '#' inside a fence is not a heading and is carried along as body text.
 const md = "# A\n```\n# fake\n```\n## A1\ntext\n# B\nb\n"
 assert.equal(outline(md, "markdown", marked("#")).length, 3)
