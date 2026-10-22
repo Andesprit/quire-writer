@@ -55,6 +55,9 @@ autocomplete, your own agent, Grammarly, themes, and how Quire compares with VS 
   to. Click one to go to it. Uses that match no label (or, when a `.bib` file is found, no
   citation key) are listed at the top as "Points nowhere"; citations are judged only when a
   bibliography is found.
+  To rename a label everywhere, press F2 on its row (or with the caret on it in the text, or run
+  "Rename label..." from the quick input): every definition and use in the files of that language
+  changes at once and shows as changes to review. Nothing is written if a file changed on disk.
 - Cite by DOI or arXiv ID (formatting bar): adds the paper to your `.bib` file and the
   citation at the cursor (`@key`, `\cite{key}` or `[@key]`). Needs the internet (doi.org).
 - Export (button at the right of the file tab): the whole document as PDF or Word, or as
