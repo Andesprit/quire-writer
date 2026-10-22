@@ -996,6 +996,26 @@ function startNew(kind: "file" | "folder") {
   renderTree()
 }
 
+// The open text goes to disk first (a path in it may change), and typing waits until the app answers.
+async function renameFile(from: string, to: string) {
+  holdTyping(true)
+  const error = await flushSave(true)
+  if (error) {
+    holdTyping(false)
+    return void toast(`Nothing was renamed: ${baseName(current!)} could not be saved first.`)
+  }
+  send({ type: "rename", req: (leaving = ++reqSeq), from, to })
+}
+
+// What the writer is told after a rename: the links that followed, and the ones that did not.
+function renameNotice(msg: { from: string; links: number; files: number; op: number | null; paths: string[]; skipped: string[] }) {
+  const n = (count: number, noun: string) => `${count} ${noun}${count === 1 ? "" : "s"}`
+  const left = msg.skipped?.length ? ` Not updated, check them by hand: ${msg.skipped.join(", ")}.` : ""
+  if (!msg.links && !left) return
+  const done = msg.links ? ` Updated ${n(msg.links, "link")} in ${n(msg.files, "file")}. Review the changes.` : ""
+  opToast = toast(`Renamed ${baseName(msg.from)}.${done}${left}`, left ? "error" : "info", msg.links ? offerUndo("rename", { op: msg.op ?? undefined, paths: msg.paths }) : [])
+}
+
 function startRename(path: string) {
   naming = { kind: "rename", path }
   nameError = ""
@@ -1017,7 +1037,7 @@ function commitName(leaving = false) {
     }
     if (!problem) {
       if (n.kind === "rename") {
-        if (to !== n.path) send({ type: "rename", from: n.path, to })
+        if (to !== n.path) renameFile(n.path, to)
       } else if (n.kind === "folder") send({ type: "create", path: to, folder: true })
       // A new file opens, replacing the open one: ask first when that one has unsaved changes.
       else leaveThen({ type: "create", path: to, folder: false })
@@ -3695,6 +3715,7 @@ function onMessage(msg: any) {
       replaced(msg.result)
       break
     case "renamed": {
+      if (msg.req && msg.req === leaving) holdTyping(false)
       invalidateDiagnostics()
       const move = (p: string) => (within(p, msg.from) ? msg.to + p.slice(msg.from.length) : p)
       if (current && within(current, msg.from)) {
@@ -3718,6 +3739,7 @@ function onMessage(msg: any) {
       }
       sendTyped()
       renderTree()
+      renameNotice(msg)
       break
     }
     case "deleted":

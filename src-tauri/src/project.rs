@@ -3295,6 +3295,7 @@ mod tests {
         assert_eq!(w.baseline["main.typ"], texts["main.typ"], "the change is there to review");
         // One undo puts back the name and the links.
         let op = reply["op"].as_u64().unwrap();
+        let after = w.known.clone();
         let (back, _) = w.undo_operation(op).unwrap();
         assert_eq!(back.len(), 4);
         assert!(dir.join("figures/plot.png").exists() && !dir.join("figures/results.png").exists());
@@ -3305,6 +3306,9 @@ mod tests {
         if let Ok(out) = std::env::var("QUIRE_DUMP") {
             fs::write(format!("{out}/links-reply.json"), reply.to_string()).unwrap();
             fs::write(format!("{out}/links-state.json"), w.state().to_string()).unwrap();
+            fs::write(format!("{out}/links-undo.json"), json!({"type": "operation_undone", "op": op, "result": {"ok": true, "restored": back, "skipped": Vec::<String>::new()}}).to_string()).unwrap();
+            fs::write(format!("{out}/links-before-files.json"), json!(texts).to_string()).unwrap();
+            fs::write(format!("{out}/links-after-files.json"), json!(after).to_string()).unwrap();
         }
         // A percent-encoded Markdown path is not guessed at: it is listed for the writer.
         w.typed_text.clear();
