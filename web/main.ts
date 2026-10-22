@@ -3631,6 +3631,12 @@ function onMessage(msg: any) {
       goTo(msg.path, msg.line, msg.col)
       break
     case "error":
+      if (pictureReplies.has(msg.req)) {
+        // A picture import that failed: addPictures releases the editor and says it once.
+        pictureReplies.get(msg.req)!({ error: msg.message })
+        pictureReplies.delete(msg.req)
+        return
+      }
       if (msg.req && msg.req === leaving) holdTyping(false) // the open text stays, and the writer can type again
       if (msg.op === "export") exporting?.remove()
       if (msg.op === "open_folder" && opening) {
