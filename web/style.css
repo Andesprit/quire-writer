@@ -603,6 +603,7 @@ body.resizing { cursor: ew-resize; user-select: none; }
   justify-items: center;
   gap: 28px;
   background: var(--editor);
+  z-index: 2; /* over the text layer, so its link can be clicked */
   user-select: none;
 }
 .welcome-mark {
@@ -948,6 +949,17 @@ details.thought div { white-space: pre-wrap; margin-top: 4px; padding-left: 18px
 
 /* Quick input uses the editor's width; the native preview steps aside on overlap. */
 #quick-input { position: fixed; inset: auto; margin: 0; padding: 8px; max-width: calc(100vw - 16px); max-height: calc(100dvh - 100px); overflow: hidden; border: 1px solid var(--widget-border); border-top: 2px solid var(--focus); border-radius: 6px; background: var(--widget); color: var(--fg); box-shadow: var(--shadow); font: 13px var(--ui); }
+#keys-sheet { position: fixed; inset: auto; margin: 0; padding: 8px; max-width: calc(100vw - 16px); max-height: calc(100dvh - 100px); overflow: hidden; border: 1px solid var(--widget-border); border-top: 2px solid var(--focus); border-radius: 6px; background: var(--widget); color: var(--fg); box-shadow: var(--shadow); font: 13px var(--ui); }
+#keys-sheet[open] { display: flex; flex-direction: column; gap: 6px; }
+#keys-sheet::backdrop { background: transparent; }
+#keys-query { flex: none; width: 100%; min-width: 0; height: 30px; padding: 4px 8px; border: 1px solid var(--input-border); border-radius: 2px; background: var(--input); color: var(--fg); font: 13px var(--ui); }
+#keys-query:focus { outline: 1px solid var(--focus); outline-offset: -1px; }
+#keys-list { min-height: 0; max-height: 420px; overflow-y: auto; }
+#keys-list h3 { margin: 10px 8px 2px; font-size: 11px; font-weight: 600; text-transform: uppercase; letter-spacing: 0.04em; color: var(--muted); }
+.keys-row { display: flex; gap: 12px; align-items: center; justify-content: space-between; min-height: 28px; padding: 3px 8px; }
+.keys-caps { display: flex; gap: 3px; flex: none; }
+#keys-empty { margin: 12px 6px; color: var(--muted); }
+.link-btn { margin-top: 12px; padding: 2px 4px; border: 0; background: none; color: var(--link, var(--focus)); font: inherit; cursor: pointer; text-decoration: underline; text-underline-offset: 2px; }
 #quick-input[open] { display: flex; flex-direction: column; gap: 6px; }
 #quick-input::backdrop { background: transparent; }
 .quick-head { display: flex; align-items: center; justify-content: space-between; padding-left: 4px; font-size: 12px; color: var(--muted); }

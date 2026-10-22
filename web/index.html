@@ -120,15 +120,8 @@
         <div id="review-view" class="layer review" hidden aria-label="Changes to review"></div>
         <div id="welcome" class="welcome">
           <div class="welcome-mark" id="welcome-mark" aria-hidden="true"></div>
-          <dl class="shortcuts" id="shortcuts">
-            <dt>Open a file</dt><dd><kbd>&#8984;</kbd><kbd>P</kbd></dd>
-            <dt>Run a command</dt><dd><kbd>&#8679;</kbd><kbd>&#8984;</kbd><kbd>P</kbd></dd>
-            <dt>Edit selection with AI</dt><dd><kbd>&#8984;</kbd><kbd>K</kbd></dd>
-            <dt>Toggle chat</dt><dd><kbd>&#8984;</kbd><kbd>J</kbd></dd>
-            <dt>Accept suggestion</dt><dd><kbd>Tab</kbd></dd>
-            <dt>Toggle preview</dt><dd><kbd>&#8984;</kbd><kbd>\</kbd></dd>
-            <dt>Toggle explorer</dt><dd><kbd>&#8679;</kbd><kbd>&#8984;</kbd><kbd>E</kbd></dd>
-          </dl>
+          <dl class="shortcuts" id="shortcuts"></dl>
+          <button type="button" class="link-btn" id="welcome-keys">All keyboard shortcuts</button>
           <div id="start" class="start" hidden>
             <header>
               <h1 id="start-title"></h1>
@@ -252,12 +245,20 @@
       <span class="item" id="sb-pos"></span>
       <span class="item" id="sb-words"></span>
       <span class="item" id="sb-lang">Typst</span>
+      <button class="item" id="sb-keys" title="Keyboard shortcuts" aria-label="Keyboard shortcuts"><i class="codicon codicon-keyboard"></i></button>
       <button class="item" id="sb-autosave"></button>
       <button class="item" id="sb-ed" aria-haspopup="true" title="Edits settings"><i class="codicon codicon-edit"></i> <span>Edits</span></button>
       <button class="item" id="sb-ck" aria-haspopup="true" title="Suggestions settings"><i class="codicon codicon-lightbulb"></i> <span>Suggestions</span></button>
       <button class="item" id="sb-ac" aria-haspopup="true" title="Autocomplete settings"><i class="codicon codicon-sparkle"></i> <span>Autocomplete</span></button>
     </footer>
   </div>
+
+  <dialog id="keys-sheet" aria-labelledby="keys-title">
+    <div class="quick-head"><label id="keys-title" for="keys-query">Keyboard shortcuts</label><button class="icon-btn small" id="keys-close" title="Close (Escape)" aria-label="Close keyboard shortcuts"><i class="codicon codicon-close"></i></button></div>
+    <input id="keys-query" aria-label="Search shortcuts" placeholder="Search shortcuts" spellcheck="false" autocomplete="off" />
+    <div id="keys-list"></div>
+    <p id="keys-empty" hidden>No shortcut matches.</p>
+  </dialog>
 
   <dialog id="quick-input" aria-labelledby="quick-title">
     <div class="quick-head"><label id="quick-title" for="quick-query">Open a file</label><button class="icon-btn small" id="quick-close" title="Close (Escape)" aria-label="Close quick input"><i class="codicon codicon-close"></i></button></div>

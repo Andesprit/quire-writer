@@ -15,6 +15,7 @@ import { $, ask, esc, fileIcon, icon, toast } from "./ui"
 import { FORMAT_KEYS, buildFormatBar, connectEditor, insertAt, select, setHeading, syntaxOf } from "./format"
 import { figureSnippet } from "./figure"
 import { MAX_GOAL, goalProgress, parseGoal, readGoal, type Goal } from "./goal"
+import { HINTS, SHORTCUTS, docShortcut, filterShortcuts, keyCaps, keysForCommand, keyText, shortcutFor, type DocShortcutId, type Shortcut } from "./shortcuts"
 import { labelAt, labelProblem, nameProblem } from "./names"
 import { elsewhere, gatherProblems, problemLines } from "./preflight"
 import { changes, paragraphs, readFixes, type Fix } from "./suggest"
@@ -148,31 +149,37 @@ function setZoom(z: number) {
 }
 if (zoom !== 1) setZoom(zoom)
 
+const DOC_KEYS: Record<DocShortcutId, (e: KeyboardEvent) => void> = {
+  focus: () => toggleFocus(),
+  "open-file": () => openPalette(),
+  commands: () => openPalette(">"),
+  sections: () => openPalette("@"),
+  save: () => flushSave(true),
+  sidebar: () => {
+    if (sidebar.classList.contains("searching") && isOpen("sidebar")) showExplorer()
+    else togglePanel("sidebar")
+  },
+  search: () => openSearch(),
+  preview: () => togglePanel("preview"),
+  chat: () => {
+    if (isOpen("chat") && document.activeElement === $("chat-input")) {
+      setPanel("chat", false)
+      ta.focus()
+    } else openChat()
+  },
+  "zoom-in": () => setZoom(zoom + 0.1),
+  "zoom-out": () => setZoom(zoom - 0.1),
+  "zoom-reset": () => setZoom(1),
+  shortcuts: () => openShortcuts(),
+}
 document.addEventListener(
   "keydown",
   (e) => {
     if (e.isComposing || palette.open) return
-    if (!(e.metaKey || e.ctrlKey) || e.altKey) return
-    const key = e.key.toLowerCase()
+    const id = docShortcut(e)
     // Cmd+B and Cmd+I are bold and italic in the text; Chrome keeps Cmd+L for itself.
-    if (key === "enter" && e.shiftKey) toggleFocus()
-    else if (key === "p") openPalette(e.shiftKey ? ">" : "")
-    else if (key === "o" && e.shiftKey) openPalette("@")
-    else if (key === "s" && !e.shiftKey) flushSave(true)
-    else if (key === "e" && e.shiftKey) {
-      if (sidebar.classList.contains("searching") && isOpen("sidebar")) showExplorer()
-      else togglePanel("sidebar")
-    } else if (key === "f" && e.shiftKey) openSearch()
-    else if (key === "\\") togglePanel("preview")
-    else if (key === "j" && !e.shiftKey) {
-      if (isOpen("chat") && document.activeElement === $("chat-input")) {
-        setPanel("chat", false)
-        ta.focus()
-      } else openChat()
-    } else if (key === "=" || key === "+") setZoom(zoom + 0.1)
-    else if (key === "-") setZoom(zoom - 0.1)
-    else if (key === "0") setZoom(1)
-    else return
+    if (!id) return
+    DOC_KEYS[id](e)
     e.preventDefault()
     e.stopPropagation()
   },
@@ -1264,9 +1271,9 @@ $("tree").oncontextmenu = (e) => {
   if (path) {
     items.push(
       "-",
-      { label: "Rename…", keys: "F2", run: () => startRename(path) },
+      { label: "Rename…", keys: kc("rename"), run: () => startRename(path) },
       { label: "Move to Folder…", run: () => openPalette(MOVE, path) },
-      { label: "Move to Trash", keys: "⌘⌫", run: () => trash(path) },
+      { label: "Move to Trash", keys: kc("trash"), run: () => trash(path) },
       "-",
       { label: "Copy Relative Path", run: () => navigator.clipboard?.writeText(path) },
     )
@@ -1436,7 +1443,7 @@ $("labels").oncontextmenu = (e) => {
   const l = labels[Number((e.target as HTMLElement).closest<HTMLElement>(".row[data-i]")?.dataset.i)]
   if (!l) return
   e.preventDefault()
-  showMenu(e.clientX, e.clientY, [{ label: "Rename…", keys: "F2", run: () => startLabelRename(l.name, l.path) }])
+  showMenu(e.clientX, e.clientY, [{ label: "Rename…", keys: kc("rename-label"), run: () => startLabelRename(l.name, l.path) }])
 }
 
 $("breadcrumbs").onclick = (e) => { if ((e.target as HTMLElement).closest(".section-crumb")) openPalette("@") }
@@ -1524,7 +1531,7 @@ function renderTab() {
   // No project yet: the start page in place of the watermark, and no preview next to it.
   app.classList.toggle("starting", !root)
   $("start").hidden = !!root
-  $("welcome-mark").hidden = $("shortcuts").hidden = !root
+  $("welcome-mark").hidden = $("shortcuts").hidden = $("welcome-keys").hidden = !root
   $("breadcrumbs").hidden = !has
   buildFormatBar(lang, mode === "review")
   $("format-bar").hidden = !has || !syntax()
@@ -3018,7 +3025,8 @@ $("search-results").onclick = (e) => {
 
 let quickOpener: HTMLElement | null = null
 let quickOpenerPath: string | undefined
-const commandKey = /Mac/i.test(navigator.platform) ? "⌘" : "Ctrl+"
+const mac = /Mac/i.test(navigator.platform)
+const kc = (id: string) => { const s = shortcutFor(id); return s ? keyText(s, mac) : keysForCommand(id, mac) ?? "" }
 
 function recentFiles(): string[] {
   try {
@@ -3033,11 +3041,12 @@ function rememberFile(path: string) {
 function quickCommands(): QuickItem[] {
   const click = (id: string) => () => $(id).click()
   const commands: QuickItem[] = [
+    { id: "shortcuts", label: "Keyboard shortcuts", keys: kc("shortcuts"), run: openShortcuts },
     { id: "open-project", label: "Open project…", run: click("open-folder") },
     { id: "new-project", label: "New project…", run: click("new-project") },
-    { id: "sidebar", label: "Toggle explorer", keys: commandKey + "⇧E", run: click("toggle-sidebar") },
-    { id: "focus", label: "Toggle focus mode", keys: commandKey + "⇧↩", run: toggleFocus },
-    { id: "chat", label: "Toggle chat", keys: commandKey + "J", run: () => { if (isOpen("chat")) setPanel("chat", false); else openChat() } },
+    { id: "sidebar", label: "Toggle explorer", keys: kc("sidebar"), run: click("toggle-sidebar") },
+    { id: "focus", label: "Toggle focus mode", keys: kc("focus"), run: toggleFocus },
+    { id: "chat", label: "Toggle chat", keys: kc("chat"), run: () => { if (isOpen("chat")) setPanel("chat", false); else openChat() } },
     { id: "setup", label: "Check Setup…", run: () => send({ type: "check_setup" }) },
     { id: "autocomplete", label: "Turn autocomplete " + (acToggle.checked ? "off" : "on"), run: () => acToggle.click() },
     { id: "ac-settings", label: "Autocomplete settings…", run: click("sb-ac") },
@@ -3045,15 +3054,15 @@ function quickCommands(): QuickItem[] {
     { id: "ed-settings", label: "Edits settings…", run: click("sb-ed") },
     { id: "ch-settings", label: "Chat settings…", run: click("chat-source") },
     { id: "autosave", label: "Turn auto save " + (autosave ? "off" : "on"), run: click("sb-autosave") },
-    { id: "zoom-in", label: "Zoom in", keys: commandKey + "+", run: () => setZoom(zoom + 0.1) },
-    { id: "zoom-out", label: "Zoom out", keys: commandKey + "−", run: () => setZoom(zoom - 0.1) },
-    { id: "zoom-reset", label: "Reset zoom", keys: commandKey + "0", run: () => setZoom(1) },
+    { id: "zoom-in", label: "Zoom in", keys: kc("zoom-in"), run: () => setZoom(zoom + 0.1) },
+    { id: "zoom-out", label: "Zoom out", keys: kc("zoom-out"), run: () => setZoom(zoom - 0.1) },
+    { id: "zoom-reset", label: "Reset zoom", keys: kc("zoom-reset"), run: () => setZoom(1) },
     { id: "theme-system", label: "Color theme: Follow system", run: () => { store.del("theme"); applyTheme() } },
     ...THEMES.flatMap((t) => t === "-" ? [] : [{ id: "theme-" + t[0], label: "Color theme: " + t[1], run: () => { store.set("theme", t[0]); applyTheme() } }]),
   ]
   if (root) commands.push(
-    { id: "search", label: "Search in project…", keys: commandKey + "⇧F", run: openSearch },
-    { id: "preview", label: "Toggle preview", keys: commandKey + "\\", run: click("toggle-preview") },
+    { id: "search", label: "Search in project…", keys: kc("search"), run: openSearch },
+    { id: "preview", label: "Toggle preview", keys: kc("preview"), run: click("toggle-preview") },
     { id: "new-file", label: "New file…", run: click("new-file") },
     { id: "new-folder", label: "New folder…", run: click("new-folder") },
   )
@@ -3063,12 +3072,12 @@ function quickCommands(): QuickItem[] {
   }
   if (current) commands.push(
     { id: "goal", label: "Set writing goal…", run: () => { goalAsk = true; openPalette() } },
-    { id: "find", label: "Find in file", keys: commandKey + "F", run: click("open-find") },
-    { id: "save", label: "Save file", keys: commandKey + "S", run: () => flushSave(true) },
+    { id: "find", label: "Find in file", keys: kc("find"), run: click("open-find") },
+    { id: "save", label: "Save file", keys: kc("save"), run: () => flushSave(true) },
   )
-  if (current && syntax()) commands.push({ id: "sections", label: "Go to section…", keys: commandKey + "⇧O", run: () => openPalette("@") })
+  if (current && syntax()) commands.push({ id: "sections", label: "Go to section…", keys: kc("sections"), run: () => openPalette("@") })
   if (root) commands.push({ id: "labels", label: "Go to label…", run: () => openPalette("#") })
-  if (root && labels.length) commands.push({ id: "rename-label", label: "Rename label…", keys: "F2", run: () => { if (!renameLabelAtCaret()) { renamePick = true; openPalette("#") } } })
+  if (root && labels.length) commands.push({ id: "rename-label", label: "Rename label…", keys: kc("rename-label"), run: () => { if (!renameLabelAtCaret()) { renamePick = true; openPalette("#") } } })
   if (current && syntax()) commands.push({ id: "export", label: "Export document…", run: click("export") })
   if (previewing && files.includes(previewing)) for (const [as, label] of Object.entries(PREVIEW_AS)) commands.push({
     id: "preview-" + as, label: "Preview as " + label,
@@ -3296,9 +3305,57 @@ function showPreview(url: string) {
   else delete $("preview").dataset.url
   toPreview({ src: url })
 }
+// ---------- the shortcut sheet: every key in one searchable list, built from shortcuts.ts ----------
+
+const sheet = $<HTMLDialogElement>("keys-sheet"), sheetQuery = $<HTMLInputElement>("keys-query")
+let sheetOpener: HTMLElement | null = null
+const capsHtml = (s: Shortcut) => keyCaps(s, mac).map((c) => `<kbd>${esc(c)}</kbd>`).join("")
+function renderSheet() {
+  const rows = filterShortcuts(sheetQuery.value, mac)
+  let group = ""
+  $("keys-list").innerHTML = rows.map((s) => {
+    const head = s.group === group ? "" : `<h3>${esc((group = s.group))}</h3>`
+    return `${head}<div class="keys-row"><span>${esc(s.action)}</span><span class="keys-caps">${capsHtml(s)}</span></div>`
+  }).join("")
+  $("keys-empty").hidden = rows.length > 0
+}
+function openShortcuts() {
+  if (sheet.open) return sheetQuery.focus()
+  if (document.querySelector("dialog[open]")) return
+  sheetOpener = document.activeElement as HTMLElement | null
+  hideMenu()
+  sheetQuery.value = ""
+  renderSheet()
+  sheet.showModal()
+  const editor = $("editor-group").getBoundingClientRect()
+  const width = Math.min(520, innerWidth - 16)
+  const centre = editor.width > 320 ? editor.left + editor.width / 2 : innerWidth / 2
+  sheet.style.width = width + "px"
+  sheet.style.left = Math.max(8, Math.min(centre - width / 2, innerWidth - width - 8)) + "px"
+  sheet.style.top = $("titlebar").getBoundingClientRect().bottom + 8 + "px"
+  sheetQuery.focus()
+  placePreview()
+}
+function closeShortcuts() {
+  if (!sheet.open) return
+  sheet.close()
+  ;(sheetOpener?.isConnected ? sheetOpener : ta).focus({ preventScroll: true })
+  placePreview()
+}
+sheetQuery.oninput = renderSheet
+sheet.addEventListener("cancel", (e) => { e.preventDefault(); closeShortcuts() })
+$("keys-close").onclick = closeShortcuts
+$("sb-keys").onclick = openShortcuts
+$("welcome-keys").onclick = openShortcuts
+$("shortcuts").innerHTML = HINTS.map((id) => {
+  const s = shortcutFor(id)!
+  return `<dt>${esc(s.action)}</dt><dd>${capsHtml(s)}</dd>`
+}).join("")
+
+
 // The web view sits over #preview. A native view covers whatever the page floats over it, so
 // it steps aside while a dialog or menu would sit under it, and notices go to its left.
-const floating = ["quick-input", "ask", "new-project-ask", "setup", "ac-settings", "ck-settings", "ed-settings", "ch-settings", "inline-box", "fix-card", "diagnostic-card", "rewrite-menu", "rewrite-card", "ref-list", "ctx-menu", "toasts", "sidebar", "chat"].map((id) => $(id))
+const floating = ["quick-input", "keys-sheet", "ask", "new-project-ask", "setup", "ac-settings", "ck-settings", "ed-settings", "ch-settings", "inline-box", "fix-card", "diagnostic-card", "rewrite-menu", "rewrite-card", "ref-list", "ctx-menu", "toasts", "sidebar", "chat"].map((id) => $(id))
 let placing = 0
 let placed = "" // the place last sent
 let bgSent = "" // the theme's preview background last sent: the web view shows it while a preview loads
