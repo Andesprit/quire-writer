@@ -378,6 +378,7 @@ struct LinkEdit {
     line: usize,
     range: (usize, usize),
     text: String,
+    manual: bool, // the writer has to change it: the path is percent-encoded, so `text` is the old one
 }
 
 /// `p` after moving `old` (a file or folder) to `new`.
@@ -424,42 +425,77 @@ fn link_edits(texts: &BTreeMap<String, String>, files: &[String], latex_main: im
             Lang::Quarto | Lang::Markdown => (&*MD_PATH, file.clone()),
             Lang::Text => continue,
         };
-        let (dir, new_dir) = (base.rsplit_once('/').map_or("", |d| d.0), moved(&base, old, new));
-        let new_dir = new_dir.rsplit_once('/').map_or("", |d| d.0);
+        // Every path in the text: where it starts, what it is, which extension it must have, and the
+        // file its folder is counted from.
+        let mut found: Vec<(usize, &str, Option<&str>, &str)> = vec![];
         let blank = blank_hidden(text, lang);
         for c in re.captures_iter(&blank) {
             let g = c.iter().skip(1).flatten().last().unwrap(); // the path is the last group that matched
-            let parts: Vec<&str> = if lang == Lang::Latex && &c[1] == "bibliography" { g.as_str().split(',').collect() } else { vec![g.as_str()] };
+            let (parts, want) = if lang == Lang::Latex {
+                let cmd = &c[1];
+                (if cmd == "bibliography" { g.as_str().split(',').collect() } else { vec![g.as_str()] }, match cmd { "bibliography" | "addbibresource" => Some("bib"), "input" | "include" => Some("tex"), _ => None })
+            } else {
+                (vec![g.as_str()], None)
+            };
             for part in parts {
-                let start = g.start() + (part.as_ptr() as usize - g.as_str().as_ptr() as usize) + part.len() - part.trim_start().len();
-                let path = part.trim().split('#').next().unwrap();
-                if path.is_empty() || path.contains("://") || path.starts_with("mailto:") {
-                    continue;
-                }
-                let want = if lang != Lang::Latex { None } else { match &c[1] { "bibliography" | "addbibresource" => Some("bib"), "input" | "include" => Some("tex"), _ => None } };
-                let rooted = path.starts_with('/') && lang == Lang::Typst;
-                let Some(target) = join_path(if rooted { "" } else { dir }, path) else { continue };
-                // The file it names: as written, or (LaTeX \input{chapter}) with the extension left off.
-                let bare = ext_of(path).is_empty() || (lang == Lang::Latex && !matches!(ext_of(path), "tex" | "bib" | "png" | "jpg" | "jpeg" | "pdf" | "eps" | "svg"));
-                let real = files.iter().find(|f| **f == target).or_else(|| if bare { files.iter().find(|f| f.rsplit_once('.').is_some_and(|(s, e)| s == target && want.is_none_or(|w| w == e))) } else { None });
-                let Some(real) = real else { continue };
-                let after = moved(real, old, new);
-                if after == *real && new_dir == dir {
-                    continue;
-                }
-                let shown = if *real != target && ext_of(&after) == ext_of(real) { after.strip_suffix(&format!(".{}", ext_of(&after))).unwrap_or(&after) } else { &after };
-                let mut written = if rooted { format!("/{shown}") } else { relative_to(&join_path(new_dir, "x").unwrap(), shown) };
-                if path.starts_with("./") && !written.starts_with("../") && !rooted {
-                    written.insert_str(0, "./");
-                }
-                if written != path {
-                    let line = text[..start].matches('\n').count();
-                    out.push(LinkEdit { file: file.clone(), line, range: (start, start + path.len()), text: written });
-                }
+                let at = g.start() + (part.as_ptr() as usize - g.as_str().as_ptr() as usize);
+                found.push((at + part.len() - part.trim_start().len(), part.trim(), want, &base));
+            }
+        }
+        // "% !TEX root = ../main.tex" is counted from the chapter itself, and is a comment to the above.
+        if lang == Lang::Latex {
+            if let Some(m) = TEX_ROOT.captures(text) {
+                found.push((m.get(1).unwrap().start(), m.get(1).unwrap().as_str(), Some("tex"), file));
+            }
+        }
+        for (start, path, want, base) in found {
+            let path = path.split('#').next().unwrap();
+            if path.is_empty() || path.contains("://") || path.starts_with("mailto:") {
+                continue;
+            }
+            let (dir, new_dir) = (base.rsplit_once('/').map_or("", |d| d.0), moved(base, old, new));
+            let new_dir = new_dir.rsplit_once('/').map_or("", |d| d.0);
+            // Markdown writes spaces as %20: the name is looked up as it is on disk, and left for the writer.
+            let encoded = lang != Lang::Typst && lang != Lang::Latex && path.contains('%');
+            let name = if encoded { unpercent(path) } else { path.to_string() };
+            let rooted = name.starts_with('/') && lang == Lang::Typst;
+            let Some(target) = join_path(if rooted { "" } else { dir }, &name) else { continue };
+            // The file it names: as written, or (LaTeX \input{chapter}) with the extension left off.
+            let bare = ext_of(&name).is_empty() || (lang == Lang::Latex && !matches!(ext_of(&name), "tex" | "bib" | "png" | "jpg" | "jpeg" | "pdf" | "eps" | "svg"));
+            let real = files.iter().find(|f| **f == target).or_else(|| if bare { files.iter().find(|f| f.rsplit_once('.').is_some_and(|(s, e)| s == target && want.is_none_or(|w| w == e))) } else { None });
+            let Some(real) = real else { continue };
+            let after = moved(real, old, new);
+            if after == *real && new_dir == dir {
+                continue;
+            }
+            let shown = if *real != target && ext_of(&after) == ext_of(real) { after.strip_suffix(&format!(".{}", ext_of(&after))).unwrap_or(&after) } else { &after };
+            let mut written = if rooted { format!("/{shown}") } else { relative_to(&join_path(new_dir, "x").unwrap(), shown) };
+            if name.starts_with("./") && !written.starts_with("../") && !rooted {
+                written.insert_str(0, "./");
+            }
+            if written != name {
+                let line = text[..start].matches('\n').count();
+                let manual = encoded;
+                out.push(LinkEdit { file: file.clone(), line, range: (start, start + path.len()), text: if manual { path.to_string() } else { written }, manual });
             }
         }
     }
     out
+}
+
+static TEX_ROOT: LazyLock<Regex> = LazyLock::new(|| re(r"(?im)^\s*%\s*!TEX\s+root\s*=\s*(\S.*?)\s*$"));
+
+/// `%20` and the like turned back into the characters they stand for.
+fn unpercent(s: &str) -> String {
+    let b = s.as_bytes();
+    let (mut out, mut i) = (vec![], 0);
+    while i < b.len() {
+        match (b[i], s.get(i + 1..i + 3).and_then(|h| u8::from_str_radix(h, 16).ok())) {
+            (b'%', Some(v)) => (out.push(v), i += 3),
+            (c, _) => (out.push(c), i += 1),
+        };
+    }
+    String::from_utf8_lossy(&out).into_owned()
 }
 
 static TYPST_NAME: LazyLock<Regex> = LazyLock::new(|| re(r"^[\w:.-]+$"));
@@ -663,6 +699,7 @@ pub struct Workspace {
 /// it had before, so one undo can put every untouched file back.
 struct Operation {
     id: u64,
+    renamed: Option<(String, String)>, // a rename this operation includes: the files are named as after it
     files: BTreeMap<String, (String, String, Option<String>)>,
 }
 
@@ -923,7 +960,10 @@ impl Workspace {
         }
     }
 
-    fn rename(&mut self, old: &str, new: &str) -> Result<(), String> {
+    /// Moves `old` to `new` and the paths in documents that pointed at it along (see `link_edits`),
+    /// as one operation `undo_operation` reverses. A document that cannot be updated (typed text, or
+    /// changed on disk) is left as it is, and listed in the answer. Returns the answer for the page.
+    fn rename(&mut self, old: &str, new: &str, req: &Value) -> Result<(), String> {
         let (old, new) = (self.norm(old)?, self.norm(new)?);
         let (src, dst) = (self.path(&old)?, self.path(&new)?);
         if !src.exists() {
@@ -935,10 +975,43 @@ impl Workspace {
         if dst.starts_with(&src) {
             return Err("A folder cannot be moved inside itself.".into());
         }
-        fs::create_dir_all(dst.parent().unwrap()).map_err(err)?;
-        fs::rename(&src, &dst).map_err(err)?;
+        let edits = link_edits(&self.known, &self.entries()?.0, |f| self.latex_main(f), &old, &new);
+        let (mut texts, mut left, mut links) = (BTreeMap::<String, String>::new(), vec![], 0);
+        for e in edits.iter().rev() {
+            let busy = self.read(&e.file).as_ref() != self.known.get(&e.file) || self.typed_text.get(&e.file).is_some_and(|t| Some(t) != self.known.get(&e.file));
+            if e.manual || busy {
+                left.push((e.file.clone(), e.line));
+                continue;
+            }
+            texts.entry(e.file.clone()).or_insert_with(|| self.known[&e.file].clone()).replace_range(e.range.0..e.range.1, &e.text);
+            links += 1;
+        }
+        let mut written: Vec<&String> = vec![];
+        for (path, text) in &texts {
+            if let Err(e) = fs::write(self.path(path)?, text) {
+                for p in written {
+                    let _ = fs::write(self.path(p)?, &self.known[p]);
+                }
+                return Err(format!("{path} was not changed: {} Nothing was renamed.", err(e)));
+            }
+            written.push(path);
+        }
+        let moved_on = fs::create_dir_all(dst.parent().unwrap()).and_then(|()| fs::rename(&src, &dst));
+        if let Err(e) = moved_on {
+            for p in written {
+                let _ = fs::write(self.path(p)?, &self.known[p]);
+            }
+            return Err(err(e));
+        }
         self.forget(&old, Some(&new));
-        send(json!({"type": "renamed", "from": old, "to": new}));
+        let texts: BTreeMap<String, String> = texts.into_iter().map(|(p, t)| (moved(&p, &old, &new), t)).collect();
+        let op = if texts.is_empty() { None } else { Some(self.record(&texts, Some((old.clone(), new.clone())))) };
+        let mut left: Vec<String> = left.into_iter().rev().map(|(f, line)| format!("{}:{}", moved(&f, &old, &new), line + 1)).collect();
+        left.dedup();
+        send(json!({"type": "renamed", "req": req, "from": old, "to": new, "links": links, "files": texts.len(), "op": op, "paths": texts.keys().collect::<Vec<_>>(), "skipped": left}));
+        for (path, text) in texts {
+            self.external(&path, text);
+        }
         send(self.state());
         Ok(())
     }
@@ -1110,18 +1183,24 @@ impl Workspace {
             }
             done.push(path.clone());
         }
-        let mut files = BTreeMap::new();
+        self.record(&new, None);
         for (path, text) in new {
-            files.insert(path.clone(), (self.known[&path].clone(), text.clone(), self.baseline.get(&path).cloned()));
             self.external(&path, text);
-        }
-        self.next_operation += 1;
-        self.operations.push(Operation { id: self.next_operation, files });
-        if self.operations.len() > UNDOABLE {
-            self.operations.remove(0);
         }
         send(self.state());
         Ok(done.len())
+    }
+
+    /// Remembers that `new` (path to text) is about to replace what the files hold now, and returns
+    /// the operation's number.
+    fn record(&mut self, new: &BTreeMap<String, String>, renamed: Option<(String, String)>) -> u64 {
+        let files = new.iter().map(|(path, text)| (path.clone(), (self.known[path].clone(), text.clone(), self.baseline.get(path).cloned()))).collect();
+        self.next_operation += 1;
+        self.operations.push(Operation { id: self.next_operation, renamed, files });
+        if self.operations.len() > UNDOABLE {
+            self.operations.remove(0);
+        }
+        self.next_operation
     }
 
     /// Puts back the files `id` changed that nobody has changed since (on disk, in the editor or
@@ -1131,6 +1210,9 @@ impl Workspace {
         let Some(at) = self.operations.iter().position(|o| o.id == id) else {
             return Err("That change was already undone, or is too old to undo.".into());
         };
+        if let Some((old, new)) = self.operations[at].renamed.clone() {
+            return self.undo_rename(at, &old, &new);
+        }
         let files = &self.operations[at].files;
         let (mut back, mut skipped) = (vec![], vec![]);
         for (path, (_, after, _)) in files {
@@ -1161,6 +1243,52 @@ impl Workspace {
         }
         send(self.state());
         Ok((back, skipped))
+    }
+
+    /// Undoes a rename and its path updates together, or nothing: the old name must be free, and no
+    /// file the operation changed may differ from what it left.
+    fn undo_rename(&mut self, at: usize, old: &str, new: &str) -> Result<(Vec<String>, Vec<String>), String> {
+        let files = self.operations[at].files.clone();
+        let changed: Vec<&String> = files.iter().filter(|(p, (_, after, _))| !(self.known.get(*p) == Some(after) && self.read(p).as_ref() == Some(after) && self.typed_text.get(*p).is_none_or(|t| t == after))).map(|f| f.0).collect();
+        if !changed.is_empty() {
+            return Err(format!("Nothing was undone: {} changed since. Your text is as you left it.", changed.into_iter().cloned().collect::<Vec<_>>().join(", ")));
+        }
+        let (src, dst) = (self.path(new)?, self.path(old)?);
+        if !src.exists() || dst.exists() {
+            return Err(format!("Nothing was undone: {new} was moved again, or {old} exists now."));
+        }
+        let mut done: Vec<&String> = vec![];
+        for (path, (before, _, _)) in &files {
+            if let Err(e) = fs::write(self.path(path)?, before) {
+                for p in done {
+                    let _ = fs::write(self.path(p)?, &files[p].1);
+                }
+                return Err(format!("{path} was not restored: {} Nothing was undone.", err(e)));
+            }
+            done.push(path);
+        }
+        let moved_back = fs::create_dir_all(dst.parent().unwrap()).and_then(|()| fs::rename(&src, &dst));
+        if let Err(e) = moved_back {
+            for p in done {
+                let _ = fs::write(self.path(p)?, &files[p].1);
+            }
+            return Err(err(e));
+        }
+        self.operations.remove(at);
+        self.forget(new, Some(old));
+        send(json!({"type": "renamed", "from": new, "to": old}));
+        let mut back = vec![];
+        for (path, (before, _, prior)) in files {
+            let path = moved(&path, new, old);
+            self.unshadow(&path);
+            self.known.insert(path.clone(), before.clone());
+            self.set_baseline(&path, Some(&before), prior);
+            let base = self.baseline.get(&path);
+            send(json!({"type": "file_changed", "path": path, "content": before, "baseline": base}));
+            back.push(path);
+        }
+        send(self.state());
+        Ok((back, vec![]))
     }
 
     /// Replaces `query` by `with` in the files of `expected`, the matches per file the writer was
@@ -2800,7 +2928,7 @@ async fn handle(msg: &Value) -> Result<(), String> {
             w.set_baseline(&rel, None, opt("baseline").map(String::from));
         }
         "create" => ws().create(f("path")?, msg["folder"].as_bool().unwrap_or(false))?,
-        "rename" => ws().rename(f("from")?, f("to")?)?,
+        "rename" => ws().rename(f("from")?, f("to")?, &msg["req"])?,
         "import_image" => {
             let mut w = ws();
             let added = w.import_image(f("from")?);
@@ -3133,6 +3261,63 @@ mod tests {
         assert!(!moved.iter().any(|e| e.2.contains("plot2") && e.0 == "main.typ" && e.1 != 7), "{moved:?}");
         let chapter = edits("chapters", "ch/deep");
         assert_eq!(chapter, vec![s("chapters/one.typ", 0, "../../figures/plot.png"), s("chapters/one.typ", 1, "../../figures/plot2.png"), s("main.typ", 0, "ch/deep/one.typ"), s("notes.md", 3, "ch/deep/one.typ")]);
+    }
+
+    #[test]
+    fn rename_updates_links_as_one_undoable_operation() {
+        let dir = std::env::temp_dir().join(format!("quire-links-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&dir);
+        let (texts, _) = planted();
+        let mut texts = texts;
+        texts.insert("notes.md".into(), "![a](figures/plot.png)\n![b](my%20fig.png)".into());
+        for (rel, text) in &texts {
+            fs::create_dir_all(dir.join(rel).parent().unwrap()).unwrap();
+            fs::write(dir.join(rel), text).unwrap();
+        }
+        for pic in ["figures/plot.png", "figures/plot2.png", "my fig.png"] {
+            fs::create_dir_all(dir.join(pic).parent().unwrap()).unwrap();
+            fs::write(dir.join(pic), b"png").unwrap();
+        }
+        fs::create_dir_all(dir.join("lit")).unwrap();
+        fs::write(dir.join("lit/a.bib"), "").unwrap();
+        let mut w = Workspace { root: Some(dir.canonicalize().unwrap()), known: texts.clone(), ..Default::default() };
+        let disk = |f: &str| fs::read_to_string(dir.join(f)).unwrap();
+        let heard = |from: &str, to: &str| lock(&SENT).iter().rev().find(|m| m["type"] == "renamed" && m["from"] == from && m["to"] == to).cloned().unwrap();
+        // Unsaved typing in one referencing file: that file is left alone and listed with its line.
+        w.typed_text.insert("chapters/one.typ".into(), "typing".into());
+        w.rename("figures/plot.png", "figures/results.png", &json!(7)).unwrap();
+        let reply = heard("figures/plot.png", "figures/results.png");
+        assert_eq!((reply["req"].clone(), reply["links"].clone(), reply["files"].clone()), (json!(7), json!(6), json!(4)), "{reply}");
+        assert_eq!(reply["skipped"], json!(["chapters/one.typ:1"]));
+        assert_eq!(disk("chapters/one.typ"), texts["chapters/one.typ"], "nothing overwritten");
+        assert!(disk("main.typ").contains("figures/results.png") && disk("main.typ").contains("figures/plot2.png"));
+        assert!(!dir.join("figures/plot.png").exists() && dir.join("figures/results.png").exists());
+        assert_eq!(w.baseline["main.typ"], texts["main.typ"], "the change is there to review");
+        // One undo puts back the name and the links.
+        let op = reply["op"].as_u64().unwrap();
+        let (back, _) = w.undo_operation(op).unwrap();
+        assert_eq!(back.len(), 4);
+        assert!(dir.join("figures/plot.png").exists() && !dir.join("figures/results.png").exists());
+        for f in ["main.typ", "paper.tex", "tex/two.tex", "notes.md"] {
+            assert_eq!((disk(f), &w.known[f]), (texts[f].clone(), &texts[f]), "{f}");
+        }
+        assert!(w.undo_operation(op).unwrap_err().contains("already undone"));
+        if let Ok(out) = std::env::var("QUIRE_DUMP") {
+            fs::write(format!("{out}/links-reply.json"), reply.to_string()).unwrap();
+            fs::write(format!("{out}/links-state.json"), w.state().to_string()).unwrap();
+        }
+        // A percent-encoded Markdown path is not guessed at: it is listed for the writer.
+        w.typed_text.clear();
+        w.rename("my fig.png", "fig.png", &json!(8)).unwrap();
+        let reply = heard("my fig.png", "fig.png");
+        assert_eq!((reply["links"].clone(), reply["op"].clone(), reply["skipped"].clone()), (json!(0), Value::Null, json!(["notes.md:2"])));
+        assert_eq!(disk("notes.md"), texts["notes.md"]);
+        // A LaTeX chapter moves: the root \input of it follows, its own paths (counted from the root) stay,
+        // and its "% !TEX root" line is counted from the chapter, so it follows.
+        w.rename("tex/two.tex", "tex/deep/two.tex", &json!(9)).unwrap();
+        assert!(disk("paper.tex").contains("\\input{tex/deep/two}"));
+        assert_eq!(disk("tex/deep/two.tex"), texts["tex/two.tex"].replace("../paper.tex", "../../paper.tex"));
+        let _ = fs::remove_dir_all(&dir);
     }
 
     #[test]
@@ -3711,11 +3896,11 @@ mod tests {
             w.create("figures", true).unwrap();
             assert!(root.join("figures").is_dir());
             w.baseline.insert("notes/ch1.typ".into(), "old text".into());
-            w.rename("notes", "chapters").unwrap();
+            w.rename("notes", "chapters", &Value::Null).unwrap();
             assert!(root.join("chapters/ch1.typ").exists() && !root.join("notes").exists());
             assert_eq!(w.baseline, map(&[("chapters/ch1.typ", "old text".to_string())]));
             assert!(w.create("chapters/ch1.typ", false).is_err());
-            assert!(w.rename("chapters", "chapters/in").is_err());
+            assert!(w.rename("chapters", "chapters/in", &Value::Null).is_err());
             assert!(w.delete("").is_err());
             w.delete("chapters").unwrap();
             assert_eq!(*lock(&TRASHED), [root.join("chapters")]);
