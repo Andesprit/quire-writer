@@ -1193,7 +1193,7 @@ async function commitLabelRename() {
   const error = await flushSave(true)
   if (error) {
     holdTyping(false)
-    toast(`${baseName(current!)} was not saved, so nothing was renamed. ${error} Your text is still here.`)
+    toast(`Nothing was renamed: ${baseName(current!)} could not be saved first.`)
     return startLabelRename(n.name, n.path, to)
   }
   pendingRename = { name: n.name, path: n.path, to }
