@@ -1,5 +1,5 @@
 import assert from "node:assert/strict"
-import { refTrigger } from "./refcomplete.ts"
+import { refChoices, refTrigger } from "./refcomplete.ts"
 
 const t = (s: string, lang: any) => {
   const r = refTrigger(s, lang)
@@ -39,3 +39,16 @@ assert.equal(t("mail me@site.org", "quarto"), null)
 assert.equal(t("```\n@fig-", "quarto"), null)
 assert.equal(t("<!-- @fig-", "quarto"), null)
 assert.equal(t("@fig-", "markdown"), null)
+
+// Closing marks
+assert.equal(refTrigger("\\ref{se", "latex")!.close, "}")
+assert.equal(refTrigger("#ref(<ti", "typst")!.close, ">")
+assert.equal(refTrigger("@ti", "typst")!.close, "")
+// Choices: prefix matches first, fuzzy below, tagged, no repeats
+const trig = (kind: any, prefix: string) => ({ kind, prefix, replaceFrom: 0, close: "" })
+assert.deepEqual(refChoices(trig("ref", "ti"), ["tbl-times", "timeline", "Title"], ["tidy"]).map((c) => c.key), ["timeline", "Title", "tbl-times"])
+assert.deepEqual(refChoices(trig("both", "k"), ["key1"], ["key1", "k2"]).map((c) => c.tag + c.key), ["labelkey1", "citationkey1", "citationk2"])
+assert.deepEqual(refChoices(trig("cite", ""), ["a"], ["b", "c"]).map((c) => c.key), ["b", "c"])
+assert.equal(refChoices(trig("ref", "zzz"), ["timeline"], []).length, 0)
+assert.equal(refChoices(trig("ref", ""), Array.from({ length: 20 }, (_, i) => "l" + i), []).length, 8)
+assert.equal(refChoices(trig("ref", "timeline"), ["timeline"], []).length, 0, "an exact, complete key needs no list")

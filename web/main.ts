@@ -9,7 +9,7 @@ import { diagnosticRange, errorCount, missingTool, isCurrentDiagnostic, shiftDia
 import { findMatches, replacementEdit, type Match } from "./find"
 import { fuzzyMatch, rankFiles } from "./palette"
 import { headingTitle, outline } from "./outline"
-import { refTrigger, type RefTrigger } from "./refcomplete"
+import { refChoices, refTrigger, type RefChoice, type RefTrigger } from "./refcomplete"
 import { diff, minimalChange, rebase, type Diff } from "./merge"
 import { $, ask, esc, fileIcon, icon, toast } from "./ui"
 import { FORMAT_KEYS, buildFormatBar, connectEditor, insertAt, select, setHeading, syntaxOf } from "./format"
@@ -371,6 +371,7 @@ const onCaret = () => {
   if (ghost && (ta.selectionStart !== ghost.pos || ta.selectionEnd !== ghost.pos)) clearGhost()
   const pos = ta.selectionStart
   if (cardMark && !(ta.selectionEnd === pos && cardMark.from <= pos && pos <= cardMark.to)) closeCard()
+  if (refOpen && ta.selectionStart !== refOpen.caret) closeRefs()
   scheduleMenu()
   markActive()
   scheduleInfo()
@@ -381,36 +382,44 @@ document.addEventListener("selectionchange", () => {
   if (document.activeElement === ta) onCaret()
 })
 ta.addEventListener("select", onCaret)
-// ---------- reference completion: labels (and, later, bib keys) under the caret ----------
+// ---------- reference completion: labels and citation keys under the caret ----------
 
-const refList = document.body.appendChild(Object.assign(document.createElement("div"), { id: "ref-list", hidden: true }))
-let refOpen: { t: RefTrigger; items: string[]; sel: number } | null = null
+const refList = $("ref-list")
+let cites: string[] = [] // every citation key of the project's .bib files
+let refOpen: { t: RefTrigger; items: RefChoice[]; sel: number; caret: number } | null = null
 const closeRefs = () => {
   refOpen = null
   refList.hidden = true
 }
 function updateRefs() {
-  const t = mode === "edit" && ta.selectionStart === ta.selectionEnd ? refTrigger(ta.value.slice(0, ta.selectionStart), lang) : null
-  const items = t ? labels.map((l) => l.name).filter((n) => fuzzyMatch(n, t.prefix)).slice(0, 8) : []
+  const caret = ta.selectionStart
+  const t = mode === "edit" && caret === ta.selectionEnd ? refTrigger(ta.value.slice(0, caret), lang) : null
+  const items = t ? refChoices(t, labels.map((l) => l.name), cites) : []
   if (!t || !items.length) return closeRefs()
-  refOpen = { t, items, sel: 0 }
+  refOpen = { t, items, sel: 0, caret }
   paintRefs()
 }
 function paintRefs() {
   if (!refOpen) return
-  refList.innerHTML = refOpen.items.map((n, i) => `<div class="ref-row${i === refOpen!.sel ? " sel" : ""}">${esc(n)}</div>`).join("")
+  refList.innerHTML = refOpen.items
+    .map((c, i) => `<div class="ref-row${i === refOpen!.sel ? " sel" : ""}" data-i="${i}"><span class="ref-key">${esc(c.key)}</span><span class="ref-tag">${c.tag}</span></div>`)
+    .join("")
   refList.hidden = false
-  floatAt(refList, ta.selectionStart, ta.selectionStart)
+  floatAt(refList, refOpen.caret, refOpen.caret)
 }
-function acceptRef() {
+function acceptRef(i: number) {
   const r = refOpen!
+  const caret = ta.selectionStart
   closeRefs()
-  edit(r.t.replaceFrom, ta.selectionStart, r.items[r.sel])
+  // The closing mark goes in only when the writer has not typed it.
+  const close = r.t.close && !"},>".includes(ta.value[caret] ?? " ") ? r.t.close : ""
+  edit(r.t.replaceFrom, caret, r.items[i].key + close)
 }
+// While the list is open it owns these keys; closed, it never sees them.
 ta.addEventListener("keydown", (e) => {
   if (!refOpen || e.metaKey || e.ctrlKey || e.altKey || e.shiftKey) return
   const k = e.key
-  if (k === "Tab" || k === "Enter") acceptRef()
+  if (k === "Tab" || k === "Enter") acceptRef(refOpen.sel)
   else if (k === "Escape") closeRefs()
   else if (k === "ArrowDown" || k === "ArrowUp") {
     refOpen.sel = (refOpen.sel + (k === "ArrowDown" ? 1 : refOpen.items.length - 1)) % refOpen.items.length
@@ -421,6 +430,12 @@ ta.addEventListener("keydown", (e) => {
 })
 ta.addEventListener("input", () => (programmatic ? closeRefs() : updateRefs()))
 ta.addEventListener("blur", closeRefs)
+ta.addEventListener("scroll", closeRefs)
+refList.onmousedown = (e) => e.preventDefault() // keep the caret in the text
+refList.onclick = (e) => {
+  const row = (e.target as HTMLElement).closest<HTMLElement>(".ref-row")
+  if (row && refOpen) acceptRef(Number(row.dataset.i))
+}
 
 ta.addEventListener("keydown", (e) => {
   const mod = e.metaKey || e.ctrlKey
@@ -2849,7 +2864,7 @@ function showPreview(url: string) {
 }
 // The web view sits over #preview. A native view covers whatever the page floats over it, so
 // it steps aside while a dialog or menu would sit under it, and notices go to its left.
-const floating = ["quick-input", "ask", "new-project-ask", "setup", "ac-settings", "ck-settings", "ed-settings", "ch-settings", "inline-box", "fix-card", "diagnostic-card", "rewrite-menu", "rewrite-card", "ctx-menu", "toasts", "sidebar", "chat"].map((id) => $(id))
+const floating = ["quick-input", "ask", "new-project-ask", "setup", "ac-settings", "ck-settings", "ed-settings", "ch-settings", "inline-box", "fix-card", "diagnostic-card", "rewrite-menu", "rewrite-card", "ref-list", "ctx-menu", "toasts", "sidebar", "chat"].map((id) => $(id))
 let placing = 0
 let placed = "" // the place last sent
 let bgSent = "" // the theme's preview background last sent: the web view shows it while a preview loads
@@ -3155,6 +3170,7 @@ function onMessage(msg: any) {
       dirs = msg.dirs ?? []
       changed = new Set(msg.changed)
       labels = msg.labels ?? []
+      cites = msg.cites ?? []
       nowhere = msg.missing ?? []
       if (selected && !files.includes(selected) && !dirs.includes(selected)) selected = null
       renderTree()
