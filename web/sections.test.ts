@@ -1,6 +1,6 @@
 import assert from "node:assert/strict"
 import { outline } from "./outline.ts"
-import { moveSection } from "./sections.ts"
+import { moveSection, shiftSection } from "./sections.ts"
 
 const marked = (mark: string) => (l: string): [number, string] | null => {
   const m = new RegExp(`^(\\${mark}+)\\s+(.*)`).exec(l)
@@ -95,3 +95,39 @@ const r = moveSection(big, bh, 150, 3)
 console.log(`5000 lines: moveSection in ${(performance.now() - t0).toFixed(2)} ms`)
 assert.ok(typeof r !== "string" && r.text.length === big.length)
 console.log("sections: ok")
+
+// Promote and demote: only marker characters change, the subtree follows, one range reproduces it.
+const TEXH = (l: string): [number, string] | null => {
+  const m = /^\\(\w+)\*?\{(.*)\}\s*$/.exec(l)
+  const level = m ? SECTIONS.indexOf(m[1]) + 1 : 0
+  return level ? [level, m![2]] : null
+}
+function sh(text: string, lang: any, h: any, i: number, d: -1 | 1) {
+  const heads = outline(text, lang, h)
+  const r = shiftSection(text, heads, i, d, lang)
+  if (typeof r === "string") return r
+  assert.equal(text.slice(0, r.at) + r.put + text.slice(r.at + r.cut), r.text, "range reproduces the text")
+  assert.equal(r.text.split("\n").length, text.split("\n").length, "same line count")
+  const strip = (t: string) => t.replace(/^(\\\w+|[=#]+)/gm, "")
+  assert.equal(strip(r.text), strip(text), "only markers change")
+  return r.text
+}
+const tyh = "= A\n== B <b>\ntext\n=== C\n== D\n= E\n"
+assert.equal(sh(tyh, "typst", marked("="), 1, -1), "= A\n= B <b>\ntext\n== C\n== D\n= E\n", "typst promote moves the subtree, keeps the label")
+assert.equal(sh(tyh, "typst", marked("="), 1, 1), "= A\n=== B <b>\ntext\n==== C\n== D\n= E\n")
+assert.equal(sh(tyh, "typst", marked("="), 0, -1), "top", "a level-1 heading cannot go up")
+assert.equal(sh("= A\n" + "=".repeat(6) + " Deep\n", "typst", marked("="), 0, 1), "bottom", "a descendant at the bottom level blocks the demote")
+assert.equal(sh("= A\n== B\n= C\n", "typst", marked("="), 0, 1), "= A\n== B\n= C\n".replace("= A", "== A").replace("== B", "=== B"))
+const ltx = "\\section{S}\n\\subsection*{Sub}\\label{x}\n\\subsubsection{Deep}\n\\section{T}\n\\end{document}\n"
+assert.equal(sh(ltx, "latex", TEXH, 0, 1), "\\subsection{S}\n\\subsubsection*{Sub}\\label{x}\n\\paragraph{Deep}\n\\section{T}\n\\end{document}\n", "latex: star and label kept")
+assert.equal(sh(ltx, "latex", TEXH, 1, -1), "\\section{S}\n\\section*{Sub}\\label{x}\n\\subsection{Deep}\n\\section{T}\n\\end{document}\n")
+assert.equal(sh(ltx, "latex", TEXH, 0, -1), "top", "no level above \\section in the outline")
+assert.equal(sh("\\section{S}\n\\paragraph{P}\n", "latex", TEXH, 0, 1), "bottom", "\\paragraph cannot be demoted")
+const qmd = "# A {#sec-a}\n## B\n```\n# not a heading\n```\n### C\n# D\n"
+assert.equal(sh(qmd, "quarto", marked("#"), 0, 1), "## A {#sec-a}\n### B\n```\n# not a heading\n```\n#### C\n# D\n", "markdown: code fence untouched, attribute kept")
+assert.equal(sh("Title\n=====\n\n## B\n", "markdown", marked("#"), 0, -1), "Title\n=====\n\n# B\n", "setext is not in the outline and is left alone")
+// A heading line that does not start with the plain marker is refused, nothing is edited.
+assert.equal(shiftSection("  ## A\n", [{ level: 2, title: "A", line: 0 }], 0, -1, "markdown"), "unsupported")
+// Promoting a section does not carry its later siblings: they become its children (D below).
+assert.equal(sh("= A\n== B\n=== C\n== D\n", "typst", marked("="), 1, -1), "= A\n= B\n== C\n== D\n")
+console.log("sections shift ok")
