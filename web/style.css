@@ -381,9 +381,10 @@ body.resizing { cursor: ew-resize; user-select: none; }
 #outline-head em { color: var(--muted); }
 .row.outline { width: 100%; text-align: left; }
 .row.outline .name { flex: 1; min-width: 0; overflow: hidden; white-space: nowrap; text-overflow: ellipsis; }
-.row.outline .count { margin-left: 8px; font-size: 11px; color: var(--muted); font-variant-numeric: tabular-nums; }
+.row.outline .count { margin-left: 8px; font-size: 11px; color: var(--fg); opacity: .8; font-variant-numeric: tabular-nums; }
 .row.outline .codicon[class] { color: var(--muted); font-size: 12px; }
 .row.outline.here { background: var(--active); color: var(--fg-strong); font-weight: 600; }
+.row.outline.here .count { color: inherit; opacity: 1; }
 .row.outline.dragged { opacity: .5; }
 .row.outline.drop-before { box-shadow: inset 0 2px 0 var(--focus); }
 .row.outline.drop-after { box-shadow: inset 0 -2px 0 var(--focus); }
@@ -396,9 +397,9 @@ body.resizing { cursor: ew-resize; user-select: none; }
 .row.label.broken .codicon[class] { color: var(--warn); }
 .fixes { display: flex; flex-wrap: wrap; gap: 4px; padding: 0 20px 4px 44px; font-size: 12px; }
 .fixes .muted { opacity: .8; }
-.fix { font: inherit; color: var(--accent, inherit); background: none; border: 1px solid var(--border, currentColor); border-radius: 4px; padding: 0 6px; cursor: pointer; }
+.fix { font: inherit; color: color-mix(in srgb, var(--link, var(--focus)) 70%, var(--fg-strong)); background: none; border: 1px solid color-mix(in srgb, currentColor 85%, transparent); border-radius: 4px; padding: 0 6px; cursor: pointer; }
 .fix:hover, .fix:focus-visible { background: var(--hover, rgba(128, 128, 128, .15)); }
-.fix.alt { opacity: .8; }
+.fix.alt { opacity: .92; }
 .labels-empty { margin: 4px 20px 8px; line-height: 1.5; }
 
 .empty-pane { padding: 12px 20px; }
@@ -971,11 +972,11 @@ details.thought div { white-space: pre-wrap; margin-top: 4px; padding-left: 18px
 
 #problems { position: fixed; z-index: 50; width: 420px; max-width: calc(100vw - 8px); max-height: 50vh; overflow-y: auto; padding: 4px; background: var(--widget); border: 1px solid var(--widget-border); border-radius: 6px; box-shadow: var(--shadow); font-size: 13px; }
 #problems[hidden] { display: none; }
-.problems-file { padding: 4px 8px 2px; font-size: 12px; font-weight: 600; opacity: .7; }
+.problems-file { padding: 4px 8px 2px; font-size: 12px; font-weight: 600; opacity: .85; }
 .problems-item { display: flex; flex-direction: column; align-items: flex-start; gap: 2px; padding-bottom: 4px; }
 .problems-row { width: 100%; padding: 3px 8px; border: 0; border-radius: 4px; background: none; color: var(--fg); font: inherit; text-align: left; cursor: pointer; }
 .problems-row:hover, .problems-row:focus-visible { background: var(--btn); color: var(--btn-fg); outline: none; }
-.problems-line { opacity: .7; margin-right: 6px; font-variant-numeric: tabular-nums; }
+.problems-line { opacity: .85; margin-right: 6px; font-variant-numeric: tabular-nums; }
 .problems-item .fix { margin-left: 8px; }
 .problems-empty { margin: 0; padding: 6px 8px; }
 
@@ -1003,8 +1004,8 @@ details.thought div { white-space: pre-wrap; margin-top: 4px; padding-left: 18px
 .history-row.on { background: var(--btn); color: var(--btn-fg); }
 .history-row:focus-visible { outline: 1px solid var(--focus); outline-offset: -1px; }
 .history-count b { font-weight: 600; }
-.history-count .add { color: #3fb950; }
-.history-count .del { color: #f85149; }
+.history-count .add { color: color-mix(in srgb, var(--ok) 75%, var(--fg-strong)); }
+.history-count .del { color: color-mix(in srgb, var(--danger) 75%, var(--fg-strong)); }
 .history-row.on .history-count b { color: inherit; }
 #history-note { margin: 0 4px; font-size: 12px; color: var(--muted); }
 #history-diff { min-height: 60px; max-height: 280px; overflow: auto; border: 1px solid var(--widget-border); border-radius: 3px; font: 12px/1.5 ui-monospace, Menlo, monospace; }
@@ -1071,7 +1072,7 @@ details.thought div { white-space: pre-wrap; margin-top: 4px; padding-left: 18px
 #inline-input { flex: 1; min-height: 22px; max-height: 120px; padding: 2px 0; border: 0; background: transparent; resize: none; line-height: 20px; caret-color: var(--caret); }
 .inline-foot { display: flex; justify-content: space-between; gap: 12px; margin-top: 4px; font-size: 11px; }
 #inline-status { display: inline-flex; align-items: center; gap: 4px; color: var(--muted); }
-#inline-status.error { color: var(--danger); }
+#inline-status.error { color: color-mix(in srgb, var(--danger) 85%, var(--fg-strong)); }
 
 /* Suggestions: mistakes the model found, underlined in the colored layer behind the text. */
 ::highlight(issue) { text-decoration: underline 2px var(--danger); text-underline-offset: 4px; }
