@@ -301,9 +301,10 @@ fn missing(texts: &BTreeMap<String, String>) -> Vec<Value> {
 
 /// Every label defined in the Typst, LaTeX and Quarto files with how many times it is used,
 /// and the uses that point nowhere.
-fn references(texts: &BTreeMap<String, String>) -> (Vec<Value>, Vec<Value>) {
+fn references(texts: &BTreeMap<String, String>) -> (Vec<Value>, Vec<Value>, Vec<String>) {
     let (found, uses) = scan(texts);
-    let nowhere = missing_of(texts, &found, &uses);
+    let bib = bib_keys(texts);
+    let nowhere = missing_of(texts, &found, &uses, &bib);
     let mut count = HashMap::<&str, u64>::new();
     uses.iter().filter(|u| !u.cite).for_each(|u| *count.entry(&u.key).or_default() += 1);
     let labels = found
@@ -313,21 +314,25 @@ fn references(texts: &BTreeMap<String, String>) -> (Vec<Value>, Vec<Value>) {
             json!({"name": name, "path": path, "line": line, "col": col, "refs": refs})
         })
         .collect();
-    (labels, nowhere)
+    (labels, nowhere, bib.into_iter().map(String::from).collect())
+}
+
+/// Every citation key the project defines, in a .bib file or a \bibitem, sorted and without repeats.
+fn bib_keys(texts: &BTreeMap<String, String>) -> BTreeSet<&str> {
+    texts
+        .iter()
+        .filter(|(rel, _)| rel.ends_with(".bib"))
+        .flat_map(|(_, t)| BIB_KEY.captures_iter(t).map(|c| c.get(1).unwrap().as_str()))
+        .chain(texts.values().flat_map(|t| TEX_BIBITEM.captures_iter(t).map(|c| c.get(1).unwrap().as_str())))
+        .collect()
 }
 
 /// Uses that match no label and no bibliography entry, each with its file, line and column.
 /// A citation is judged only when a .bib file (or \bibitem) gives keys to judge it by, and a
 /// Typst or Quarto @key that could be a citation only when no bibliography is declared that
 /// this cannot read (a .yml, a .json), so a miss is never a guess.
-fn missing_of(texts: &BTreeMap<String, String>, defs: &[(String, String, usize, usize)], uses: &[Use]) -> Vec<Value> {
+fn missing_of(texts: &BTreeMap<String, String>, defs: &[(String, String, usize, usize)], uses: &[Use], bib: &BTreeSet<&str>) -> Vec<Value> {
     let defs: HashSet<&str> = defs.iter().map(|d| d.0.as_str()).collect();
-    let bib: HashSet<&str> = texts
-        .iter()
-        .filter(|(rel, _)| rel.ends_with(".bib"))
-        .flat_map(|(_, t)| BIB_KEY.captures_iter(t).map(|c| c.get(1).unwrap().as_str()))
-        .chain(texts.values().flat_map(|t| TEX_BIBITEM.captures_iter(t).map(|c| c.get(1).unwrap().as_str())))
-        .collect();
     let unreadable = bib.is_empty() && texts.iter().any(|(rel, t)| !rel.ends_with(".bib") && t.contains("bibliography"));
     uses.iter()
         .filter(|u| !defs.contains(u.key.as_str()) && !bib.contains(u.key.as_str()))
@@ -677,7 +682,7 @@ impl Workspace {
 
     fn state(&self) -> Value {
         let (files, dirs) = self.entries().unwrap_or_default();
-        let (labels, missing) = references(&self.known);
+        let (labels, missing, cites) = references(&self.known);
         json!({
             "type": "folder",
             "root": self.root.as_ref().map(|r| page(r)),
@@ -686,6 +691,7 @@ impl Workspace {
             "changed": self.baseline.keys().collect::<Vec<_>>(),
             "labels": labels,
             "missing": missing,
+            "cites": cites,
         })
     }
 
@@ -2592,10 +2598,13 @@ mod tests {
         assert!(has("ref", "sec:nope") && has("ref", "fig:lost") && has("cite", "nobody2020"));
         assert!(has("ref", "nowhere") && has("ref", "ghost") && has("ref", "fig-missing") && has("cite", "unknown"));
         assert_eq!(found.len(), 7, "{found:?}");
+        let (_, _, cites) = references(&texts);
+        assert!(cites.contains(&"known2020".to_string()) && cites.contains(&"other".to_string()) && !cites.contains(&"unknown".to_string()), "{cites:?}");
+        assert!(cites.windows(2).all(|w| w[0] < w[1]), "sorted, no repeats");
         if let Ok(dir) = std::env::var("QUIRE_DUMP") {
             let state = |t: &BTreeMap<String, String>| {
-                let (labels, missing) = references(t);
-                json!({"type": "folder", "labels": labels, "missing": missing})
+                let (labels, missing, cites) = references(t);
+                json!({"type": "folder", "labels": labels, "missing": missing, "cites": cites})
             };
             fs::write(format!("{dir}/planted.json"), state(&texts).to_string()).unwrap();
             fs::write(format!("{dir}/planted-files.json"), json!(texts).to_string()).unwrap();
@@ -2638,7 +2647,7 @@ mod tests {
             let (found, _) = scan(&texts);
             without.push(t.elapsed());
             let t = Instant::now();
-            let (l, m) = references(&texts);
+            let (l, m, _) = references(&texts);
             with.push(t.elapsed());
             assert!(m.is_empty() && !l.is_empty() && !found.is_empty());
         }
