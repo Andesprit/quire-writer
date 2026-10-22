@@ -1,6 +1,7 @@
 // The formatting bar and its shortcuts: markup for the open file's language, written into the
 // text field around the selection or at the caret.
 import type { Lang } from "./highlight"
+import { texHeadingOf, texRelevel } from "./sections"
 import { $, icon } from "./ui"
 
 const ta = $<HTMLTextAreaElement>("text")
@@ -75,7 +76,7 @@ function mapLines(fn: (ls: string[]) => string[]) {
 export function setHeading(sx: Syntax, level: number) {
   mapLines((ls) => {
     const lvl = ls.every((l) => sx.headingOf(l)?.[0] === level) ? 0 : level
-    return ls.map((l) => sx.heading(sx.headingOf(l)?.[1] ?? l, lvl))
+    return ls.map((l) => (lvl && sx.relevel && sx.headingOf(l) ? sx.relevel(l, lvl) : sx.heading(sx.headingOf(l)?.[1] ?? l, lvl)))
   })
 }
 
@@ -148,7 +149,6 @@ const marked = (mark: string) => ({
   },
   heading: (title: string, level: number) => (level ? `${mark.repeat(level)} ${title}` : title),
 })
-const SECTIONS = ["section", "subsection", "subsubsection", "paragraph"]
 
 // What each button writes. "key", "name", "image.png" and "Header" are selected for the writer
 // to replace.
@@ -170,6 +170,7 @@ export type Syntax = {
   table: string
   headingOf: (line: string) => [number, string] | null // level and title
   heading: (title: string, level: number) => string // level 0: plain text
+  relevel?: (line: string, level: number) => string // a heading line at another level, keeping the rest of it
 }
 
 const MD_TABLE = "| Header | Header |\n|--------|--------|\n| Cell   | Cell   |"
@@ -227,12 +228,9 @@ const SYNTAX: Partial<Record<Lang, Syntax>> = {
     footnote: ["\\footnote{", "}"],
     figure: "\\begin{figure}[ht]\n  \\centering\n  \\includegraphics[width=0.8\\linewidth]{image.png}\n  \\caption{Caption}\n  \\label{fig:name}\n\\end{figure}",
     table: "\\begin{table}[ht]\n  \\centering\n  \\begin{tabular}{ll}\n    Header & Header \\\\\n    Cell & Cell \\\\\n  \\end{tabular}\n  \\caption{Caption}\n  \\label{tab:name}\n\\end{table}",
-    headingOf: (l) => {
-      const m = /^\\(\w+)\*?\{(.*)\}\s*$/.exec(l)
-      const level = m ? SECTIONS.indexOf(m[1]) + 1 : 0
-      return level ? [level, m![2]] : null
-    },
-    heading: (title, level) => (level ? `\\${SECTIONS[level - 1]}{${title}}` : title),
+    headingOf: texHeadingOf,
+    relevel: texRelevel,
+    heading: (title, level) => (level ? texRelevel(`\\x{${title}}`, level) : title),
   },
   markdown: MARKDOWN,
   quarto: { ...MARKDOWN, label: "{#sec-name}", figure: "![Caption](image.png){#fig-name}", table: `${MD_TABLE}\n\n: Caption {#tbl-name}` },

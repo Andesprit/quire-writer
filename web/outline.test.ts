@@ -31,10 +31,10 @@ assert.equal(headingTitle("typst", "Fermentation <sec:ferm>"), "Fermentation")
 assert.equal(headingTitle("quarto", "Methods {#sec-methods}"), "Methods")
 assert.equal(headingTitle("markdown", "Plain # title"), "Plain # title")
 
-// The Text menu rewrites a heading line as heading(headingOf(line)[1], level) (format.ts setHeading).
+// The Text menu rewrites a heading line as heading(headingOf(line)[1], level) (format.ts setHeading; the LaTeX regex lives in sections.ts).
 // headingOf must keep the label tail so changing a level never drops it.
-const fmt = readFileSync(new URL("./format.ts", import.meta.url), "utf8")
-assert.ok(fmt.includes("const m = /^\\\\(\\w+)\\*?\\{(.*)\\}\\s*$/.exec(l)"), "LaTeX headingOf must stay greedy")
+const fmt = readFileSync(new URL("./sections.ts", import.meta.url), "utf8")
+assert.ok(fmt.includes("const m = /^\\\\(\\w+)\\*?(?:\\[[^\\]]*\\])?\\{(.*)\\}\\s*$/.exec(l)"), "LaTeX headingOf must stay greedy")
 const retitle = (l: string, level: number) => `\\${SECTIONS[level - 1]}{${tex(l)![1]}}`
 assert.equal(retitle("\\section{Starter}\\label{sec:starter}", 2), "\\subsection{Starter}\\label{sec:starter}", "label survives a level change")
 

@@ -1,6 +1,6 @@
 import assert from "node:assert/strict"
 import { outline } from "./outline.ts"
-import { moveSection, shiftSection } from "./sections.ts"
+import { moveSection, shiftSection, texHeadingOf, texRelevel } from "./sections.ts"
 
 const marked = (mark: string) => (l: string): [number, string] | null => {
   const m = new RegExp(`^(\\${mark}+)\\s+(.*)`).exec(l)
@@ -130,4 +130,11 @@ assert.equal(sh("Title\n=====\n\n## B\n", "markdown", marked("#"), 0, -1), "Titl
 assert.equal(shiftSection("  ## A\n", [{ level: 2, title: "A", line: 0 }], 0, -1, "markdown"), "unsupported")
 // Promoting a section does not carry its later siblings: they become its children (D below).
 assert.equal(sh("= A\n== B\n=== C\n== D\n", "typst", marked("="), 1, -1), "= A\n= B\n== C\n== D\n")
+// LaTeX headings with a [short title]: listed in the outline, and kept through a level change.
+assert.deepEqual(texHeadingOf("\\section[S]{Long}\\label{x}"), [1, "Long}\\label{x"])
+assert.deepEqual(texHeadingOf("\\section[S]{Long}"), [1, "Long"])
+assert.equal(texRelevel("\\section[S]{Long}\\label{x}", 2), "\\subsection[S]{Long}\\label{x}", "dropdown level change keeps [S] and the label")
+assert.equal(texRelevel("\\section*[S]{Long}", 3), "\\subsubsection*[S]{Long}")
+const sx = "\\section{S}\n\\subsection[Sh]{Long}\\label{y}\n\\section{T}\n"
+assert.equal(sh(sx, "latex", texHeadingOf, 0, 1), "\\subsection{S}\n\\subsubsection[Sh]{Long}\\label{y}\n\\section{T}\n", "a [short] child follows its parent")
 console.log("sections shift ok")

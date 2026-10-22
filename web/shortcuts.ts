@@ -21,6 +21,8 @@ export const SHORTCUTS = [
   { id: "label-prefix", action: "Go to label (type # in the open-a-file box)", group: "Go to", keys: "#" },
   { id: "rename-label", action: "Rename the label under the caret", group: "Go to", keys: "F2", cmd: "rename-label", src: '"F2"' },
   { id: "outline-move", action: "Move the focused Outline section up or down", group: "Go to", keys: "⌥↑↓", src: 'e.altKey && (e.key === "ArrowUp"' },
+  { id: "outline-promote", action: "Promote the focused Outline section with what is inside it", group: "Go to", keys: "⌥⇧←", win: "Alt+Shift+←", src: 'e.altKey && e.shiftKey && (e.key === "ArrowLeft"' },
+  { id: "outline-demote", action: "Demote the focused Outline section with what is inside it", group: "Go to", keys: "⌥⇧→", win: "Alt+Shift+→", src: '"ArrowRight") && !e.metaKey' },
   { id: "next-problem", action: "Go to the next problem", group: "Go to", keys: "F8", cmd: "next-problem", src: '"F8"' },
   { id: "prev-problem", action: "Go to the previous problem", group: "Go to", keys: "⇧F8", win: "Shift+F8", cmd: "prev-problem", src: "stepProblems(" },
   { id: "back", action: "Go back to the previous place", group: "Go to", keys: "Mod[", win: "Alt+←", cmd: "back", src: "placeKey(" },

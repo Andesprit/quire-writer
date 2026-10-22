@@ -11,7 +11,7 @@ import { diagnosticRange, errorCount, missingTool, isCurrentDiagnostic, shiftDia
 import { findMatches, replacementEdit, type Match } from "./find"
 import { fuzzyMatch, rankFiles } from "./palette"
 import { headingTitle, outline, type Heading } from "./outline"
-import { moveSection } from "./sections"
+import { moveSection, shiftSection } from "./sections"
 import { refChoices, refTrigger, type RefChoice, type RefTrigger } from "./refcomplete"
 import { diff, minimalChange, rebase, type Diff } from "./merge"
 import { $, ask, esc, fileIcon, icon, toast } from "./ui"
@@ -1594,6 +1594,20 @@ function moveHeading(from: number, to: number): boolean {
   $("outline").querySelector<HTMLElement>(`.row[data-i="${i}"]`)?.focus({ preventScroll: true })
   return true
 }
+// Shift+Alt+Left / Right: the section and everything inside it one level up or down. One edit, so one undo step.
+function shiftHeading(i: number, delta: -1 | 1) {
+  if (ta.readOnly) return void toast("Wait a moment, then try again.")
+  if (outlineStale) return void renderOutline()
+  const r = shiftSection(ta.value, heads, i, delta, lang as "typst" | "latex" | "markdown" | "quarto")
+  if (typeof r === "string")
+    return void toast(
+      r === "top" ? "This section is already at the top level." : r === "bottom" ? "A section inside it is already at the deepest level, so it cannot go lower." : "This heading is written in a form Quire cannot change here. Edit it by hand.",
+    )
+  if (mode === "review") setMode("edit")
+  edit(r.at, r.at + r.cut, r.put)
+  renderOutline()
+  $("outline").querySelector<HTMLElement>(`.row[data-i="${i}"]`)?.focus({ preventScroll: true })
+}
 // Alt+Up / Alt+Down: before the previous sibling, or after the next one.
 function moveHeadingBy(i: number, step: -1 | 1) {
   const lvl = heads[i].level
@@ -1618,12 +1632,27 @@ $("outline").addEventListener("keydown", (e) => {
   } else if (e.altKey && (e.key === "ArrowUp" || e.key === "ArrowDown") && !e.metaKey && !e.ctrlKey && !e.shiftKey) {
     e.preventDefault()
     moveHeadingBy(i, e.key === "ArrowUp" ? -1 : 1)
+  } else if (e.altKey && e.shiftKey && (e.key === "ArrowLeft" || e.key === "ArrowRight") && !e.metaKey && !e.ctrlKey) {
+    e.preventDefault()
+    shiftHeading(i, e.key === "ArrowLeft" ? -1 : 1)
   } else if (!e.altKey && !e.metaKey && !e.ctrlKey && ["ArrowUp", "ArrowDown", "Home", "End"].includes(e.key)) {
     e.preventDefault()
     const n = e.key === "Home" ? 0 : e.key === "End" ? heads.length - 1 : i + (e.key === "ArrowUp" ? -1 : 1)
     $("outline").querySelector<HTMLElement>(`.row[data-i="${Math.max(0, Math.min(heads.length - 1, n))}"]`)?.focus()
   }
 })
+$("outline").oncontextmenu = (e) => {
+  const i = Number((e.target as HTMLElement).closest<HTMLElement>(".row[data-i]")?.dataset.i)
+  if (!heads[i]) return
+  e.preventDefault()
+  showMenu(e.clientX, e.clientY, [
+    { label: "Promote Section", keys: kc("outline-promote"), run: () => shiftHeading(i, -1) },
+    { label: "Demote Section", keys: kc("outline-demote"), run: () => shiftHeading(i, 1) },
+    "-",
+    { label: "Move Section Up", keys: "⌥↑", run: () => moveHeadingBy(i, -1) },
+    { label: "Move Section Down", keys: "⌥↓", run: () => moveHeadingBy(i, 1) },
+  ])
+}
 $("outline").onclick = (e) => {
   const row = (e.target as HTMLElement).closest<HTMLElement>(".row[data-i]")
   const h = row && heads[Number(row.dataset.i)]

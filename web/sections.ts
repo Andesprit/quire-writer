@@ -44,6 +44,14 @@ export function moveSection(text: string, heads: Heading[], from: number, to: nu
 }
 
 const TEX_LEVELS = ["section", "subsection", "subsubsection", "paragraph"]
+// A LaTeX heading line: \section{T}, \section*{T}, \section[Short]{T}. The title keeps the rest of the line.
+export function texHeadingOf(l: string): [number, string] | null {
+  const m = /^\\(\w+)\*?(?:\[[^\]]*\])?\{(.*)\}\s*$/.exec(l)
+  const level = m ? TEX_LEVELS.indexOf(m[1]) + 1 : 0
+  return level ? [level, m![2]] : null
+}
+// The same line at another level: only the command name changes, so the star and [Short] stay.
+export const texRelevel = (l: string, level: number) => l.replace(/^\\\w+/, "\\" + TEX_LEVELS[level - 1])
 const MAX_LEVEL = { typst: 6, markdown: 6, quarto: 6, latex: TEX_LEVELS.length } as const
 
 // Promote (delta -1) or demote (+1) section `index` and every heading inside it by one level.
