@@ -28,3 +28,9 @@ export function problemLines(path: string, problems: Problem[], max = 5): string
   if (problems.length > max) lines.push(`and ${problems.length - max} more`)
   return lines
 }
+
+// References that point nowhere in other files of the project, when `path` is the compiled main. Only counted, never listed.
+export function elsewhere(path: string, compileMain: string | null, nowhere: Nowhere[]): number {
+  const ext = (f: string) => f.split(".").pop()
+  return compileMain === path ? nowhere.filter((n) => n.path !== path && ext(n.path) === ext(path)).length : 0
+}

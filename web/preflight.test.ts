@@ -1,5 +1,5 @@
 import assert from "node:assert/strict"
-import { gatherProblems, problemLines } from "./preflight.ts"
+import { elsewhere, gatherProblems, problemLines } from "./preflight.ts"
 
 const d = (path: string, line: number, message = "unknown variable foo") => ({ path, line, col: 2, end_line: line, end_col: 5, message, hints: [] })
 const n = (path: string, line: number) => ({ kind: "ref" as const, key: "sec:nope", path, line, col: 0 })
@@ -15,4 +15,6 @@ assert.equal(problemLines("main.typ", gatherProblems("main.typ", "main.typ", [d(
 assert.deepEqual(gatherProblems("notes.md", "main.typ", [d("main.typ", 8)], false, []), [], "errors of another main do not count")
 assert.equal(gatherProblems("main.typ", "main.typ", [d("main.typ", 1), d("main.typ", 1, "second")], false, []).length, 1, "one per line")
 assert.equal(problemLines("main.typ", Array.from({ length: 8 }, (_, i) => ({ path: "main.typ", line: i, col: 0, text: "x" }))).at(-1), "and 3 more", "capped at five")
+assert.equal(elsewhere("main.typ", "main.typ", [n("main.typ", 1), n("ch1.typ", 2), n("a.tex", 3)]), 1, "other files of the same kind, counted")
+assert.equal(elsewhere("main.typ", null, [n("ch1.typ", 2)]), 0, "not the compiled main")
 console.log("preflight ok")

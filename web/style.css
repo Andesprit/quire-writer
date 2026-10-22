@@ -1078,7 +1078,7 @@ details.thought div { white-space: pre-wrap; margin-top: 4px; padding-left: 18px
 }
 .ask::backdrop { background: rgb(0 0 0 / 0.35); }
 .ask-title { margin: 0 0 6px; font-weight: 600; color: var(--fg-strong); }
-.ask-body { margin: 0 0 16px; color: var(--muted); line-height: 1.5; }
+.ask-body { margin: 0 0 16px; color: var(--muted); line-height: 1.5; white-space: pre-line; }
 .ask-cmd { margin: -8px 0 16px; padding: 6px 8px; max-height: 140px; overflow: auto; white-space: pre-wrap; overflow-wrap: anywhere; border-radius: 4px; background: var(--editor); border: 1px solid var(--widget-border); font: 12px/1.4 "SF Mono", Menlo, monospace; user-select: text; color: var(--fg); }
 .ask-actions { display: flex; justify-content: flex-end; gap: 8px; }
 .kinds { display: grid; grid-template-columns: 1fr 1fr; gap: 8px; margin-bottom: 16px; }

@@ -13,6 +13,7 @@ import { diff, minimalChange, rebase, type Diff } from "./merge"
 import { $, ask, esc, fileIcon, icon, toast } from "./ui"
 import { FORMAT_KEYS, buildFormatBar, connectEditor, insertAt, select, setHeading, syntaxOf } from "./format"
 import { nameProblem } from "./names"
+import { elsewhere, gatherProblems, problemLines } from "./preflight"
 import { changes, paragraphs, readFixes, type Fix } from "./suggest"
 import { add, connectChat, onFolderOpened, onPermission, onTurnEnd, onTurnStart, onUpdate, renderChips, running, setAgentReady } from "./chat"
 
@@ -2391,6 +2392,17 @@ async function exportAs(to: string) {
   }
   // A failed save exports nothing: its notice says why, and the old text is not exported as new.
   if (isDirty() && (await flushSave())) return
+  // Problems the page already knows: the writer can fix them first or export anyway.
+  const problems = gatherProblems(path, compileMain, compileDiagnostics, document.body.classList.contains("errors-pending"), nowhere)
+  if (problems.length) {
+    const lines = problemLines(path, problems)
+    const more = elsewhere(path, compileMain, nowhere)
+    if (more) lines.push(`${more} more reference${more > 1 ? "s" : ""} point${more > 1 ? "" : "s"} nowhere in other files (see Labels).`)
+    const n = problems.length
+    const answer = await ask(`${baseName(path)} has ${n} problem${n > 1 ? "s" : ""}`, lines.join("\n"), "Export anyway", undefined, "Go to first problem")
+    if (answer === "extra") goTo(problems[0].path, problems[0].line, problems[0].col, true)
+    if (answer !== "save") return
+  }
   send({ type: "export", req: ++reqSeq, path, to })
 }
 
