@@ -3003,7 +3003,7 @@ mod tests {
         assert_eq!((uses("schedule"), uses("timeline")), (Some(1), None));
         assert!(nowhere.is_empty());
         if let Ok(out) = std::env::var("QUIRE_DUMP") {
-            let reply = json!({"type": "label_renamed", "from": "timeline", "to": "schedule", "result": {"ok": true, "files": files, "places": places}});
+            let reply = json!({"type": "label_renamed", "from": "timeline", "to": "schedule", "result": {"ok": true, "files": files, "places": places, "op": w.next_operation, "paths": w.operations.last().map_or(vec![], |o| o.files.keys().cloned().collect::<Vec<_>>())}});
             fs::write(format!("{out}/rename-reply.json"), reply.to_string()).unwrap();
             fs::write(format!("{out}/rename-folder.json"), w.state().to_string()).unwrap();
             fs::write(format!("{out}/rename-files.json"), json!(w.known).to_string()).unwrap();
