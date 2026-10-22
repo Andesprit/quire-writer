@@ -2447,10 +2447,9 @@ function renderPalette() {
       detail: m.path === current ? "Open" : recent.includes(m.path) ? "Recent" : "",
       run: async () => {
         if (m.path === current) { if (mode === "edit") ta.focus(); return }
-        if (await leaveCurrent() && root === folder && files.includes(m.path)) {
-          ta.focus({ preventScroll: true })
-          send({ type: "open_file", path: m.path })
-        }
+        if (root !== folder || !files.includes(m.path)) return
+        ta.focus({ preventScroll: true })
+        leaveThen({ type: "open_file", path: m.path })
       },
     }))
   }
