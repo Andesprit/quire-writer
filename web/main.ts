@@ -768,6 +768,9 @@ function updateReviewUI() {
     $("review-count").textContent = mode === "review" ? `${focusChunk + 1} of ${n}` : `${n} change${n > 1 ? "s" : ""}`
     $("review-toggle").innerHTML = mode === "review" ? `${icon("edit")} Edit text` : `${icon("diff")} Show changes`
   }
+  const undo = $("undo-op")
+  undo.hidden = !(n && lastOp && current && lastOp.paths.includes(current))
+  if (lastOp) undo.textContent = `Undo this ${lastOp.kind} in all files`
   renderReviewStatus()
 }
 
@@ -782,6 +785,50 @@ $("accept-all").onclick = () => {
   scheduleSave()
   ta.focus()
 }
+// The newest rename or replace across files, which one click can undo while it is the latest.
+let lastOp: { id: number; kind: "replace" | "rename"; paths: string[] } | null = null
+let undoing = false
+let opToast: HTMLElement | null = null // the notice with the Undo button: gone once the undo ran
+
+async function undoOperation() {
+  if (!lastOp || undoing) return
+  undoing = true
+  // The open text goes to disk first, and typing waits until the app answers.
+  holdTyping(true)
+  const error = await flushSave(true)
+  if (error) {
+    holdTyping(false)
+    undoing = false
+    toast(`Nothing was undone: ${baseName(current!)} could not be saved first.`)
+    return
+  }
+  send({ type: "undo_operation", req: (leaving = ++reqSeq), op: lastOp.id })
+}
+
+// The app answered (or failed): typing is free again.
+function undone(r: { ok: boolean; restored: string[]; skipped: string[]; error: string }, kind: string) {
+  undoing = false
+  opToast?.remove()
+  if (!r.ok) {
+    lastOp = null // the app forgot it: its answer says why
+    updateReviewUI()
+    return toast(r.error)
+  }
+  lastOp = null
+  updateReviewUI()
+  const files = r.restored.length
+  const left = r.skipped.length
+  toast(`Undid the ${kind} in ${files} file${files === 1 ? "" : "s"}.${left ? ` ${r.skipped.join(", ")} ${left === 1 ? "was" : "were"} changed since, so ${left === 1 ? "it was" : "they were"} left as ${left === 1 ? "it is" : "they are"}.` : ""}`, "info")
+  refreshSearch()
+}
+
+// After a rename or replace: the notice and the review bar offer Undo while it is the latest.
+function offerUndo(kind: "replace" | "rename", r: { op: number; paths: string[] }) {
+  lastOp = { id: r.op, kind, paths: r.paths }
+  updateReviewUI()
+  return { label: "Undo", run: undoOperation }
+}
+$("undo-op").onclick = undoOperation
 $("reject-all").onclick = () => {
   const base = baseline
   if (base == null) return
@@ -1286,6 +1333,7 @@ renderRecent()
 
 // Another folder was opened: nothing from the previous one may stay on screen.
 function resetForFolder(newRoot: string) {
+  lastOp = null
   closePalette(false)
   clearTimeout(saveTimer)
   closeFile()
@@ -2729,10 +2777,10 @@ async function replaceInProject(only?: string) {
 }
 
 // The app answered (or failed): typing is free again and the results are asked for afresh.
-function replaced(r: { ok: boolean; files: number; places: number; error: string }) {
+function replaced(r: { ok: boolean; files: number; places: number; error: string; op: number; paths: string[] }) {
   replacing = false
   const n = (count: number, noun: string) => `${count} ${noun}${count === 1 ? "" : "s"}`
-  if (r.ok) toast(`Replaced ${n(r.places, "place")} in ${n(r.files, "file")}. Review the changes.`, "info")
+  if (r.ok) opToast = toast(`Replaced ${n(r.places, "place")} in ${n(r.files, "file")}. Review the changes.`, "info", [offerUndo("replace", r)])
   else toast(r.error)
   runSearch()
 }
@@ -3546,11 +3594,15 @@ function onMessage(msg: any) {
       pendingRename = null
       const r = msg.result
       const n = (count: number, noun: string) => `${count} ${noun}${count === 1 ? "" : "s"}`
-      if (r.ok) toast(`Renamed ${msg.from} to ${msg.to} in ${n(r.files, "file")} (${n(r.places, "place")}). Review the changes.`, "info")
+      if (r.ok) opToast = toast(`Renamed ${msg.from} to ${msg.to} in ${n(r.files, "file")} (${n(r.places, "place")}). Review the changes.`, "info", [offerUndo("rename", r)])
       else if (p) startLabelRename(p.name, p.path, p.to, r.error)
       else toast(r.error)
       break
     }
+    case "operation_undone":
+      if (msg.req === leaving) holdTyping(false)
+      undone(msg.result, lastOp?.kind ?? "change")
+      break
     case "replace_result":
       if (msg.req === leaving) holdTyping(false)
       replaced(msg.result)
@@ -3704,7 +3756,12 @@ function onMessage(msg: any) {
       }
       if (msg.req && msg.req === leaving) holdTyping(false) // the open text stays, and the writer can type again
       if (msg.op === "replace_in_project") {
-        replaced({ ok: false, files: 0, places: 0, error: msg.message })
+        replaced({ ok: false, files: 0, places: 0, error: msg.message, op: 0, paths: [] })
+        return
+      }
+      if (msg.op === "undo_operation") {
+        undoing = false
+        toast(`Nothing was undone. ${msg.message}`)
         return
       }
       if (msg.op === "export") exporting?.remove()

@@ -2680,7 +2680,7 @@ async fn handle(msg: &Value) -> Result<(), String> {
             // The answer carries the reason when it is refused: the page shows it by the name box.
             let result = ws().rename_label(f("path")?, f("from")?, f("to")?);
             let reply = match result {
-                Ok((files, places)) => json!({"ok": true, "files": files, "places": places, "op": ws().next_operation}),
+                Ok((files, places)) => json!({"ok": true, "files": files, "places": places, "op": ws().next_operation, "paths": ws().operations.last().map_or(vec![], |o| o.files.keys().cloned().collect::<Vec<_>>())}),
                 Err(error) => json!({"ok": false, "error": error}),
             };
             send(json!({"type": "label_renamed", "req": msg["req"], "from": f("from")?, "to": f("to")?, "result": reply}));
@@ -2689,7 +2689,7 @@ async fn handle(msg: &Value) -> Result<(), String> {
             let expected: Vec<(String, usize)> = msg["expected"].as_array().map_or(vec![], |a| a.iter().map(|e| (e["path"].as_str().unwrap_or("").to_string(), e["count"].as_u64().unwrap_or(0) as usize)).collect());
             let result = ws().replace_in_project(f("query")?, msg["case"].as_bool().unwrap_or(false), msg["word"].as_bool().unwrap_or(false), f("replacement")?, &expected);
             let reply = match result {
-                Ok((files, places)) => json!({"ok": true, "files": files, "places": places, "op": ws().next_operation}),
+                Ok((files, places)) => json!({"ok": true, "files": files, "places": places, "op": ws().next_operation, "paths": ws().operations.last().map_or(vec![], |o| o.files.keys().cloned().collect::<Vec<_>>())}),
                 Err(error) => json!({"ok": false, "error": error}),
             };
             send(json!({"type": "replace_result", "req": msg["req"], "result": reply}));
@@ -3153,20 +3153,40 @@ mod tests {
         // Everything untouched: byte for byte back, no review marks left, a second undo refused.
         all(&mut w);
         let id = w.next_operation;
-        let (back, skipped) = w.undo_operation(id).unwrap();
+        let after_all = w.known.clone();
+        let result = w.undo_operation(id);
+        let dump = std::env::var("QUIRE_DUMP").ok();
+        let reply = |r: &Result<(Vec<String>, Vec<String>), String>| match r {
+            Ok((restored, skipped)) => json!({"type": "operation_undone", "op": id, "result": {"ok": true, "restored": restored, "skipped": skipped}}),
+            Err(error) => json!({"type": "operation_undone", "op": id, "result": {"ok": false, "error": error}}),
+        };
+        if let Some(out) = &dump {
+            fs::write(format!("{out}/undo-ok.json"), reply(&result).to_string()).unwrap();
+            fs::write(format!("{out}/undo-before-files.json"), json!(before).to_string()).unwrap();
+            fs::write(format!("{out}/undo-after-files.json"), json!(after_all).to_string()).unwrap();
+        }
+        let (back, skipped) = result.unwrap();
         assert_eq!((back.len(), skipped.len()), (3, 0));
         for f in before.keys() {
             assert_eq!((disk(f), &w.known[f]), (before[f].clone(), &before[f]), "{f}");
         }
         assert!(w.baseline.is_empty(), "restored files are no longer for review");
-        assert!(w.undo_operation(id).unwrap_err().contains("already undone"));
+        let twice = w.undo_operation(id);
+        if let Some(out) = &dump {
+            fs::write(format!("{out}/undo-twice.json"), reply(&twice).to_string()).unwrap();
+        }
+        assert!(twice.unwrap_err().contains("already undone"));
         // A file edited since is left as it is and named; the others come back.
         all(&mut w);
         let id = w.next_operation;
         fs::write(dir.join("c.md"), "flour\nlate!").unwrap();
         w.known.insert("c.md".into(), "flour\nlate!".into());
         w.typed_text.insert("b.md".into(), "flour, typing".into());
-        let (back, skipped) = w.undo_operation(id).unwrap();
+        let result = w.undo_operation(id);
+        if let Some(out) = &dump {
+            fs::write(format!("{out}/undo-skip.json"), reply(&result).to_string()).unwrap();
+        }
+        let (back, skipped) = result.unwrap();
         assert_eq!((back, skipped), (vec!["a.md".to_string()], vec!["b.md".to_string(), "c.md".to_string()]), "typing in b.md counts as a change");
         assert_eq!((disk("a.md"), disk("b.md"), disk("c.md")), (before["a.md"].clone(), "flour".to_string(), "flour\nlate!".to_string()));
         assert!(w.baseline.get("a.md").is_none() && w.baseline.contains_key("b.md"));
@@ -3181,7 +3201,11 @@ mod tests {
             fs::write(dir.join(f), "other").unwrap();
         }
         let id = w.next_operation;
-        let refused = w.undo_operation(id).unwrap_err();
+        let result = w.undo_operation(id);
+        if let Some(out) = &dump {
+            fs::write(format!("{out}/undo-refused.json"), reply(&result).to_string()).unwrap();
+        }
+        let refused = result.unwrap_err();
         assert!(refused.starts_with("Nothing was undone: a.md, b.md, c.md"), "{refused}");
         assert_eq!(disk("a.md"), "other");
         // An earlier review baseline survives the undo; a partial Accept does not block it.
