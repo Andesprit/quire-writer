@@ -816,17 +816,21 @@ function undone(r: { ok: boolean; restored: string[]; skipped: string[]; error: 
   }
   lastOp = null
   updateReviewUI()
-  const files = r.restored.length
-  const left = r.skipped.length
-  toast(`Undid the ${kind} in ${files} file${files === 1 ? "" : "s"}.${left ? ` ${r.skipped.join(", ")} ${left === 1 ? "was" : "were"} changed since, so ${left === 1 ? "it was" : "they were"} left as ${left === 1 ? "it is" : "they are"}.` : ""}`, "info")
+  const restored = r.restored ?? []
+  const skipped = r.skipped ?? []
+  const files = restored.length
+  const left = skipped.length
+  toast(`Undid the ${kind} in ${files} file${files === 1 ? "" : "s"}.${left ? ` ${skipped.join(", ")} ${left === 1 ? "was" : "were"} changed since, so ${left === 1 ? "it was" : "they were"} left as ${left === 1 ? "it is" : "they are"}.` : ""}`, "info")
   refreshSearch()
 }
 
 // After a rename or replace: the notice and the review bar offer Undo while it is the latest.
-function offerUndo(kind: "replace" | "rename", r: { op: number; paths: string[] }) {
-  lastOp = { id: r.op, kind, paths: r.paths }
+// A reply without an op number offers no Undo.
+function offerUndo(kind: "replace" | "rename", r: { op?: number; paths?: string[] }) {
+  if (typeof r.op !== "number") return []
+  lastOp = { id: r.op, kind, paths: r.paths ?? [] }
   updateReviewUI()
-  return { label: "Undo", run: undoOperation }
+  return [{ label: "Undo", run: undoOperation }]
 }
 $("undo-op").onclick = undoOperation
 $("reject-all").onclick = () => {
@@ -2780,7 +2784,7 @@ async function replaceInProject(only?: string) {
 function replaced(r: { ok: boolean; files: number; places: number; error: string; op: number; paths: string[] }) {
   replacing = false
   const n = (count: number, noun: string) => `${count} ${noun}${count === 1 ? "" : "s"}`
-  if (r.ok) opToast = toast(`Replaced ${n(r.places, "place")} in ${n(r.files, "file")}. Review the changes.`, "info", [offerUndo("replace", r)])
+  if (r.ok) opToast = toast(`Replaced ${n(r.places, "place")} in ${n(r.files, "file")}. Review the changes.`, "info", offerUndo("replace", r))
   else toast(r.error)
   runSearch()
 }
@@ -3594,7 +3598,7 @@ function onMessage(msg: any) {
       pendingRename = null
       const r = msg.result
       const n = (count: number, noun: string) => `${count} ${noun}${count === 1 ? "" : "s"}`
-      if (r.ok) opToast = toast(`Renamed ${msg.from} to ${msg.to} in ${n(r.files, "file")} (${n(r.places, "place")}). Review the changes.`, "info", [offerUndo("rename", r)])
+      if (r.ok) opToast = toast(`Renamed ${msg.from} to ${msg.to} in ${n(r.files, "file")} (${n(r.places, "place")}). Review the changes.`, "info", offerUndo("rename", r))
       else if (p) startLabelRename(p.name, p.path, p.to, r.error)
       else toast(r.error)
       break
@@ -3741,7 +3745,7 @@ function onMessage(msg: any) {
       applyCite(msg)
       break
     case "search_result":
-      showSearch(msg.req, msg.hits, msg.more)
+      showSearch(msg.req, msg.hits ?? [], !!msg.more)
       break
     case "jump":
       followed = `${msg.path}:${msg.line}` // the preview is already there
