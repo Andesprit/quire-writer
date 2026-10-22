@@ -25,6 +25,15 @@ pub fn read(base: &Path, root: &str, rel: &str, at: u64) -> Option<String> {
     fs::read_to_string(base.join(slot(root, rel)).join(format!("{at}.txt"))).ok()
 }
 
+/// The history of `from` becomes the history of `to` (the file was renamed or moved).
+pub fn moved(base: &Path, root: &str, from: &str, to: &str) {
+    let (src, dst) = (base.join(slot(root, from)), base.join(slot(root, to)));
+    if src.is_dir() {
+        let _ = fs::remove_dir_all(&dst); // older than the file that now has this name
+        let _ = fs::rename(&src, &dst);
+    }
+}
+
 /// Keeps `old` (the text a write is about to replace) as a version. `force` skips the 5 minute gap
 /// (before a multi-file change or a restore). Same text as the newest version, or an empty file: nothing.
 /// Returns whether a version was written.
@@ -77,6 +86,18 @@ mod tests {
         record(&b, "/p", "d.typ", "old", t0, false);
         record(&b, "/p", "d.typ", "new", t0 + 31 * 24 * 3600 * 1000, false);
         assert_eq!(list(&b, "/p", "d.typ"), vec![t0 + 31 * 24 * 3600 * 1000]);
+        let _ = fs::remove_dir_all(&b);
+    }
+
+    #[test]
+    fn history_follows_a_rename() {
+        let b = tmp("moved");
+        record(&b, "/p", "a.typ", "one", 5, true);
+        record(&b, "/p", "b.typ", "stale", 6, true);
+        moved(&b, "/p", "a.typ", "b.typ");
+        assert!(list(&b, "/p", "a.typ").is_empty());
+        assert_eq!(list(&b, "/p", "b.typ"), vec![5]);
+        assert_eq!(read(&b, "/p", "b.typ", 5).as_deref(), Some("one"));
         let _ = fs::remove_dir_all(&b);
     }
 

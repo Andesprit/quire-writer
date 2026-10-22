@@ -4,7 +4,6 @@
 
 mod agent;
 mod engine;
-#[allow(dead_code)] // wired in by the build turn
 mod history;
 mod project;
 

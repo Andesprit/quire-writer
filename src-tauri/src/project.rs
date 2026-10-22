@@ -27,6 +27,7 @@ use crate::agent::{
     apple_problem, chat_plain, check_plain, check_prompt, complete_plain, complete_prompt, find_agent, inline_plain, inline_prompt, registry, stop_chat_plain, Agent, Plain, BRIDGE,
 };
 use crate::engine;
+use crate::history;
 #[cfg(windows)]
 use crate::ProcessGroup;
 use crate::{killpg, lock, NoWindow, SIGKILL, SIGTERM};
@@ -693,6 +694,7 @@ pub struct Workspace {
     typed_text: BTreeMap<String, String>,
     typed_generation: u64,
     diagnostic_tx: Option<tokio::sync::watch::Sender<DiagnosticInput>>,
+    history: Option<PathBuf>, // where earlier versions of files are kept: the app's data folder, never the project
 }
 
 /// A rename or replace across files: per file the text before and after, and the review baseline
@@ -799,6 +801,32 @@ fn walk(root: &Path, dir: &Path, files: &mut Vec<String>, dirs: &mut Vec<String>
 }
 
 impl Workspace {
+    /// Keeps `old`, the text a write is about to replace, as an earlier version of `rel`. `force`:
+    /// not routine typing, so it is kept even right after another version.
+    fn keep(&self, rel: &str, old: &str, force: bool) {
+        if let (Some(base), Some(root)) = (&self.history, &self.root) {
+            let now = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map_or(0, |d| d.as_millis() as u64);
+            history::record(base, &page(root), rel, old, now, force);
+        }
+    }
+
+    /// The history of `rel` (a file, or a folder and all in it) follows it to `to`.
+    fn keep_moved(&self, rel: &str, to: &str) {
+        let under = format!("{rel}/");
+        if let (Some(base), Some(root)) = (&self.history, &self.root) {
+            for k in self.known.keys().filter(|k| *k == rel || k.starts_with(&under)) {
+                history::moved(base, &page(root), k, &moved(k, rel, to));
+            }
+        }
+    }
+
+    /// Earlier versions of `rel`, newest first, with their text.
+    fn versions(&self, rel: &str) -> Vec<Value> {
+        let (Some(base), Some(root)) = (&self.history, &self.root) else { return vec![] };
+        let root = page(root);
+        history::list(base, &root, rel).into_iter().filter_map(|at| Some(json!({"at": at, "text": history::read(base, &root, rel, at)?}))).collect()
+    }
+
     fn root(&self) -> Result<&Path, String> {
         self.root.as_deref().ok_or_else(|| "No folder is open.".into())
     }
@@ -1003,6 +1031,7 @@ impl Workspace {
             }
             return Err(err(e));
         }
+        self.keep_moved(&old, &new);
         self.forget(&old, Some(&new));
         let texts: BTreeMap<String, String> = texts.into_iter().map(|(p, t)| (moved(&p, &old, &new), t)).collect();
         let op = if texts.is_empty() { None } else { Some(self.record(&texts, Some((old.clone(), new.clone())))) };
@@ -1058,6 +1087,9 @@ impl Workspace {
             return Err(format!("Not a folder: {root}"));
         }
         self.root = Some(dir.clone());
+        if self.history.is_none() {
+            self.history = APP.get().and_then(|a| a.path().app_data_dir().ok()).map(|d| d.join("history"));
+        }
         self.typed_text.clear();
         self.known = self.files()?.into_iter().filter_map(|rel| Some((rel.clone(), self.read(&rel)?))).collect();
         self.baseline.clear();
@@ -1104,6 +1136,9 @@ impl Workspace {
         }
         // The same text: no write, so the watcher and the LaTeX preview stay quiet.
         if disk.as_deref() != Some(content) {
+            if let Some(old) = &disk {
+                self.keep(rel, old, false);
+            }
             fs::write(&p, content).map_err(err)?;
         }
         self.known.insert(rel.into(), content.into());
@@ -1128,6 +1163,9 @@ impl Workspace {
             return;
         }
         self.unshadow(rel);
+        if let Some(old) = &old {
+            self.keep(rel, old, true);
+        }
         self.known.insert(rel.into(), new.clone());
         let base = self.baseline.entry(rel.into()).or_insert_with(|| old.clone().unwrap_or_default()).clone();
         if self.turn > 0 {
@@ -1145,6 +1183,9 @@ impl Workspace {
         for f in files {
             self.unshadow(&f);
             let old = self.known.remove(&f);
+            if let Some(old) = &old {
+                self.keep(&f, old, true);
+            }
             self.baseline.remove(&f);
             if self.turn > 0 {
                 self.checkpoints.entry(self.turn).or_default().entry(f.clone()).or_insert(old);
@@ -1236,6 +1277,9 @@ impl Workspace {
         for path in &back {
             let (before, _, prior) = &op.files[path];
             self.unshadow(path);
+            if let Some(now) = self.known.get(path) {
+                self.keep(path, now, true);
+            }
             self.known.insert(path.clone(), before.clone());
             self.set_baseline(path, Some(before), prior.clone());
             let base = self.baseline.get(path);
@@ -1275,12 +1319,16 @@ impl Workspace {
             return Err(err(e));
         }
         self.operations.remove(at);
+        self.keep_moved(new, old);
         self.forget(new, Some(old));
         send(json!({"type": "renamed", "from": new, "to": old}));
         let mut back = vec![];
         for (path, (before, _, prior)) in files {
             let path = moved(&path, new, old);
             self.unshadow(&path);
+            if let Some(now) = self.known.get(&path) {
+                self.keep(&path, now, true);
+            }
             self.known.insert(path.clone(), before.clone());
             self.set_baseline(&path, Some(&before), prior);
             let base = self.baseline.get(&path);
@@ -1408,6 +1456,9 @@ impl Workspace {
             match &old {
                 None => {
                     // The agent created it.
+                    if let Some(now) = self.known.get(&rel) {
+                        self.keep(&rel, now, true);
+                    }
                     self.known.remove(&rel);
                     self.baseline.remove(&rel);
                     match fs::remove_file(&p) {
@@ -1417,6 +1468,9 @@ impl Workspace {
                 }
                 Some(text) => {
                     fs::create_dir_all(p.parent().unwrap()).map_err(err)?; // moved away with its folder
+                    if let Some(now) = self.known.get(&rel) {
+                        self.keep(&rel, now, true);
+                    }
                     fs::write(&p, text).map_err(err)?;
                     self.known.insert(rel.clone(), text.clone());
                     // Changes from earlier turns that wait for review still do.
@@ -2689,6 +2743,9 @@ async fn cite(ident: &str, from: &str) -> Result<Value, String> {
     if tracked {
         w.known.insert(rel.clone(), new.clone()); // the writer asked for it: not a change to review
     }
+    if p.exists() {
+        w.keep(&rel, &text, true);
+    }
     fs::write(&p, &new).map_err(err)?;
     if tracked {
         send(json!({"type": "file_changed", "path": rel, "content": new, "baseline": w.baseline.get(&rel)}));
@@ -2856,7 +2913,7 @@ async fn send_apple() {
 
 // Messages that read or write files. Each carries the folder the page is showing, so a
 // page still showing another folder can never write into this one.
-const FILE_OPS: [&str; 17] = ["pick_image", "import_image", "paste_image", "open_file", "save", "typed", "review", "create", "rename", "rename_label", "replace_in_project", "undo_operation", "delete", "preview", "restore", "cite", "export"];
+const FILE_OPS: [&str; 19] = ["list_history", "snapshot", "pick_image", "import_image", "paste_image", "open_file", "save", "typed", "review", "create", "rename", "rename_label", "replace_in_project", "undo_operation", "delete", "preview", "restore", "cite", "export"];
 
 fn field<'a>(msg: &'a Value, key: &str) -> Result<&'a str, String> {
     msg[key].as_str().ok_or_else(|| format!("'{key}' is missing"))
@@ -2926,6 +2983,16 @@ async fn handle(msg: &Value) -> Result<(), String> {
             let mut w = ws();
             let rel = w.norm(f("path")?)?;
             w.set_baseline(&rel, None, opt("baseline").map(String::from));
+        }
+        "snapshot" => {
+            // The text in the editor right before a restore replaces it: it must come back with one click.
+            let w = ws();
+            w.keep(&w.norm(f("path")?)?, f("content")?, true);
+        }
+        "list_history" => {
+            let w = ws();
+            let rel = w.norm(f("path")?)?;
+            send(json!({"type": "history", "req": msg["req"], "path": rel, "versions": w.versions(&rel)}));
         }
         "create" => ws().create(f("path")?, msg["folder"].as_bool().unwrap_or(false))?,
         "rename" => ws().rename(f("from")?, f("to")?, &msg["req"])?,
@@ -3512,6 +3579,57 @@ mod tests {
         assert_eq!(replace_all(text, "", false, false, "x"), (text.to_string(), 0));
         let w = Workspace { known: map(&[("a", text.to_string())]), ..Default::default() };
         assert_eq!(w.find("yeast", false, true, 99, None).0.len(), replace_all(text, "yeast", false, true, "").1);
+    }
+
+    #[test]
+    fn every_write_keeps_the_text_it_replaces() {
+        let tmp = std::env::temp_dir().join(format!("quire-keep-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&tmp);
+        let (dir, store) = (tmp.join("project"), tmp.join("store"));
+        fs::create_dir_all(&dir).unwrap();
+        let before = map(&[("a.md", "yeast one".to_string()), ("b.md", "yeast two".to_string())]);
+        for (rel, text) in &before {
+            fs::write(dir.join(rel), text).unwrap();
+        }
+        let mut w = Workspace { root: Some(dir.canonicalize().unwrap()), known: before.clone(), history: Some(store), ..Default::default() };
+        let texts = |w: &Workspace, rel: &str| w.versions(rel).iter().map(|v| v["text"].as_str().unwrap().to_string()).collect::<Vec<_>>();
+        // The editor's save is routine typing: two saves inside the gap keep one version.
+        w.save("a.md", "yeast edit1", None).unwrap();
+        w.save("a.md", "yeast edit2", None).unwrap();
+        assert_eq!(texts(&w, "a.md"), ["yeast one"]);
+        // A replace across files keeps each file's text, even right after a routine version.
+        let ops = |w: &Workspace| w.operations.last().map(|o| o.id);
+        w.replace_in_project("yeast", true, true, "flour", &[("a.md".into(), 1), ("b.md".into(), 1)]).unwrap();
+        assert_eq!(texts(&w, "a.md"), ["yeast edit2", "yeast one"]);
+        assert_eq!(texts(&w, "b.md"), ["yeast two"]);
+        // Undoing it keeps what the undo replaces.
+        w.undo_operation(ops(&w).unwrap()).unwrap();
+        assert_eq!(texts(&w, "a.md")[0], "flour edit2");
+        // A change by the agent or another program.
+        w.external("b.md", "agent text".into());
+        assert_eq!(texts(&w, "b.md")[0], "yeast two");
+        // A label rename.
+        fs::write(dir.join("l.typ"), "= A <sec:a>\n@sec:a").unwrap();
+        w.known.insert("l.typ".into(), "= A <sec:a>\n@sec:a".into());
+        w.rename_label("l.typ", "sec:a", "sec:b").unwrap();
+        assert_eq!(texts(&w, "l.typ"), ["= A <sec:a>\n@sec:a"]);
+        // Restoring a turn keeps the agent's text it removes.
+        w.turn = 1;
+        w.external("b.md", "agent two".into());
+        w.restore(1).unwrap();
+        assert_eq!(texts(&w, "b.md")[0], "agent two");
+        // The editor's text right before a restore, as the page sends it.
+        w.keep("a.md", "typed but not saved", true);
+        assert_eq!(texts(&w, "a.md")[0], "typed but not saved");
+        // A renamed file takes its history along.
+        let old = texts(&w, "a.md");
+        w.rename("a.md", "c.md", &json!(1)).unwrap();
+        assert_eq!((texts(&w, "c.md"), texts(&w, "a.md")), (old, Vec::<String>::new()));
+        // Nothing in the project folder but the writer's files.
+        let mut names: Vec<_> = fs::read_dir(&dir).unwrap().map(|e| e.unwrap().file_name().into_string().unwrap()).collect();
+        names.sort();
+        assert_eq!(names, ["b.md", "c.md", "l.typ"]);
+        let _ = fs::remove_dir_all(&tmp);
     }
 
     #[test]
