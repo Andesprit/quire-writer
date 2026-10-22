@@ -37,3 +37,7 @@ export function diagnosticRange(text: string, d: Diagnostic): { from: number; to
   }
   return { from, to }
 }
+
+// A build that failed because a program is missing says so in its first log line. These are the
+// words project.rs uses (run_latex, quarto_preview); diagnostics.test.ts checks they still are.
+export const missingTool = (log = "") => /^(LaTeX preview needs TeX|Quarto preview needs Quarto)/.test(log) ? log.split("\n")[0] : ""

@@ -1,5 +1,6 @@
 import assert from "node:assert/strict"
-import { diagnosticRange, errorCount, isCurrentDiagnostic, type Diagnostic } from "./diagnostics.ts"
+import { readFileSync } from "node:fs"
+import { missingTool, diagnosticRange, errorCount, isCurrentDiagnostic, type Diagnostic } from "./diagnostics.ts"
 
 const error: Diagnostic = { path: "main.typ", line: 1, col: 9, end_line: 1, end_col: 12, message: "unknown variable: foo", hints: [] }
 const text = "Heading\n🍞 café #foo()\n"
@@ -17,4 +18,10 @@ assert(!isCurrentDiagnostic(batch, "/project", "main.typ", 5, "main.typ", text),
 assert(!isCurrentDiagnostic(batch, "/other", "main.typ", 4, "main.typ", text))
 assert(!isCurrentDiagnostic(batch, "/project", "other.typ", 4, "main.typ", text))
 assert(!isCurrentDiagnostic({ ...batch, sources: { "main.typ": "older saved text" } }, "/project", "main.typ", 4, "main.typ", text), "LaTeX builds of older disk text cannot mark unsaved text")
+const backend = readFileSync(new URL("../src-tauri/src/project.rs", import.meta.url), "utf8")
+for (const said of ["LaTeX preview needs TeX. Install", "Quarto preview needs Quarto: quarto.org"])
+  assert(backend.includes(`"${said}`), `project.rs still says "${said}"`)
+assert.equal(missingTool("LaTeX preview needs TeX. Install Tectonic or your system's TeX.\nmore"), "LaTeX preview needs TeX. Install Tectonic or your system's TeX.")
+assert(missingTool("Quarto preview needs Quarto: quarto.org/docs/get-started"))
+assert.equal(missingTool("! Undefined control sequence."), "", "an ordinary LaTeX error is not a missing tool")
 console.log("diagnostics: ok")

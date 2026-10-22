@@ -5,7 +5,7 @@ import "@fontsource/ia-writer-quattro/700.css"
 import "@fontsource/ia-writer-quattro/700-italic.css"
 import { Chunk } from "@codemirror/merge"
 import { highlightHTML, highlightLine, langOf, startState, sameState, type Lang, type State } from "./highlight"
-import { diagnosticRange, errorCount, isCurrentDiagnostic, type Diagnostic, type DiagnosticBatch } from "./diagnostics"
+import { diagnosticRange, errorCount, missingTool, isCurrentDiagnostic, type Diagnostic, type DiagnosticBatch } from "./diagnostics"
 import { findMatches, replacementEdit, type Match } from "./find"
 import { fuzzyMatch, rankFiles } from "./palette"
 import { diff, minimalChange, rebase, type Diff } from "./merge"
@@ -1109,6 +1109,7 @@ function resetForFolder(newRoot: string) {
   closeFile()
   invalidateDiagnostics()
   compileMain = null
+  compileTool = ""
   compiledMains.clear()
   typedSent = ""
   previewing = null
@@ -2757,6 +2758,7 @@ let diagnosticGeneration = 0
 let compileMain: string | null = null
 let compileDiagnostics: Diagnostic[] = []
 let compileLog = ""
+let compileTool = "" // the message of a build that could not run because a program is missing
 const compiledMains = new Set<string>() // previews that have shown a good version since this folder opened
 const compileMarks = typeof Highlight === "function" ? new Highlight() : null
 if (compileMarks) CSS.highlights.set("compile-error", compileMarks)
@@ -2768,10 +2770,11 @@ function invalidateDiagnostics() {
   renderDiagnostics()
 }
 
-function receiveDiagnostics(batch: DiagnosticBatch, log = "") {
+function receiveDiagnostics(batch: DiagnosticBatch, log = "", tool = "") {
   if (!isCurrentDiagnostic(batch, root, previewing, diagnosticGeneration, current, ta.value)) return false
   compileMain = batch.main
-  if (!batch.diagnostics.length) compiledMains.add(batch.main)
+  compileTool = tool
+  if (!batch.diagnostics.length && !tool) compiledMains.add(batch.main)
   compileDiagnostics = batch.diagnostics
   compileLog = log
   renderDiagnostics()
@@ -2783,6 +2786,7 @@ function jumpToDiagnostic(d = compileDiagnostics[0]) {
 }
 $("sb-errors").onclick = () => jumpToDiagnostic()
 $("compile-jump").onclick = () => jumpToDiagnostic()
+$("compile-setup").onclick = () => send({ type: "check_setup" })
 
 function renderDiagnostics() {
   const first = compileDiagnostics[0]
@@ -2792,17 +2796,18 @@ function renderDiagnostics() {
   status.disabled = !first?.path
   status.innerHTML = `${icon("error")} <span>${n} error${n === 1 ? "" : "s"}</span>`
   status.title = first ? `${first.message} — Go to the first error` : ""
-  $("compile-banner").hidden = !first
+  $("compile-banner").hidden = !first && !compileTool
+  $("compile-setup").hidden = !compileTool
   $("compile-note").textContent = compileMain && compiledMains.has(compileMain)
     ? "The preview shows the last version that compiled."
     : "Nothing has compiled yet, so there is no preview."
-  if (first) {
+  if (first || compileTool) {
     const jump = $("compile-jump") as HTMLButtonElement
-    jump.textContent = first.path
+    jump.textContent = compileTool ? compileTool : first.path
       ? `The document has an error in ${first.path} on line ${first.line + 1}: ${first.message}`
       : first.message
-    jump.disabled = !first.path
-    jump.title = first.path ? "Go to this error" : ""
+    jump.disabled = !first?.path
+    jump.title = first?.path ? "Go to this error" : ""
   }
   $("compile-log").hidden = !compileLog
   $("compile-log-text").textContent = compileLog
@@ -3025,6 +3030,7 @@ function onMessage(msg: any) {
       if (compileMain !== msg.path) {
         compileDiagnostics = []
         compileLog = ""
+        compileTool = ""
         compileMain = msg.path
         renderDiagnostics()
       }
@@ -3045,9 +3051,10 @@ function onMessage(msg: any) {
     case "build": {
       if (msg.main && (msg.root !== root || msg.main !== previewing)) break
       if (Array.isArray(msg.diagnostics)) {
-        if (!msg.ok && !msg.diagnostics.length) msg.diagnostics = [{ path: null, line: 0, col: 0, end_line: 0, end_col: 0,
+        const tool = msg.ok ? "" : missingTool(msg.log)
+        if (!msg.ok && !tool && !msg.diagnostics.length) msg.diagnostics = [{ path: null, line: 0, col: 0, end_line: 0, end_col: 0,
           message: "LaTeX could not compile this document. Show log has the details; Check Setup can check your TeX installation.", hints: [] }]
-        if (!receiveDiagnostics(msg, msg.log ?? "")) break
+        if (!receiveDiagnostics(msg, tool ? "" : msg.log ?? "", tool)) break
         // The main page shows the readable error and offers the log on request.
         if (previewKind === "pdf") toPreview({ ...msg, log: "", structured: true })
         else toPreview(msg)

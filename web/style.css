@@ -1167,6 +1167,7 @@ details.thought div { white-space: pre-wrap; margin-top: 4px; padding-left: 18px
 #compile-banner { flex: none; padding: 8px 12px; border-bottom: 1px solid var(--border); background: var(--widget); font-size: 12px; line-height: 1.5; }
 #compile-jump { display: block; padding: 0; border: 0; background: transparent; color: var(--danger); text-align: left; line-height: inherit; overflow-wrap: anywhere; cursor: pointer; }
 #compile-jump:not(:disabled):hover { text-decoration: underline; }
+#compile-setup { margin: 4px 0; }
 #compile-jump:disabled { cursor: default; opacity: 1; }
 #compile-banner p { margin: 3px 0 0; color: var(--muted); }
 #compile-log { margin-top: 4px; }
