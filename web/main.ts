@@ -2629,6 +2629,7 @@ const searchQuery = $("search-query") as HTMLInputElement
 const searchCase = $("search-case"), searchWord = $("search-word")
 let searchReq = 0 // the newest search: an older answer that comes later is dropped
 let searchHits: SearchHit[] = []
+let searchMore = false
 let searchSel = 0
 let searchTimer = 0
 let searchKeep = "" // path:line:col of the row to stay on when a refreshed search answers
@@ -2665,12 +2666,15 @@ function runSearch() {
   if (!searchQuery.value) searchKeep = ""
   const msg: Record<string, unknown> = { type: "search", req: ++searchReq, query: searchQuery.value, case: searchCase.getAttribute("aria-pressed") === "true", word: searchWord.getAttribute("aria-pressed") === "true" }
   if (current) { msg.path = current; msg.content = ta.value } // the text as typed, not as last sent
+  searchAsked = { query: searchQuery.value, case: msg.case as boolean, word: msg.word as boolean }
   send(msg)
 }
 
 function showSearch(req: number, hits: SearchHit[], more: boolean) {
   if (req !== searchReq) return
   searchHits = hits
+  searchMore = more
+  searchShown = searchAsked
   searchSel = Math.max(0, hits.findIndex((h) => `${h.path}:${h.line}:${h.col}` === searchKeep))
   searchKeep = ""
   const files = new Set(hits.map((h) => h.path)).size
@@ -2683,12 +2687,66 @@ function showSearch(req: number, hits: SearchHit[], more: boolean) {
     if (h.path !== last) {
       last = h.path
       const n = hits.filter((x) => x.path === h.path).length
-      html += `<div class="search-file" title="${esc(h.path)}"><span>${esc(h.path)}</span><em>${n}</em></div>`
+      html += `<div class="search-file" title="${esc(h.path)}"><span>${esc(h.path)}</span><em>${n}</em><button data-replace="${esc(h.path)}" title="Replace in this file only" aria-label="Replace in ${esc(h.path)}">Replace</button></div>`
     }
     html += `<button class="search-hit" role="option" tabindex="-1" data-i="${i}" aria-selected="${i === searchSel}">${esc(h.before.length > 24 ? "…" + h.before.slice(-24) : h.before.trimStart())}<mark>${esc(h.hit)}</mark>${esc(h.after)}</button>`
   })
   $("search-results").innerHTML = html
+  renderReplace()
 }
+
+// Replace across the project: the file counts the view shows go to the app as `expected`, and
+// the app writes nothing unless the text still gives those counts.
+const searchReplace = $("search-replace") as HTMLInputElement
+const replaceAll = $<HTMLButtonElement>("search-replace-all")
+let searchShown = { query: "", case: false, word: false } // what the rows on screen were searched with
+let searchAsked = searchShown // what the newest search asked
+let replacing = false
+
+function renderReplace() {
+  replaceAll.disabled = !searchHits.length || searchMore || replacing
+  replaceAll.title = `Replace all${searchHits.length ? ` ${searchHits.length}` : ""} (Cmd+Enter in the Replace box)`
+}
+
+async function replaceInProject(only?: string) {
+  if (replacing || !searchHits.length || searchMore) return
+  const counts = new Map<string, number>()
+  for (const h of searchHits) if (!only || h.path === only) counts.set(h.path, (counts.get(h.path) ?? 0) + 1)
+  const shown = { ...searchShown }
+  replacing = true
+  renderReplace()
+  // The open text goes to disk first, and typing waits until the app answers.
+  holdTyping(true)
+  const error = await flushSave(true)
+  if (error) {
+    holdTyping(false)
+    replacing = false
+    renderReplace()
+    toast(`Nothing was replaced: ${baseName(current!)} could not be saved first.`)
+    return
+  }
+  send({ type: "replace_in_project", req: (leaving = ++reqSeq), query: shown.query, case: shown.case, word: shown.word, replacement: searchReplace.value, expected: [...counts].map(([path, count]) => ({ path, count })) })
+}
+
+// The app answered (or failed): typing is free again and the results are asked for afresh.
+function replaced(r: { ok: boolean; files: number; places: number; error: string }) {
+  replacing = false
+  const n = (count: number, noun: string) => `${count} ${noun}${count === 1 ? "" : "s"}`
+  if (r.ok) toast(`Replaced ${n(r.places, "place")} in ${n(r.files, "file")}. Review the changes.`, "info")
+  else toast(r.error)
+  runSearch()
+}
+
+replaceAll.onclick = () => replaceInProject()
+searchReplace.addEventListener("keydown", (e) => {
+  if (e.isComposing) return
+  if (e.key === "Enter") { if (e.metaKey || e.ctrlKey) replaceInProject(); e.preventDefault() } // plain Enter does nothing
+  else if (e.key === "Escape") { if (current) ta.focus({ preventScroll: true }); e.preventDefault() }
+})
+// Tab from the query goes straight to the Replace box.
+searchQuery.addEventListener("keydown", (e) => {
+  if (e.key === "Tab" && !e.shiftKey && !e.isComposing) { searchReplace.focus(); e.preventDefault() }
+})
 
 function selectHit(i: number) {
   if (!searchHits.length) return
@@ -2715,6 +2773,8 @@ searchQuery.addEventListener("keydown", (e) => {
 })
 $("search-results").onmousedown = (e) => e.preventDefault()
 $("search-results").onclick = (e) => {
+  const file = (e.target as HTMLElement).closest<HTMLElement>("[data-replace]")
+  if (file) return void replaceInProject(file.dataset.replace)
   const row = (e.target as HTMLElement).closest<HTMLElement>("[data-i]")
   if (row) { selectHit(Number(row.dataset.i)); openHit() }
 }
@@ -3491,6 +3551,10 @@ function onMessage(msg: any) {
       else toast(r.error)
       break
     }
+    case "replace_result":
+      if (msg.req === leaving) holdTyping(false)
+      replaced(msg.result)
+      break
     case "renamed": {
       invalidateDiagnostics()
       const move = (p: string) => (within(p, msg.from) ? msg.to + p.slice(msg.from.length) : p)
@@ -3639,6 +3703,10 @@ function onMessage(msg: any) {
         return
       }
       if (msg.req && msg.req === leaving) holdTyping(false) // the open text stays, and the writer can type again
+      if (msg.op === "replace_in_project") {
+        replaced({ ok: false, files: 0, places: 0, error: msg.message })
+        return
+      }
       if (msg.op === "export") exporting?.remove()
       if (msg.op === "open_folder" && opening) {
         // A recent project that is gone or cannot be read: do not offer it again.

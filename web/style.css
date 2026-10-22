@@ -314,6 +314,9 @@ body.resizing { cursor: ew-resize; user-select: none; }
 #search-view .find-field { flex: none; }
 #search-view input { width: 100%; min-width: 0; height: 28px; padding: 3px 52px 3px 6px; color: var(--fg); background: var(--input); border: 1px solid var(--input-border); border-radius: 2px; font: 13px var(--ui); }
 #search-view input:focus { outline: 1px solid var(--focus); outline-offset: -1px; }
+#search-replace-row { margin-top: 4px; }
+#search-replace-all:disabled { opacity: .4; cursor: default; }
+.search-file button { flex: none; border: 0; background: none; color: var(--link, var(--fg-strong)); font: 11px var(--ui); cursor: pointer; padding: 0 2px; text-decoration: underline; }
 #search-count { padding: 6px 2px; font-size: 12px; color: var(--fg); }
 #search-results { flex: 1; overflow: auto; margin: 0 -8px; }
 .search-file { display: flex; gap: 6px; align-items: baseline; padding: 3px 8px; font-size: 12px; font-weight: 700; color: var(--fg-strong); }

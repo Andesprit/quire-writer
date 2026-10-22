@@ -39,6 +39,12 @@
             <button id="search-word" title="Match whole word" aria-label="Match whole word" aria-pressed="false"><u>ab</u></button>
           </div>
         </div>
+        <div class="find-field" id="search-replace-row">
+          <input id="search-replace" aria-label="Replace with" placeholder="Replace" spellcheck="false" autocomplete="off" aria-describedby="search-count" />
+          <div class="find-options">
+            <button id="search-replace-all" title="Replace all (Cmd+Enter in the Replace box)" aria-label="Replace all" disabled><i class="codicon codicon-replace-all"></i></button>
+          </div>
+        </div>
         <div id="search-count" role="status" aria-live="polite" aria-atomic="true"></div>
         <div id="search-results" role="listbox" aria-label="Results"></div>
       </div>

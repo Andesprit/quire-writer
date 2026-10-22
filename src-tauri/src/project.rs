@@ -985,26 +985,20 @@ impl Workspace {
         Ok((done.len(), edits.len()))
     }
 
-    /// Replaces `query` by `with` in every file that has it. `expected` is the matches per file the
-    /// writer was shown: if the text no longer gives exactly those, nothing is written. All or
-    /// nothing, like `rename_label`. Returns the files and places changed.
+    /// Replaces `query` by `with` in the files of `expected`, the matches per file the writer was
+    /// shown: if a file no longer gives exactly that many, nothing is written. All or nothing,
+    /// like `rename_label`. Returns the files and places changed.
     fn replace_in_project(&mut self, query: &str, case: bool, word: bool, with: &str, expected: &[(String, usize)]) -> Result<(usize, usize), String> {
-        let mut new = BTreeMap::new();
-        let mut counts = vec![];
-        for (path, text) in &self.known {
-            let (replaced, n) = replace_all(text, query, case, word, with);
-            if n > 0 {
-                counts.push((path.clone(), n));
-                new.insert(path.clone(), replaced);
-            }
-        }
-        if counts.is_empty() {
+        if expected.is_empty() {
             return Err(format!("\"{query}\" was not found. Nothing was replaced."));
         }
-        let mut shown = expected.to_vec();
-        shown.sort();
-        if shown != counts {
-            return Err("The text changed since you searched. Search again, then replace.".into());
+        let mut new = BTreeMap::new();
+        for (path, count) in expected {
+            let (replaced, n) = replace_all(self.known.get(path).map_or("", String::as_str), query, case, word, with);
+            if n == 0 || n != *count {
+                return Err(format!("{path} changed since you searched. Search again, then replace. Nothing was replaced."));
+            }
+            new.insert(path.clone(), replaced);
         }
         for path in new.keys() {
             if self.read(path).as_ref() != self.known.get(path) {
@@ -1028,7 +1022,7 @@ impl Workspace {
             self.external(&path, text);
         }
         send(self.state());
-        Ok((done.len(), counts.iter().map(|c| c.1).sum()))
+        Ok((done.len(), expected.iter().map(|c| c.1).sum()))
     }
 
     /// Returns whether the built preview (LaTeX's PDF, Word) should build again.
@@ -3102,8 +3096,9 @@ mod tests {
             assert!(w.baseline.is_empty(), "{why}");
         };
         let stale = [("a.typ".to_string(), 3), ("b/c.tex".to_string(), 1)];
-        assert!(w.replace_in_project("yeast", true, true, "flour", &stale).unwrap_err().contains("Search again"));
-        assert!(w.replace_in_project("yeast", true, true, "flour", &shown[..1]).unwrap_err().contains("Search again"));
+        assert!(w.replace_in_project("yeast", true, true, "flour", &stale).unwrap_err().contains("a.typ changed since you searched"));
+        assert!(w.replace_in_project("yeast", true, true, "flour", &[("d.md".to_string(), 1)]).unwrap_err().contains("d.md changed since"));
+        assert!(w.replace_in_project("yeast", true, true, "flour", &[("gone.md".to_string(), 1)]).unwrap_err().contains("gone.md changed since"));
         assert!(w.replace_in_project("zzz", true, true, "x", &[]).unwrap_err().contains("not found"));
         untouched(&w, "stale counts");
         fs::write(dir.join("b/c.tex"), "yeast!").unwrap();
@@ -3123,12 +3118,21 @@ mod tests {
         #[allow(clippy::permissions_set_readonly_false)]
         read_only.set_readonly(false);
         fs::set_permissions(dir.join("b/c.tex"), read_only).unwrap();
-        assert_eq!(w.replace_in_project("yeast", true, true, "flour", &shown), Ok((2, 3)));
+        // One file's Replace leaves the others alone.
+        assert_eq!(w.replace_in_project("yeast", true, true, "flour", &shown[1..]), Ok((1, 1)));
+        assert_eq!((fs::read_to_string(dir.join("a.typ")).unwrap(), fs::read_to_string(dir.join("b/c.tex")).unwrap()), (before["a.typ"].clone(), "flour".to_string()));
+        assert_eq!(w.replace_in_project("yeast", true, true, "flour", &shown[..1]), Ok((1, 2)));
         assert_eq!(fs::read_to_string(dir.join("a.typ")).unwrap(), "Yeast rises\nflour yeasty caf\u{e9} \u{1F600} flour");
-        assert_eq!(fs::read_to_string(dir.join("b/c.tex")).unwrap(), "flour");
         assert_eq!(w.known["a.typ"], fs::read_to_string(dir.join("a.typ")).unwrap());
         assert_eq!((&w.baseline["a.typ"], &w.baseline["b/c.tex"]), (&before["a.typ"], &before["b/c.tex"]), "Reject all brings back the exact old text");
         assert!(!w.baseline.contains_key("d.md"));
+        if let Ok(out) = std::env::var("QUIRE_DUMP") {
+            let reply = |result: Value| json!({"type": "replace_result", "result": result}).to_string();
+            fs::write(format!("{out}/replace-ok.json"), reply(json!({"ok": true, "files": 2, "places": 3}))).unwrap();
+            fs::write(format!("{out}/replace-refused.json"), reply(json!({"ok": false, "error": "b/c.tex changed on disk; open it and try again. Nothing was replaced."}))).unwrap();
+            fs::write(format!("{out}/replace-before-files.json"), json!(before).to_string()).unwrap();
+            fs::write(format!("{out}/replace-after-files.json"), json!(w.known).to_string()).unwrap();
+        }
         let _ = fs::remove_dir_all(&dir);
     }
 
