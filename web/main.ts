@@ -11,7 +11,8 @@ import { diagnosticRange, errorCount, missingTool, isCurrentDiagnostic, shiftDia
 import { findMatches, replacementEdit, type Match } from "./find"
 import { fuzzyMatch, rankFiles } from "./palette"
 import { headingTitle, outline, type Heading } from "./outline"
-import { moveSection, shiftSection } from "./sections"
+import { moveSection, sectionWords, shiftSection } from "./sections"
+import { countWords as countWordsIn } from "./words"
 import { refChoices, refTrigger, type RefChoice, type RefTrigger } from "./refcomplete"
 import { diff, minimalChange, rebase, type Diff } from "./merge"
 import { $, ask, esc, fileIcon, icon, toast } from "./ui"
@@ -1528,6 +1529,9 @@ let heads: Heading[] = []
 let outlineTimer = 0
 let outlineStale = false // the text changed since the list was drawn
 let outlineHere = -1 // the heading whose section holds the caret
+let sectionCounts: number[] = [] // words per heading's section, same order as heads
+const showCounts = () => store.get("outline-words") !== "off"
+const toggleCounts = () => { store.set("outline-words", showCounts() ? "off" : "on"); renderOutline() }
 
 const scheduleOutline = () => {
   outlineStale = true
@@ -1563,6 +1567,7 @@ function renderOutline() {
   const open = store.get("outline") !== "closed"
   const refocus = $("outline").contains(document.activeElement) ? (document.activeElement as HTMLElement).dataset.i : undefined
   heads = current && syntax() ? outline(ta.value, lang, syntax()!.headingOf) : []
+  sectionCounts = sectionWords(ta.value, heads, countWords)
   outlineHere = -2
   $("outline-head").hidden = $("outline").hidden = !root
   $("outline-head").setAttribute("aria-expanded", String(open))
@@ -1573,7 +1578,7 @@ function renderOutline() {
   $("outline").innerHTML = heads.length
     ? heads.map((h, i) => {
         const title = headingTitle(lang, h.title)
-        return `<button class="row outline" data-i="${i}" tabindex="-1" style="--depth:${h.level - top + 1}" title="${esc(`${title}, line ${h.line + 1}`)}"><span class="name">${esc(title)}</span></button>`
+        return `<button class="row outline" data-i="${i}" tabindex="-1" style="--depth:${h.level - top + 1}" title="${esc(`${title}, line ${h.line + 1}, ${sectionCounts[i].toLocaleString()} words`)}"><span class="name">${esc(title)}</span>${showCounts() ? `<span class="count">${sectionCounts[i].toLocaleString()}</span>` : ""}</button>`
       }).join("")
     : `<p class="muted outline-empty">${!current ? "Open a file to see its sections." : lang === "text" ? "Plain text files have no outline." : `No headings yet. ${esc(OUTLINE_HINT[lang])}`}</p>`
   markOutlineHere()
@@ -1660,6 +1665,8 @@ $("outline").oncontextmenu = (e) => {
     "-",
     { label: "Move Section Up", keys: "⌥↑", run: () => moveHeadingBy(i, -1) },
     { label: "Move Section Down", keys: "⌥↓", run: () => moveHeadingBy(i, 1) },
+    "-",
+    { label: showCounts() ? "Hide Word Counts" : "Show Word Counts", run: toggleCounts },
   ])
 }
 $("outline").onclick = (e) => {
@@ -1832,16 +1839,7 @@ function scheduleInfo() {
   })
 }
 
-// Markup that is not words: comments, math, code and commands.
-const NOT_WORDS: Record<Lang, RegExp[]> = {
-  typst: [/\/\/.*$/gm, /\$[^$]*\$/g, /#[a-zA-Z_][\w.-]*/g],
-  latex: [/(?<!\\)%.*$/gm, /\$[^$]*\$/g, /\\[a-zA-Z@]+\*?/g],
-  quarto: [/<!--[\s\S]*?-->/g, /```[\s\S]*?```/g, /\$[^$]*\$/g, /\{[^}]*\}/g],
-  markdown: [/<!--[\s\S]*?-->/g, /```[\s\S]*?```/g, /\$[^$]*\$/g],
-  text: [],
-}
-const countWords = (s: string) =>
-  (NOT_WORDS[lang].reduce((t, r) => t.replace(r, " "), s).match(/[\p{L}\p{N}][\p{L}\p{N}'’-]*/gu) ?? []).length
+const countWords = (s: string) => countWordsIn(lang, s)
 
 const lineText = (n: number) => ta.value.slice(lineStarts[n], (lineStarts[n + 1] ?? ta.value.length + 1) - 1)
 
@@ -1869,14 +1867,14 @@ function setGoal(n: number) {
   store.set(goalKey(), JSON.stringify(g))
   paintWords(g.start)
 }
-let words = { total: 0, picked: 0 }
-function paintWords(total = words.total, picked = words.picked) {
-  words = { total, picked }
+let words = { total: 0, picked: 0, section: "" }
+function paintWords(total = words.total, picked = words.picked, section = words.section) {
+  words = { total, picked, section }
   const g = currentGoal()
   const p = g && goalProgress(g.start, total, g.goal)
   const el = $("sb-words")
   const goalText = p ? `${p.done.toLocaleString()} / ${g!.goal.toLocaleString()}` : ""
-  el.textContent = app.classList.contains("focus") && goalText ? goalText : `${total.toLocaleString()} words` + (picked ? ` (${picked.toLocaleString()} selected)` : "") + (goalText ? ` · ${goalText}` : "")
+  el.textContent = app.classList.contains("focus") && goalText ? goalText : `${total.toLocaleString()} words` + section + (picked ? ` (${picked.toLocaleString()} selected)` : "") + (goalText ? ` · ${goalText}` : "")
   el.classList.toggle("reached", !!p?.reached)
   el.title = p ? (p.reached ? "Writing goal reached" : "Words added to this file since you set the goal") : ""
 }
@@ -1903,7 +1901,9 @@ function updateInfo() {
   wordsTimer = window.setTimeout(() => {
     const total = countWords(ta.value)
     const picked = ta.selectionEnd > ta.selectionStart ? countWords(ta.value.slice(ta.selectionStart, ta.selectionEnd)) : 0
-    paintWords(total, picked)
+    if (outlineStale) renderOutline()
+    const n = hereIndex()
+    paintWords(total, picked, n >= 0 ? ` · ${sectionCounts[n].toLocaleString()} words in ${headingTitle(lang, heads[n].title)}` : "")
   }, 250)
   const crumbs = [...(root ? [root.split("/").filter(Boolean).pop()!] : []), ...current.split("/")]
   const heading = currentHeading()
@@ -3393,6 +3393,7 @@ function quickCommands(): QuickItem[] {
     { id: "save", label: "Save file", keys: kc("save"), run: () => flushSave(true) },
     { id: "history", label: "File history…", run: () => openHistory() },
   )
+  if (current && syntax()) commands.push({ id: "word-counts", label: showCounts() ? "Hide word counts in Outline" : "Show word counts in Outline", run: toggleCounts })
   if (current && syntax()) commands.push({ id: "sections", label: "Go to section…", keys: kc("sections"), run: () => openPalette("@") })
   if (root) commands.push({ id: "labels", label: "Go to label…", run: () => openPalette("#") })
   if (root && labels.length) commands.push({ id: "rename-label", label: "Rename label…", keys: kc("rename-label"), run: () => { if (!renameLabelAtCaret()) { renamePick = true; openPalette("#") } } })

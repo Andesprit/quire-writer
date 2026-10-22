@@ -1,6 +1,7 @@
 import assert from "node:assert/strict"
 import { outline } from "./outline.ts"
-import { moveSection, shiftSection, texHeadingOf, texRelevel } from "./sections.ts"
+import { moveSection, sectionWords, shiftSection, texHeadingOf, texRelevel } from "./sections.ts"
+import { countWords } from "./words.ts"
 
 const marked = (mark: string) => (l: string): [number, string] | null => {
   const m = new RegExp(`^(\\${mark}+)\\s+(.*)`).exec(l)
@@ -138,3 +139,24 @@ assert.equal(texRelevel("\\section*[S]{Long}", 3), "\\subsubsection*[S]{Long}")
 const sx = "\\section{S}\n\\subsection[Sh]{Long}\\label{y}\n\\section{T}\n"
 assert.equal(sh(sx, "latex", texHeadingOf, 0, 1), "\\subsection{S}\n\\subsubsection[Sh]{Long}\\label{y}\n\\section{T}\n", "a [short] child follows its parent")
 console.log("sections shift ok")
+
+// Words per section: subsections and the heading line are included, so the top-level counts plus
+// the text before the first heading add up to the file total, in every language.
+const mdh = (l: string): [number, string] | null => marked("#")(l)
+const CASES: [any, any, string, string][] = [
+  ["typst", marked("="), "intro words\n= A\none two\n== A1\nthree // gone\n== A2\nfour $x$ five six\n= B\nseven\n", "intro words\n"],
+  ["markdown", mdh, "intro words\n# A\none two\n## A1\nthree <!-- gone -->\n## A2\nfour five six\n# B\nseven\n", "intro words\n"],
+  ["quarto", mdh, "intro words\n# A\none two\n## A1\nthree {#x}\n## A2\nfour five six\n# B\nseven\n", "intro words\n"],
+  ["latex", tex, "intro words\n\\section{A}\none two % gone\n\\subsection{A1}\nthree\n\\subsection{A2}\nfour \\emph five six\n\\section{B}\nseven\n", "intro words\n"],
+]
+for (const [lang, hof, text, pre] of CASES) {
+  const heads = outline(text, lang, hof)
+  const w = sectionWords(text, heads, (s) => countWords(lang, s))
+  const top = heads.flatMap((h, i) => (h.level === 1 ? [w[i]] : []))
+  assert.equal(w.length, 4, lang)
+  assert.ok(w[0] > w[1] + w[2], `${lang}: a section holds its subsections`)
+  assert.equal(top.reduce((a, b) => a + b, 0) + countWords(lang, pre), countWords(lang, text), `${lang}: top-level counts plus the preamble equal the file total`)
+}
+assert.deepEqual(sectionWords("= A\nx y\n== B\nz\n", outline("= A\nx y\n== B\nz\n", "typst", marked("=")), (s) => countWords("typst", s)), [5, 2])
+assert.deepEqual(sectionWords("", [], () => 0), [])
+console.log("section words ok")

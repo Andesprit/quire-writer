@@ -91,3 +91,12 @@ export function shiftSection(
   while (b < Math.min(text.length, out.length) - a && text[text.length - 1 - b] === out[out.length - 1 - b]) b++
   return { text: out, line: heads[index].line, at: a, cut: text.length - a - b, put: out.slice(a, out.length - b) }
 }
+
+// Words in each section, subsections and the heading line included, so the top-level counts plus
+// the text before the first heading add up to the file total. `count` is the editor's word counter.
+// ponytail: a comment or code fence that runs across a heading line is cut there, so a section
+// count can differ from the file total by a word or two in that rare case.
+export function sectionWords(text: string, heads: Heading[], count: (s: string) => number): number[] {
+  const lines = text.split("\n")
+  return heads.map((h, i) => count(lines.slice(h.line, sectionEnd(heads, i, lines.length)).join("\n")))
+}
