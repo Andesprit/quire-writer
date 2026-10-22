@@ -540,6 +540,8 @@ pub struct Workspace {
     root: Option<PathBuf>,
     known: BTreeMap<String, String>,    // last content the editor and disk agreed on
     baseline: BTreeMap<String, String>, // content before unreviewed changes
+    operations: Vec<Operation>,         // the last few multi-file changes the writer can undo
+    next_operation: u64,
     turn: u64,
     checkpoints: BTreeMap<u64, BTreeMap<String, Option<String>>>, // turn -> {path: content before it}
     watcher: Option<(RecommendedWatcher, JoinHandle<()>)>,
@@ -554,6 +556,15 @@ pub struct Workspace {
     typed_generation: u64,
     diagnostic_tx: Option<tokio::sync::watch::Sender<DiagnosticInput>>,
 }
+
+/// A rename or replace across files: per file the text before and after, and the review baseline
+/// it had before, so one undo can put every untouched file back.
+struct Operation {
+    id: u64,
+    files: BTreeMap<String, (String, String, Option<String>)>,
+}
+
+const UNDOABLE: usize = 5;
 
 #[derive(Clone)]
 struct DiagnosticInput {
@@ -968,21 +979,74 @@ impl Workspace {
                 return Err(format!("{path} has changes that are not saved yet; save it and try again."));
             }
         }
+        let files = self.write_all(new, "renamed")?;
+        Ok((files, edits.len()))
+    }
+
+    /// Writes `new` to disk, all or nothing, shows the changes for review and remembers them
+    /// as an operation `undo_operation` can reverse. Returns the number of files.
+    fn write_all(&mut self, new: BTreeMap<String, String>, verb: &str) -> Result<usize, String> {
         let mut done: Vec<String> = vec![];
         for (path, text) in &new {
             if let Err(e) = fs::write(self.path(path)?, text) {
                 for p in &done {
                     let _ = fs::write(self.path(p)?, &self.known[p]);
                 }
-                return Err(format!("{path} was not changed: {} Nothing was renamed.", err(e)));
+                return Err(format!("{path} was not changed: {} Nothing was {verb}.", err(e)));
             }
             done.push(path.clone());
         }
+        let mut files = BTreeMap::new();
         for (path, text) in new {
+            files.insert(path.clone(), (self.known[&path].clone(), text.clone(), self.baseline.get(&path).cloned()));
             self.external(&path, text);
         }
+        self.next_operation += 1;
+        self.operations.push(Operation { id: self.next_operation, files });
+        if self.operations.len() > UNDOABLE {
+            self.operations.remove(0);
+        }
         send(self.state());
-        Ok((done.len(), edits.len()))
+        Ok(done.len())
+    }
+
+    /// Puts back the files `id` changed that nobody has changed since (on disk, in the editor or
+    /// by typing). Returns the files restored and the files left as they are. If none can be
+    /// restored nothing is written. Each operation can be undone once.
+    fn undo_operation(&mut self, id: u64) -> Result<(Vec<String>, Vec<String>), String> {
+        let Some(at) = self.operations.iter().position(|o| o.id == id) else {
+            return Err("That change was already undone, or is too old to undo.".into());
+        };
+        let files = &self.operations[at].files;
+        let (mut back, mut skipped) = (vec![], vec![]);
+        for (path, (_, after, _)) in files {
+            let same = self.known.get(path) == Some(after) && self.read(path).as_ref() == Some(after) && self.typed_text.get(path).is_none_or(|t| t == after);
+            if same { back.push(path.clone()) } else { skipped.push(path.clone()) }
+        }
+        if back.is_empty() {
+            return Err(format!("Nothing was undone: {} changed since. Your text is as you left it.", skipped.join(", ")));
+        }
+        let mut done: Vec<&String> = vec![];
+        for path in &back {
+            if let Err(e) = fs::write(self.path(path)?, &files[path].0) {
+                for p in done {
+                    let _ = fs::write(self.path(p)?, &files[p].1);
+                }
+                return Err(format!("{path} was not restored: {} Nothing was undone.", err(e)));
+            }
+            done.push(path);
+        }
+        let op = self.operations.remove(at);
+        for path in &back {
+            let (before, _, prior) = &op.files[path];
+            self.unshadow(path);
+            self.known.insert(path.clone(), before.clone());
+            self.set_baseline(path, Some(before), prior.clone());
+            let base = self.baseline.get(path);
+            send(json!({"type": "file_changed", "path": path, "content": before, "baseline": base}));
+        }
+        send(self.state());
+        Ok((back, skipped))
     }
 
     /// Replaces `query` by `with` in the files of `expected`, the matches per file the writer was
@@ -1008,21 +1072,8 @@ impl Workspace {
                 return Err(format!("{path} has changes that are not saved yet; save it and try again. Nothing was replaced."));
             }
         }
-        let mut done: Vec<String> = vec![];
-        for (path, text) in &new {
-            if let Err(e) = fs::write(self.path(path)?, text) {
-                for p in &done {
-                    let _ = fs::write(self.path(p)?, &self.known[p]);
-                }
-                return Err(format!("{path} was not changed: {} Nothing was replaced.", err(e)));
-            }
-            done.push(path.clone());
-        }
-        for (path, text) in new {
-            self.external(&path, text);
-        }
-        send(self.state());
-        Ok((done.len(), expected.iter().map(|c| c.1).sum()))
+        let files = self.write_all(new, "replaced")?;
+        Ok((files, expected.iter().map(|c| c.1).sum()))
     }
 
     /// Returns whether the built preview (LaTeX's PDF, Word) should build again.
@@ -2539,7 +2590,7 @@ async fn send_apple() {
 
 // Messages that read or write files. Each carries the folder the page is showing, so a
 // page still showing another folder can never write into this one.
-const FILE_OPS: [&str; 15] = ["import_image", "paste_image", "open_file", "save", "typed", "review", "create", "rename", "rename_label", "replace_in_project", "delete", "preview", "restore", "cite", "export"];
+const FILE_OPS: [&str; 16] = ["import_image", "paste_image", "open_file", "save", "typed", "review", "create", "rename", "rename_label", "replace_in_project", "undo_operation", "delete", "preview", "restore", "cite", "export"];
 
 fn field<'a>(msg: &'a Value, key: &str) -> Result<&'a str, String> {
     msg[key].as_str().ok_or_else(|| format!("'{key}' is missing"))
@@ -2629,7 +2680,7 @@ async fn handle(msg: &Value) -> Result<(), String> {
             // The answer carries the reason when it is refused: the page shows it by the name box.
             let result = ws().rename_label(f("path")?, f("from")?, f("to")?);
             let reply = match result {
-                Ok((files, places)) => json!({"ok": true, "files": files, "places": places}),
+                Ok((files, places)) => json!({"ok": true, "files": files, "places": places, "op": ws().next_operation}),
                 Err(error) => json!({"ok": false, "error": error}),
             };
             send(json!({"type": "label_renamed", "req": msg["req"], "from": f("from")?, "to": f("to")?, "result": reply}));
@@ -2638,10 +2689,18 @@ async fn handle(msg: &Value) -> Result<(), String> {
             let expected: Vec<(String, usize)> = msg["expected"].as_array().map_or(vec![], |a| a.iter().map(|e| (e["path"].as_str().unwrap_or("").to_string(), e["count"].as_u64().unwrap_or(0) as usize)).collect());
             let result = ws().replace_in_project(f("query")?, msg["case"].as_bool().unwrap_or(false), msg["word"].as_bool().unwrap_or(false), f("replacement")?, &expected);
             let reply = match result {
-                Ok((files, places)) => json!({"ok": true, "files": files, "places": places}),
+                Ok((files, places)) => json!({"ok": true, "files": files, "places": places, "op": ws().next_operation}),
                 Err(error) => json!({"ok": false, "error": error}),
             };
             send(json!({"type": "replace_result", "req": msg["req"], "result": reply}));
+        }
+        "undo_operation" => {
+            let result = ws().undo_operation(msg["op"].as_u64().unwrap_or(0));
+            let reply = match result {
+                Ok((restored, skipped)) => json!({"ok": true, "restored": restored, "skipped": skipped}),
+                Err(error) => json!({"ok": false, "error": error}),
+            };
+            send(json!({"type": "operation_undone", "req": msg["req"], "op": msg["op"], "result": reply}));
         }
         "delete" => ws().delete(f("path")?)?,
         "preview" => preview(f("path")?, f("to")?, msg["asked"].as_u64().unwrap_or(0)).await?,
@@ -3075,6 +3134,66 @@ mod tests {
         assert_eq!(replace_all(text, "", false, false, "x"), (text.to_string(), 0));
         let w = Workspace { known: map(&[("a", text.to_string())]), ..Default::default() };
         assert_eq!(w.find("yeast", false, true, 99, None).0.len(), replace_all(text, "yeast", false, true, "").1);
+    }
+
+    #[test]
+    fn undo_operation_restores_untouched_files_once() {
+        let dir = std::env::temp_dir().join(format!("quire-undo-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&dir);
+        let before = map(&[("a.md", "yeast and yeast".to_string()), ("b.md", "yeast".to_string()), ("c.md", "yeast\nlate".to_string()), ("d.md", "bread".to_string())]);
+        for (rel, text) in &before {
+            fs::write(dir.join(rel), text).unwrap_or_else(|_| {
+                fs::create_dir_all(&dir).unwrap();
+                fs::write(dir.join(rel), text).unwrap()
+            });
+        }
+        let mut w = Workspace { root: Some(dir.canonicalize().unwrap()), known: before.clone(), ..Default::default() };
+        let all = |w: &mut Workspace| w.replace_in_project("yeast", true, true, "flour", &[("a.md".into(), 2), ("b.md".into(), 1), ("c.md".into(), 1)]).unwrap();
+        let disk = |f: &str| fs::read_to_string(dir.join(f)).unwrap();
+        // Everything untouched: byte for byte back, no review marks left, a second undo refused.
+        all(&mut w);
+        let id = w.next_operation;
+        let (back, skipped) = w.undo_operation(id).unwrap();
+        assert_eq!((back.len(), skipped.len()), (3, 0));
+        for f in before.keys() {
+            assert_eq!((disk(f), &w.known[f]), (before[f].clone(), &before[f]), "{f}");
+        }
+        assert!(w.baseline.is_empty(), "restored files are no longer for review");
+        assert!(w.undo_operation(id).unwrap_err().contains("already undone"));
+        // A file edited since is left as it is and named; the others come back.
+        all(&mut w);
+        let id = w.next_operation;
+        fs::write(dir.join("c.md"), "flour\nlate!").unwrap();
+        w.known.insert("c.md".into(), "flour\nlate!".into());
+        w.typed_text.insert("b.md".into(), "flour, typing".into());
+        let (back, skipped) = w.undo_operation(id).unwrap();
+        assert_eq!((back, skipped), (vec!["a.md".to_string()], vec!["b.md".to_string(), "c.md".to_string()]), "typing in b.md counts as a change");
+        assert_eq!((disk("a.md"), disk("b.md"), disk("c.md")), (before["a.md"].clone(), "flour".to_string(), "flour\nlate!".to_string()));
+        assert!(w.baseline.get("a.md").is_none() && w.baseline.contains_key("b.md"));
+        // None can be restored: nothing is written and the operation is kept for retry.
+        for (f, text) in &before {
+            fs::write(dir.join(f), text).unwrap();
+        }
+        (w.known, w.baseline) = (before.clone(), BTreeMap::new());
+        w.typed_text.clear();
+        all(&mut w);
+        for f in ["a.md", "b.md", "c.md"] {
+            fs::write(dir.join(f), "other").unwrap();
+        }
+        let id = w.next_operation;
+        let refused = w.undo_operation(id).unwrap_err();
+        assert!(refused.starts_with("Nothing was undone: a.md, b.md, c.md"), "{refused}");
+        assert_eq!(disk("a.md"), "other");
+        // An earlier review baseline survives the undo; a partial Accept does not block it.
+        fs::write(dir.join("d.md"), "bread").unwrap();
+        let mut w = Workspace { root: Some(dir.canonicalize().unwrap()), known: map(&[("d.md", "bread".to_string())]), ..Default::default() };
+        w.external("d.md", "bread bread".into()); // an agent change, base "bread"
+        fs::write(dir.join("d.md"), "bread bread").unwrap();
+        w.replace_in_project("bread", true, true, "toast", &[("d.md".into(), 2)]).unwrap();
+        w.baseline.insert("d.md".into(), "toast bread".into()); // the writer accepted part of it
+        w.undo_operation(w.next_operation).unwrap();
+        assert_eq!((disk("d.md"), w.baseline["d.md"].as_str()), ("bread bread".to_string(), "bread"), "back to the agent change, still for review");
+        let _ = fs::remove_dir_all(&dir);
     }
 
     #[test]
