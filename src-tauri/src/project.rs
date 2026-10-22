@@ -289,6 +289,56 @@ fn scan(texts: &BTreeMap<String, String>) -> (Vec<(String, String, usize, usize)
     (found, uses)
 }
 
+static TYPST_NAME: LazyLock<Regex> = LazyLock::new(|| re(r"^[\w:.-]+$"));
+static TEX_NAME: LazyLock<Regex> = LazyLock::new(|| re(r"^[^\s{}%,\\]+$"));
+static QMD_NAME: LazyLock<Regex> = LazyLock::new(|| re(r"^[A-Za-z][\w:.-]*$"));
+
+/// Where renaming the label `from` to `to` changes text: the file, the 0-based line and the
+/// UTF-16-free character column of each definition and use (citations are not touched), or a
+/// plain reason it cannot be done. Only files of `home`'s language are edited.
+fn rename_edits(texts: &BTreeMap<String, String>, home: &str, from: &str, to: &str) -> Result<Vec<(String, usize, usize)>, String> {
+    let (defs, uses) = scan(texts);
+    let lang = lang_of(home);
+    if !defs.iter().any(|d| d.0 == from && lang_of(&d.1) == lang) {
+        return Err(format!("There is no label called {from}."));
+    }
+    let valid = match lang {
+        Lang::Latex => &TEX_NAME,
+        Lang::Quarto => &QMD_NAME,
+        _ => &TYPST_NAME,
+    };
+    if to == from {
+        return Err("That is already its name.".into());
+    }
+    if !valid.is_match(to) {
+        return Err(format!("{to} is not a valid label name here. Use letters, digits, - _ : and . without spaces."));
+    }
+    if defs.iter().any(|d| d.0 == to && lang_of(&d.1) == lang) {
+        return Err(format!("A label called {to} already exists."));
+    }
+    let name_char = |c: char| c.is_alphanumeric() || matches!(c, '_' | ':' | '.' | '-');
+    let mut edits = vec![];
+    for (name, path, line, col) in &defs {
+        if name != from || lang_of(path) != lang {
+            continue;
+        }
+        // The definition's column is where its marker starts (\label{, <, {#): find the name after it.
+        let raw: Vec<char> = texts[path].split('\n').nth(*line).unwrap_or("").trim_end_matches('\r').chars().collect();
+        let n = from.chars().count();
+        let at = (*col..raw.len().saturating_sub(n - 1)).find(|&i| {
+            raw[i..i + n].iter().copied().eq(from.chars())
+                && i > 0
+                && (matches!(raw[i - 1], '{' | '<' | '#' | '"' | '\'') || raw[i - 1].is_whitespace())
+                && !raw.get(i + n).is_some_and(|&c| name_char(c))
+        });
+        edits.extend(at.map(|i| (path.clone(), *line, i)));
+    }
+    edits.extend(uses.iter().filter(|u| !u.cite && u.key == from && lang_of(&u.path) == lang).map(|u| (u.path.clone(), u.line, u.col)));
+    edits.sort();
+    edits.dedup();
+    Ok(edits)
+}
+
 #[cfg(test)]
 fn labels(texts: &BTreeMap<String, String>) -> Vec<Value> {
     references(texts).0
@@ -2580,6 +2630,41 @@ mod tests {
 
     fn spots(found: &[Value]) -> Vec<(String, String, u64, u64)> {
         found.iter().map(|f| (f["kind"].as_str().unwrap().into(), f["key"].as_str().unwrap().into(), f["line"].as_u64().unwrap(), f["col"].as_u64().unwrap())).collect()
+    }
+
+    /// Applies `rename_edits` to the texts, for the tests.
+    fn renamed(texts: &BTreeMap<String, String>, home: &str, from: &str, to: &str) -> BTreeMap<String, String> {
+        let mut out = texts.clone();
+        for (path, line, col) in rename_edits(texts, home, from, to).unwrap().into_iter().rev() {
+            let mut lines: Vec<String> = out[&path].split('\n').map(String::from).collect();
+            let at = lines[line].char_indices().nth(col).unwrap().0;
+            lines[line].replace_range(at..at + from.len(), to);
+            out.insert(path, lines.join("\n"));
+        }
+        out
+    }
+
+    #[test]
+    fn rename_label_changes_definitions_and_uses_only() {
+        let mut t = BTreeMap::new();
+        t.insert("a.tex".to_string(), "\\label{sec:intro} \\label{sec:introduction}\n\\ref{sec:intro} \\cref{x,sec:intro,sec:introduction}\n% \\ref{sec:intro}\n\\cite{sec:intro} http://x/sec:intro".to_string());
+        t.insert("b.typ".to_string(), "= H <sec:intro>\nsee @sec:intro and #ref(<sec:intro>) and @sec:introduction\n`@sec:intro` // @sec:intro\n#link(\"http://e/sec:intro\")\n```\n<sec:intro>\n```".to_string());
+        t.insert("c.qmd".to_string(), "# H {#sec-a}\nSee @sec-a and @sec-ab.\n<!-- @sec-a -->".to_string());
+        t.insert("d.tex".to_string(), "\\label{a}".to_string());
+        let tex = renamed(&t, "a.tex", "sec:intro", "sec:start");
+        assert_eq!(tex["a.tex"], "\\label{sec:start} \\label{sec:introduction}\n\\ref{sec:start} \\cref{x,sec:start,sec:introduction}\n% \\ref{sec:intro}\n\\cite{sec:intro} http://x/sec:intro");
+        assert_eq!(tex["b.typ"], t["b.typ"], "a LaTeX rename does not touch Typst");
+        assert!(missing(&tex).iter().all(|m| m["key"] != "sec:start"), "no new reference points nowhere");
+        let typ = renamed(&t, "b.typ", "sec:intro", "sec:begin");
+        assert_eq!(typ["b.typ"], "= H <sec:begin>\nsee @sec:begin and #ref(<sec:begin>) and @sec:introduction\n`@sec:intro` // @sec:intro\n#link(\"http://e/sec:intro\")\n```\n<sec:intro>\n```");
+        let qmd = renamed(&t, "c.qmd", "sec-a", "sec-b");
+        assert_eq!(qmd["c.qmd"], "# H {#sec-b}\nSee @sec-b and @sec-ab.\n<!-- @sec-a -->");
+        // A one-letter label is found by name, not inside "label".
+        assert_eq!(renamed(&t, "d.tex", "a", "b")["d.tex"], "\\label{b}");
+        for (to, bad) in [("sec:introduction", "already exists"), ("", "not a valid"), ("two words", "not a valid"), ("sec:intro", "already its name")] {
+            assert!(rename_edits(&t, "a.tex", "sec:intro", to).unwrap_err().contains(bad), "{to}");
+        }
+        assert!(rename_edits(&t, "a.tex", "nope", "x").is_err());
     }
 
     #[test]
