@@ -221,6 +221,40 @@ fn blank_hidden(text: &str, lang: Lang) -> String {
     out + &text[at..]
 }
 
+fn literal(query: &str, case: bool) -> Regex {
+    Regex::new(&format!("(?{}u){}", if case { "" } else { "i" }, regex::escape(query))).unwrap()
+}
+
+/// The match has no letter, digit or underscore right before or after it.
+fn whole_word(content: &str, m: &regex::Match) -> bool {
+    let is_word = |c: char| c.is_alphanumeric() || c == '_';
+    !(content[..m.start()].chars().next_back().is_some_and(is_word) || content[m.end()..].chars().next().is_some_and(is_word))
+}
+
+/// `text` with every match `search` would find replaced by `with`, and how many there were.
+/// Line endings stay as they are.
+fn replace_all(text: &str, query: &str, case: bool, word: bool, with: &str) -> (String, usize) {
+    if query.is_empty() {
+        return (text.to_string(), 0);
+    }
+    let (found, mut count) = (literal(query, case), 0);
+    let lines: Vec<String> = text
+        .split('\n')
+        .map(|line| {
+            let (content, end) = line.strip_suffix('\r').map_or((line, ""), |c| (c, "\r"));
+            let (mut out, mut at) = (String::new(), 0);
+            for m in found.find_iter(content).filter(|m| !word || whole_word(content, m)) {
+                out.push_str(&content[at..m.start()]);
+                out.push_str(with);
+                at = m.end();
+                count += 1;
+            }
+            out + &content[at..] + end
+        })
+        .collect();
+    (lines.join("\n"), count)
+}
+
 /// Where `query` appears in the project's text, one literal match at a time: the file, the
 /// 0-based line, the UTF-16 column and length (as the editor counts), and the line around it.
 /// `texts` is the editor's text where there is one, so unsaved typing is searched.
@@ -229,13 +263,12 @@ fn search(texts: &BTreeMap<String, String>, query: &str, case: bool, word: bool,
     if query.is_empty() {
         return (hits, false);
     }
-    let found = Regex::new(&format!("(?{}u){}", if case { "" } else { "i" }, regex::escape(query))).unwrap();
-    let is_word = |c: char| c.is_alphanumeric() || c == '_';
+    let found = literal(query, case);
     for (path, text) in texts {
         for (line, content) in text.split('\n').enumerate() {
             let content = content.strip_suffix('\r').unwrap_or(content);
             for m in found.find_iter(content) {
-                if word && (content[..m.start()].chars().next_back().is_some_and(is_word) || content[m.end()..].chars().next().is_some_and(is_word)) {
+                if word && !whole_word(content, &m) {
                     continue;
                 }
                 if hits.len() == cap {
@@ -950,6 +983,52 @@ impl Workspace {
         }
         send(self.state());
         Ok((done.len(), edits.len()))
+    }
+
+    /// Replaces `query` by `with` in every file that has it. `expected` is the matches per file the
+    /// writer was shown: if the text no longer gives exactly those, nothing is written. All or
+    /// nothing, like `rename_label`. Returns the files and places changed.
+    fn replace_in_project(&mut self, query: &str, case: bool, word: bool, with: &str, expected: &[(String, usize)]) -> Result<(usize, usize), String> {
+        let mut new = BTreeMap::new();
+        let mut counts = vec![];
+        for (path, text) in &self.known {
+            let (replaced, n) = replace_all(text, query, case, word, with);
+            if n > 0 {
+                counts.push((path.clone(), n));
+                new.insert(path.clone(), replaced);
+            }
+        }
+        if counts.is_empty() {
+            return Err(format!("\"{query}\" was not found. Nothing was replaced."));
+        }
+        let mut shown = expected.to_vec();
+        shown.sort();
+        if shown != counts {
+            return Err("The text changed since you searched. Search again, then replace.".into());
+        }
+        for path in new.keys() {
+            if self.read(path).as_ref() != self.known.get(path) {
+                return Err(format!("{path} changed on disk; open it and try again. Nothing was replaced."));
+            }
+            if self.typed_text.get(path).is_some_and(|t| Some(t) != self.known.get(path)) {
+                return Err(format!("{path} has changes that are not saved yet; save it and try again. Nothing was replaced."));
+            }
+        }
+        let mut done: Vec<String> = vec![];
+        for (path, text) in &new {
+            if let Err(e) = fs::write(self.path(path)?, text) {
+                for p in &done {
+                    let _ = fs::write(self.path(p)?, &self.known[p]);
+                }
+                return Err(format!("{path} was not changed: {} Nothing was replaced.", err(e)));
+            }
+            done.push(path.clone());
+        }
+        for (path, text) in new {
+            self.external(&path, text);
+        }
+        send(self.state());
+        Ok((done.len(), counts.iter().map(|c| c.1).sum()))
     }
 
     /// Returns whether the built preview (LaTeX's PDF, Word) should build again.
@@ -2466,7 +2545,7 @@ async fn send_apple() {
 
 // Messages that read or write files. Each carries the folder the page is showing, so a
 // page still showing another folder can never write into this one.
-const FILE_OPS: [&str; 14] = ["import_image", "paste_image", "open_file", "save", "typed", "review", "create", "rename", "rename_label", "delete", "preview", "restore", "cite", "export"];
+const FILE_OPS: [&str; 15] = ["import_image", "paste_image", "open_file", "save", "typed", "review", "create", "rename", "rename_label", "replace_in_project", "delete", "preview", "restore", "cite", "export"];
 
 fn field<'a>(msg: &'a Value, key: &str) -> Result<&'a str, String> {
     msg[key].as_str().ok_or_else(|| format!("'{key}' is missing"))
@@ -2560,6 +2639,15 @@ async fn handle(msg: &Value) -> Result<(), String> {
                 Err(error) => json!({"ok": false, "error": error}),
             };
             send(json!({"type": "label_renamed", "req": msg["req"], "from": f("from")?, "to": f("to")?, "result": reply}));
+        }
+        "replace_in_project" => {
+            let expected: Vec<(String, usize)> = msg["expected"].as_array().map_or(vec![], |a| a.iter().map(|e| (e["path"].as_str().unwrap_or("").to_string(), e["count"].as_u64().unwrap_or(0) as usize)).collect());
+            let result = ws().replace_in_project(f("query")?, msg["case"].as_bool().unwrap_or(false), msg["word"].as_bool().unwrap_or(false), f("replacement")?, &expected);
+            let reply = match result {
+                Ok((files, places)) => json!({"ok": true, "files": files, "places": places}),
+                Err(error) => json!({"ok": false, "error": error}),
+            };
+            send(json!({"type": "replace_result", "req": msg["req"], "result": reply}));
         }
         "delete" => ws().delete(f("path")?)?,
         "preview" => preview(f("path")?, f("to")?, msg["asked"].as_u64().unwrap_or(0)).await?,
@@ -2982,6 +3070,65 @@ mod tests {
         let want = format!(r#"<img src="{}"><img src="{}"><img src="a.png">"#, png.display(), svg.display());
         assert_eq!(fs::read_to_string(&html).unwrap(), want);
         assert_eq!((fs::read(&png).unwrap(), fs::read_to_string(&svg).unwrap()), (b"hi".to_vec(), "<svg>".into()));
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn replace_all_matches_what_search_finds() {
+        let text = "Yeast rises\r\nno yeasty here, yeast \u{1F600} yeast\n";
+        assert_eq!(replace_all(text, "yeast", false, false, "flour"), ("flour rises\r\nno floury here, flour \u{1F600} flour\n".to_string(), 4));
+        assert_eq!(replace_all(text, "yeast", true, true, "x$0"), ("Yeast rises\r\nno yeasty here, x$0 \u{1F600} x$0\n".to_string(), 2));
+        assert_eq!(replace_all(text, "", false, false, "x"), (text.to_string(), 0));
+        let w = Workspace { known: map(&[("a", text.to_string())]), ..Default::default() };
+        assert_eq!(w.find("yeast", false, true, 99, None).0.len(), replace_all(text, "yeast", false, true, "").1);
+    }
+
+    #[test]
+    fn replace_in_project_writes_for_review_or_not_at_all() {
+        let dir = std::env::temp_dir().join(format!("quire-replace-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&dir);
+        let before = map(&[("a.typ", "Yeast rises\nyeast yeasty caf\u{e9} \u{1F600} yeast".to_string()), ("b/c.tex", "yeast".to_string()), ("d.md", "bread".to_string())]);
+        for (rel, text) in &before {
+            fs::create_dir_all(dir.join(rel).parent().unwrap()).unwrap();
+            fs::write(dir.join(rel), text).unwrap();
+        }
+        let mut w = Workspace { root: Some(dir.canonicalize().unwrap()), known: before.clone(), ..Default::default() };
+        let shown = vec![("a.typ".to_string(), 2), ("b/c.tex".to_string(), 1)]; // match case, whole word
+        let untouched = |w: &Workspace, why: &str| {
+            for f in before.keys() {
+                assert_eq!(fs::read_to_string(dir.join(f)).unwrap(), before[f], "{f}: {why}");
+                assert_eq!(w.known[f], before[f], "{f}: {why}");
+            }
+            assert!(w.baseline.is_empty(), "{why}");
+        };
+        let stale = [("a.typ".to_string(), 3), ("b/c.tex".to_string(), 1)];
+        assert!(w.replace_in_project("yeast", true, true, "flour", &stale).unwrap_err().contains("Search again"));
+        assert!(w.replace_in_project("yeast", true, true, "flour", &shown[..1]).unwrap_err().contains("Search again"));
+        assert!(w.replace_in_project("zzz", true, true, "x", &[]).unwrap_err().contains("not found"));
+        untouched(&w, "stale counts");
+        fs::write(dir.join("b/c.tex"), "yeast!").unwrap();
+        assert_eq!(w.replace_in_project("yeast", true, true, "flour", &shown).unwrap_err(), "b/c.tex changed on disk; open it and try again. Nothing was replaced.");
+        fs::write(dir.join("b/c.tex"), "yeast").unwrap();
+        w.typed_text.insert("a.typ".into(), "typing".into());
+        assert!(w.replace_in_project("yeast", true, true, "flour", &shown).unwrap_err().contains("not saved yet"));
+        w.typed_text.clear();
+        untouched(&w, "disk change and typing");
+        // The second file cannot be written: the first goes back to how it was.
+        let mut read_only = fs::metadata(dir.join("b/c.tex")).unwrap().permissions();
+        read_only.set_readonly(true);
+        fs::set_permissions(dir.join("b/c.tex"), read_only.clone()).unwrap();
+        let failed = w.replace_in_project("yeast", true, true, "flour", &shown).unwrap_err();
+        assert!(failed.starts_with("b/c.tex was not changed") && failed.ends_with("Nothing was replaced."), "{failed}");
+        untouched(&w, "a failed write");
+        #[allow(clippy::permissions_set_readonly_false)]
+        read_only.set_readonly(false);
+        fs::set_permissions(dir.join("b/c.tex"), read_only).unwrap();
+        assert_eq!(w.replace_in_project("yeast", true, true, "flour", &shown), Ok((2, 3)));
+        assert_eq!(fs::read_to_string(dir.join("a.typ")).unwrap(), "Yeast rises\nflour yeasty caf\u{e9} \u{1F600} flour");
+        assert_eq!(fs::read_to_string(dir.join("b/c.tex")).unwrap(), "flour");
+        assert_eq!(w.known["a.typ"], fs::read_to_string(dir.join("a.typ")).unwrap());
+        assert_eq!((&w.baseline["a.typ"], &w.baseline["b/c.tex"]), (&before["a.typ"], &before["b/c.tex"]), "Reject all brings back the exact old text");
+        assert!(!w.baseline.contains_key("d.md"));
         let _ = fs::remove_dir_all(&dir);
     }
 
