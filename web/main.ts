@@ -9,6 +9,7 @@ import { diagnosticRange, errorCount, missingTool, isCurrentDiagnostic, shiftDia
 import { findMatches, replacementEdit, type Match } from "./find"
 import { fuzzyMatch, rankFiles } from "./palette"
 import { headingTitle, outline } from "./outline"
+import { refTrigger, type RefTrigger } from "./refcomplete"
 import { diff, minimalChange, rebase, type Diff } from "./merge"
 import { $, ask, esc, fileIcon, icon, toast } from "./ui"
 import { FORMAT_KEYS, buildFormatBar, connectEditor, insertAt, select, setHeading, syntaxOf } from "./format"
@@ -380,6 +381,47 @@ document.addEventListener("selectionchange", () => {
   if (document.activeElement === ta) onCaret()
 })
 ta.addEventListener("select", onCaret)
+// ---------- reference completion: labels (and, later, bib keys) under the caret ----------
+
+const refList = document.body.appendChild(Object.assign(document.createElement("div"), { id: "ref-list", hidden: true }))
+let refOpen: { t: RefTrigger; items: string[]; sel: number } | null = null
+const closeRefs = () => {
+  refOpen = null
+  refList.hidden = true
+}
+function updateRefs() {
+  const t = mode === "edit" && ta.selectionStart === ta.selectionEnd ? refTrigger(ta.value.slice(0, ta.selectionStart), lang) : null
+  const items = t ? labels.map((l) => l.name).filter((n) => fuzzyMatch(n, t.prefix)).slice(0, 8) : []
+  if (!t || !items.length) return closeRefs()
+  refOpen = { t, items, sel: 0 }
+  paintRefs()
+}
+function paintRefs() {
+  if (!refOpen) return
+  refList.innerHTML = refOpen.items.map((n, i) => `<div class="ref-row${i === refOpen!.sel ? " sel" : ""}">${esc(n)}</div>`).join("")
+  refList.hidden = false
+  floatAt(refList, ta.selectionStart, ta.selectionStart)
+}
+function acceptRef() {
+  const r = refOpen!
+  closeRefs()
+  edit(r.t.replaceFrom, ta.selectionStart, r.items[r.sel])
+}
+ta.addEventListener("keydown", (e) => {
+  if (!refOpen || e.metaKey || e.ctrlKey || e.altKey || e.shiftKey) return
+  const k = e.key
+  if (k === "Tab" || k === "Enter") acceptRef()
+  else if (k === "Escape") closeRefs()
+  else if (k === "ArrowDown" || k === "ArrowUp") {
+    refOpen.sel = (refOpen.sel + (k === "ArrowDown" ? 1 : refOpen.items.length - 1)) % refOpen.items.length
+    paintRefs()
+  } else return
+  e.preventDefault()
+  e.stopImmediatePropagation()
+})
+ta.addEventListener("input", () => (programmatic ? closeRefs() : updateRefs()))
+ta.addEventListener("blur", closeRefs)
+
 ta.addEventListener("keydown", (e) => {
   const mod = e.metaKey || e.ctrlKey
   const key = e.key.toLowerCase()

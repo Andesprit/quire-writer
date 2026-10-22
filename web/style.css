@@ -1181,3 +1181,7 @@ body.errors-pending #compile-jump, body.errors-pending #sb-errors { opacity: 0.7
 #diagnostic-card p { margin: 4px 0 0; color: var(--muted); }
 .breadcrumbs .section-crumb { background: none; border: 0; padding: 0; font: inherit; color: inherit; cursor: pointer; }
 .breadcrumbs .section-crumb:hover { text-decoration: underline; }
+
+#ref-list { position: fixed; z-index: 30; min-width: 160px; max-width: 320px; padding: 4px; border-radius: 6px; background: var(--panel, #252526); border: 1px solid var(--border, #454545); box-shadow: 0 4px 16px #0006; font-size: 13px }
+#ref-list .ref-row { padding: 3px 8px; border-radius: 4px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis }
+#ref-list .ref-row.sel { background: var(--accent, #094771); color: #fff }
