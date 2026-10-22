@@ -188,7 +188,7 @@ document.addEventListener(
       e.stopPropagation()
       return void goPlace(nav)
     }
-    if (e.key === "F8" && !e.metaKey && !e.ctrlKey && !e.altKey && root) {
+    if (e.key === "F8" && !e.metaKey && !e.ctrlKey && !e.altKey && root && !document.querySelector("dialog[open]")) {
       e.preventDefault()
       e.stopPropagation()
       return stepProblems(e.shiftKey ? -1 : 1)
@@ -1573,6 +1573,7 @@ function renderOutline() {
   $("outline-head").setAttribute("aria-expanded", String(open))
   $("outline-head").querySelector(".codicon")!.className = `codicon codicon-chevron-${open ? "down" : "right"}`
   $("outline-count").textContent = heads.length ? String(heads.length) : ""
+  $("outline-count").title = heads.length ? `${heads.length} heading${heads.length === 1 ? "" : "s"}` : ""
   $("outline").classList.toggle("closed", !open)
   const top = Math.min(...heads.map((h) => h.level), 9)
   $("outline").innerHTML = heads.length
@@ -1876,7 +1877,7 @@ function paintWords(total = words.total, picked = words.picked, section = words.
   const goalText = p ? `${p.done.toLocaleString()} / ${g!.goal.toLocaleString()}` : ""
   el.textContent = app.classList.contains("focus") && goalText ? goalText : `${total.toLocaleString()} words` + section + (picked ? ` (${picked.toLocaleString()} selected)` : "") + (goalText ? ` · ${goalText}` : "")
   el.classList.toggle("reached", !!p?.reached)
-  el.title = p ? (p.reached ? "Writing goal reached" : "Words added to this file since you set the goal") : ""
+  el.title = (p ? (p.reached ? "Writing goal reached" : "Words added to this file since you set the goal") + ": " : "") + el.textContent
 }
 
 let wordsTimer = 0
@@ -3888,7 +3889,11 @@ function receiveDiagnostics(batch: DiagnosticBatch, log = "", tool = "") {
 function jumpToDiagnostic(d = compileDiagnostics[0]) {
   if (d?.path) goTo(d.path, d.line, d.col, true)
 }
-$("sb-errors").onclick = () => ($("problems").hidden ? openProblems() : closeProblems())
+$("sb-errors").onclick = () => {
+  const list = problemList() // one problem: go straight to it
+  if (list.length === 1 && $("problems").hidden) return goTo(list[0].path, list[0].line, list[0].col, list[0].utf16)
+  $("problems").hidden ? openProblems() : closeProblems()
+}
 $("compile-jump").onclick = () => jumpToDiagnostic()
 $("compile-setup").onclick = () => send({ type: "check_setup" })
 

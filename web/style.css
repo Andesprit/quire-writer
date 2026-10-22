@@ -933,6 +933,10 @@ details.thought div { white-space: pre-wrap; margin-top: 4px; padding-left: 18px
 #statusbar .spacer { flex: 1; }
 #sb-review { color: var(--modified); }
 #sb-pos, #sb-words { font-variant-numeric: tabular-nums; }
+/* The word count gives way first: it shrinks with an ellipsis (its title holds the full text) so no other item leaves the window. */
+#statusbar #sb-words { display: block; flex: 0 1 auto; min-width: 0; overflow: hidden; text-overflow: ellipsis; line-height: 21px; }
+#statusbar #sb-agent { flex: 0 1 auto; min-width: 0; }
+#statusbar #sb-agent span { overflow: hidden; text-overflow: ellipsis; }
 
 /* ---------- floating widgets ---------- */
 
@@ -1214,12 +1218,14 @@ details.thought div { white-space: pre-wrap; margin-top: 4px; padding-left: 18px
   }
   #preview-group { width: calc(100vw - 48px); }
   .sash { display: none; }
+  #sb-ac span, #sb-ck span, #sb-ed span { display: none; }
+  body:has(#app:not(.no-preview)) #diagnostic-card { display: none; }
 }
 @media (max-width: 640px) {
   #app { --sidebar-col: 0px !important; }
   #sidebar { position: fixed; top: 35px; bottom: 22px; left: 48px; z-index: 21; width: min(280px, 100vw - 48px); box-shadow: var(--shadow); }
   .app-name, .title-actions #toggle-preview { display: none; }
-  #statusbar #sb-lang, #statusbar #sb-pos, #statusbar #sb-words, #sb-ac span, #sb-ck span, #sb-ed span { display: none; }
+  #statusbar #sb-lang, #statusbar #sb-pos, #statusbar #sb-words { display: none; }
   #review-bar { left: 8px; right: 8px; translate: none; justify-content: center; }
   #sb-agent span { max-width: 40vw; overflow: hidden; text-overflow: ellipsis; }
   .welcome-mark { font-size: 30px; }
