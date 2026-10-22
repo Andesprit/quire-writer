@@ -155,7 +155,12 @@ pub fn diagnostics(file: &Path, root: &Path, typed: &BTreeMap<String, String>) -
             let (line, col) = position(range.as_ref().map_or(0, |r| r.start));
             let (end_line, end_col) = position(range.as_ref().map_or(0, |r| r.end));
             let path = e.span.id().and_then(|id| matches!(id.get().root(), VirtualRoot::Project).then(|| project.name(id)));
-            json!({"path": path, "line": line, "col": col, "end_line": end_line, "end_col": end_col,
+            // A file that is not there: the quoted path the span marks, so the page can offer the right file.
+            let file = e.message.starts_with("file not found").then(|| {
+                let text = source.as_ref()?.text();
+                text.get(range.as_ref()?.clone()).map(|t| t.trim_matches('"').to_string())
+            }).flatten();
+            json!({"path": path, "line": line, "col": col, "end_line": end_line, "end_col": end_col, "file": file,
                 "message": e.message.as_str(), "hints": e.hints.iter().map(|h| h.v.as_str()).collect::<Vec<_>>()})
         }).collect()
     })
@@ -186,6 +191,19 @@ fn describe(project: &Project, errors: &[SourceDiagnostic]) -> String {
 mod tests {
     use super::*;
     use std::collections::BTreeMap;
+
+    #[test]
+    fn missing_file_names_the_quoted_path() {
+        let root = std::env::temp_dir().join(format!("quire-missing-{}", std::process::id()));
+        fs::create_dir_all(&root).unwrap();
+        let file = root.join("main.typ");
+        fs::write(&file, "#image(\"figs/pic.png\")\n").unwrap();
+        let errors = diagnostics(&file, &root, &BTreeMap::new()).unwrap();
+        assert_eq!(errors[0]["file"], "figs/pic.png"); // Typst reports the first missing file only
+        fs::write(&file, "#include \"ch.typ\"\n").unwrap();
+        assert_eq!(diagnostics(&file, &root, &BTreeMap::new()).unwrap()[0]["file"], "ch.typ");
+        let _ = fs::remove_dir_all(&root);
+    }
 
     #[test]
     fn unsaved_diagnostics_and_utf16_positions() {

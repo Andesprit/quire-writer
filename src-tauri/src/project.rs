@@ -2261,22 +2261,48 @@ fn open_agent_setup(fix: &str) -> Result<(), String> {
 }
 
 /// TeX is run from the main file's directory. Accept only locations inside the project.
+/// The `l.N` line TeX prints after an error shows the text it stopped at. It is read only between this
+/// location line and the next one, so a line number is never matched with another file's error.
 fn latex_diagnostics(log: &str, main: &Path, root: &Path) -> Vec<Value> {
     static LOCATION: LazyLock<Regex> = LazyLock::new(|| re(r"(?m)^(?:error:\s*)?(.+?\.(?:tex|sty|cls)):(\d+):\s*(.+)$"));
+    static CONTEXT: LazyLock<Regex> = LazyLock::new(|| re(r"(?m)^l\.(\d+) ?(.*)$"));
+    static COMMAND: LazyLock<Regex> = LazyLock::new(|| re(r"(\\[A-Za-z@]+)\s*$"));
+    static MISSING: LazyLock<Regex> = LazyLock::new(|| re(r"File [`'](.+?)' not found"));
     let mut seen = BTreeSet::new();
-    LOCATION.captures_iter(log).filter_map(|c| {
+    let found: Vec<_> = LOCATION.captures_iter(log).collect();
+    found.iter().enumerate().filter_map(|(i, c)| {
         let file = resolve(&main.parent()?.join(c[1].trim()));
         let path = page(file.strip_prefix(root).ok()?);
         let line = c[2].parse::<usize>().ok()?.checked_sub(1)?;
         if !seen.insert((path.clone(), line)) { return None }
-        let (message, hint) = match c[3].trim().trim_end_matches('.') {
-            "Undefined control sequence" => ("Unknown LaTeX command.", "Check the command's spelling and whether its package is loaded."),
-            "Missing $ inserted" => ("Math needs matching $ signs.", "Check that each math expression starts and ends with $."),
-            "Missing } inserted" => ("A closing brace is missing.", "Check the braces near this line."),
-            other => (other, "Check this line and the code just before it; Show log has the compiler's details."),
+        let after = c.get(0)?.end();
+        let until = found.get(i + 1).and_then(|n| n.get(0)).map_or(log.len(), |m| m.start());
+        let context = CONTEXT.captures_iter(&log[after..until.max(after)]).find(|x| x[1].parse() == Ok(line + 1)).map(|x| x[2].to_string());
+        let raw = c[3].trim().trim_end_matches('.');
+        let mut extra = json!({});
+        let (message, hint) = if let Some(m) = MISSING.captures(raw) {
+            extra["file"] = json!(&m[1]);
+            (format!("The file {} was not found.", &m[1]), "Check the file name, or choose the file it should be.".to_string())
+        } else if raw == "Undefined control sequence" {
+            match context.as_deref().and_then(|t| COMMAND.captures(t)) {
+                Some(m) => {
+                    extra["command"] = json!(&m[1]);
+                    (format!("Unknown command {}.", &m[1]), "Check the command's spelling and whether its package is loaded.".to_string())
+                }
+                None => ("Unknown LaTeX command.".into(), "Check the command's spelling and whether its package is loaded.".to_string()),
+            }
+        } else {
+            let (m, h) = match raw {
+                "Missing $ inserted" => ("Math needs matching $ signs.", "Check that each math expression starts and ends with $."),
+                "Missing } inserted" => ("A closing brace is missing.", "Check the braces near this line."),
+                other => (other, "Check this line and the code just before it; Show log has the compiler's details."),
+            };
+            (m.to_string(), h.to_string())
         };
-        Some(json!({"path": path, "line": line, "col": 0, "end_line": line, "end_col": usize::MAX,
-            "message": message, "hints": [hint]}))
+        let mut d = json!({"path": path, "line": line, "col": 0, "end_line": line, "end_col": usize::MAX,
+            "message": message, "hints": [hint]});
+        if let (Some(d), Some(extra)) = (d.as_object_mut(), extra.as_object()) { d.extend(extra.clone()) }
+        Some(d)
     }).collect()
 }
 
@@ -2320,7 +2346,7 @@ async fn run_latex(file: &Path, out: &Path) -> Result<(), String> {
     }
     let log = String::from_utf8_lossy(&o.stdout).into_owned() + &String::from_utf8_lossy(&o.stderr);
     let lines: Vec<&str> = log.lines().collect();
-    let errors: Vec<&str> = lines.iter().copied().filter(|l| l.starts_with('!') || l.contains(".tex:") || l.starts_with("error")).take(8).collect();
+    let errors: Vec<&str> = lines.iter().copied().filter(|l| l.starts_with('!') || l.contains(".tex:") || l.starts_with("error") || l.starts_with("l.")).take(12).collect();
     Err(if errors.is_empty() { lines[lines.len().saturating_sub(8)..].join("\n") } else { errors.join("\n") })
 }
 
@@ -4131,6 +4157,27 @@ mod tests {
         assert_eq!(errors[0]["line"], 11);
         assert!(latex_diagnostics("../../outside.tex:3: Error", &main, &root).is_empty(), "never jump outside the project");
         assert!(latex_diagnostics("main.tex:0: Error", &main, &root).is_empty());
+    }
+
+    #[test]
+    fn latex_diagnostics_name_the_command_or_file_from_real_logs() {
+        let root = resolve(&std::env::temp_dir().join("quire-latex-cause-root"));
+        let main = root.join("main.tex");
+        // tectonic: the summary line first, the raw log after it
+        let d = latex_diagnostics(include_str!("../../web/fixtures/tectonic-a.log"), &main, &root);
+        assert_eq!(d[0]["command"], "\\includegraphics");
+        assert_eq!(d[0]["message"], "Unknown command \\includegraphics.");
+        let d = latex_diagnostics(include_str!("../../web/fixtures/tectonic-e.log"), &main, &root);
+        assert_eq!(d[0]["file"], "missing.tex");
+        assert!(d[0].get("command").is_none());
+        // latexmk -file-line-error: each error is followed by its own l.N line
+        let log = "./chapter.tex:3: Undefined control sequence.\nl.3 \\foo\n\n./main.tex:3: Undefined control sequence.\nl.3 Hello \\textbff\n {x}";
+        let d = latex_diagnostics(log, &main, &root);
+        assert_eq!((d[0]["path"].as_str(), d[0]["command"].as_str()), (Some("chapter.tex"), Some("\\foo")));
+        assert_eq!((d[1]["path"].as_str(), d[1]["command"].as_str()), (Some("main.tex"), Some("\\textbff")));
+        // a context line with another number belongs to no one
+        let d = latex_diagnostics("main.tex:3: Undefined control sequence.\nl.9 \\foo", &main, &root);
+        assert!(d[0].get("command").is_none());
     }
 
 }
