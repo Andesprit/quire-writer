@@ -289,26 +289,38 @@ fn scan(texts: &BTreeMap<String, String>) -> (Vec<(String, String, usize, usize)
     (found, uses)
 }
 
-/// Every label defined in the Typst, LaTeX and Quarto files, and how many times it is used.
+#[cfg(test)]
 fn labels(texts: &BTreeMap<String, String>) -> Vec<Value> {
+    references(texts).0
+}
+
+#[cfg(test)]
+fn missing(texts: &BTreeMap<String, String>) -> Vec<Value> {
+    references(texts).1
+}
+
+/// Every label defined in the Typst, LaTeX and Quarto files with how many times it is used,
+/// and the uses that point nowhere.
+fn references(texts: &BTreeMap<String, String>) -> (Vec<Value>, Vec<Value>) {
     let (found, uses) = scan(texts);
+    let nowhere = missing_of(texts, &found, &uses);
     let mut count = HashMap::<&str, u64>::new();
     uses.iter().filter(|u| !u.cite).for_each(|u| *count.entry(&u.key).or_default() += 1);
-    found
+    let labels = found
         .into_iter()
         .map(|(name, path, line, col)| {
             let refs = count.get(name.as_str()).copied().unwrap_or(0);
             json!({"name": name, "path": path, "line": line, "col": col, "refs": refs})
         })
-        .collect()
+        .collect();
+    (labels, nowhere)
 }
 
 /// Uses that match no label and no bibliography entry, each with its file, line and column.
 /// A citation is judged only when a .bib file (or \bibitem) gives keys to judge it by, and a
 /// Typst or Quarto @key that could be a citation only when no bibliography is declared that
 /// this cannot read (a .yml, a .json), so a miss is never a guess.
-fn missing(texts: &BTreeMap<String, String>) -> Vec<Value> {
-    let (defs, uses) = scan(texts);
+fn missing_of(texts: &BTreeMap<String, String>, defs: &[(String, String, usize, usize)], uses: &[Use]) -> Vec<Value> {
     let defs: HashSet<&str> = defs.iter().map(|d| d.0.as_str()).collect();
     let bib: HashSet<&str> = texts
         .iter()
@@ -665,13 +677,15 @@ impl Workspace {
 
     fn state(&self) -> Value {
         let (files, dirs) = self.entries().unwrap_or_default();
+        let (labels, missing) = references(&self.known);
         json!({
             "type": "folder",
             "root": self.root.as_ref().map(|r| page(r)),
             "files": files,
             "dirs": dirs,
             "changed": self.baseline.keys().collect::<Vec<_>>(),
-            "labels": labels(&self.known),
+            "labels": labels,
+            "missing": missing,
         })
     }
 
@@ -2578,6 +2592,17 @@ mod tests {
         assert!(has("ref", "sec:nope") && has("ref", "fig:lost") && has("cite", "nobody2020"));
         assert!(has("ref", "nowhere") && has("ref", "ghost") && has("ref", "fig-missing") && has("cite", "unknown"));
         assert_eq!(found.len(), 7, "{found:?}");
+        if let Ok(dir) = std::env::var("QUIRE_DUMP") {
+            let state = |t: &BTreeMap<String, String>| {
+                let (labels, missing) = references(t);
+                json!({"type": "folder", "labels": labels, "missing": missing})
+            };
+            fs::write(format!("{dir}/planted.json"), state(&texts).to_string()).unwrap();
+            let mut fixed = texts.clone();
+            fixed.insert("main.typ".into(), texts["main.typ"].replace("@nowhere", "@timeline"));
+            fs::write(format!("{dir}/planted-fixed.json"), state(&fixed).to_string()).unwrap();
+            fs::write(format!("{dir}/intact.json"), state(&sample()).to_string()).unwrap();
+        }
         // Column of the second key of a list, counted in characters.
         let lost = found.iter().find(|f| f.1 == "fig:lost").unwrap();
         let line = texts["latex/main.tex"].split('\n').nth(lost.2 as usize).unwrap();
@@ -2606,9 +2631,17 @@ mod tests {
         let texts: BTreeMap<String, String> = (0..200)
             .map(|i| (format!("ch{i}.typ"), format!("= Chapter {i} <c{i}>\n{}", "Text with @c1 and a #link(<c2>)[x] and $x < y$.\n".repeat(150))))
             .collect();
-        let t = Instant::now();
-        let n = missing(&texts).len();
-        eprintln!("missing() over 200 files, {} bytes: {:?}, {n} found", texts.values().map(String::len).sum::<usize>(), t.elapsed());
+        let (mut with, mut without) = (vec![], vec![]);
+        for _ in 0..5 {
+            let t = Instant::now();
+            let (found, _) = scan(&texts);
+            without.push(t.elapsed());
+            let t = Instant::now();
+            let (l, m) = references(&texts);
+            with.push(t.elapsed());
+            assert!(m.is_empty() && !l.is_empty() && !found.is_empty());
+        }
+        eprintln!("200 files, {} bytes: scan alone {without:?}, labels+missing {with:?}", texts.values().map(String::len).sum::<usize>());
     }
 
     #[test]
