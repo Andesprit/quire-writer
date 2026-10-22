@@ -2743,8 +2743,37 @@ async fn save_dialog(dir: &Path, name: &str) -> Option<PathBuf> {
     }
 }
 
-/// Add the paper for a DOI or arXiv ID to the .bib file. Returns its key.
-async fn cite(ident: &str, from: &str) -> Result<Value, String> {
+/// The key a bib text already gives the paper with this DOI.
+fn doi_key(text: &str, doi: &str) -> Option<String> {
+    let dup = re(&format!(r#"(?i)\bdoi\s*=\s*[{{"]\s*{}\s*[}}"]"#, regex::escape(doi)));
+    let d = dup.find(text)?;
+    BIB_KEY.captures_iter(&text[..d.start()]).last().map(|k| k[1].to_string())
+}
+
+/// The bib text with `entry` added at its end, under `want` (the key a writer's text already
+/// uses) or else a fresh key. Returns the key and the new text.
+fn add_entry(text: &str, entry: &str, want: Option<&str>) -> Result<(String, String), String> {
+    let entry = entry.trim();
+    let m = BIB_KEY.captures(entry).filter(|m| m.get(0).unwrap().start() == 0).ok_or("doi.org has no BibTeX for this paper.")?;
+    let taken: HashSet<String> = BIB_KEY.captures_iter(text).map(|c| c[1].to_string()).collect();
+    let key = match want {
+        Some(k) if !re(r"^[A-Za-z0-9_:.+/-]+$").is_match(k) => {
+            return Err(format!("{k} cannot be a citation key. Use letters, digits and - _ : . only."));
+        }
+        Some(k) if taken.contains(k) => return Err(format!("{k} is already used for a different paper in the bibliography.")),
+        Some(k) => k.to_string(),
+        None => cite_key(entry, &taken),
+    };
+    let at = m.get(1).unwrap();
+    let entry = format!("{}{key}{}", &entry[..at.start()], &entry[at.end()..]);
+    let new = if text.trim().is_empty() { String::new() } else { format!("{}\n\n", text.trim_end()) } + &entry + "\n";
+    Ok((key, new))
+}
+
+/// Add the paper for a DOI or arXiv ID to the .bib file. Returns its key. With `want`, the
+/// entry gets that key; if the paper is already there under another, that key comes back
+/// as "key" with the wanted one as "wanted".
+async fn cite(ident: &str, from: &str, want: Option<&str>) -> Result<Value, String> {
     let doi = doi_of(ident)?;
     let (rel, linked, p) = {
         let w = ws();
@@ -2754,22 +2783,14 @@ async fn cite(ident: &str, from: &str) -> Result<Value, String> {
     };
     let text = if p.exists() { read_text(&p)? } else { String::new() };
     // Already there: reuse its key.
-    let dup = re(&format!(r#"(?i)\bdoi\s*=\s*[{{"]\s*{}\s*[}}"]"#, regex::escape(&doi)));
-    if let Some(d) = dup.find(&text) {
-        if let Some(key) = BIB_KEY.captures_iter(&text[..d.start()]).last() {
-            return Ok(json!({"key": &key[1], "bib": rel, "linked": linked, "added": false}));
-        }
+    if let Some(key) = doi_key(&text, &doi) {
+        return Ok(json!({"key": key, "bib": rel, "linked": linked, "added": false, "wanted": want}));
     }
     let entry = fetch_bibtex(&doi).await?;
-    let entry = entry.trim();
-    let m = BIB_KEY.captures(entry).filter(|m| m.get(0).unwrap().start() == 0).ok_or_else(|| format!("doi.org has no BibTeX for {doi}."))?;
     let mut w = ws();
     // Read again: the agent or the writer may have changed it while doi.org answered.
     let text = if p.exists() { read_text(&p)? } else { String::new() };
-    let key = cite_key(entry, &BIB_KEY.captures_iter(&text).map(|c| c[1].to_string()).collect());
-    let at = m.get(1).unwrap();
-    let entry = format!("{}{key}{}", &entry[..at.start()], &entry[at.end()..]);
-    let new = if text.trim().is_empty() { String::new() } else { format!("{}\n\n", text.trim_end()) } + &entry + "\n";
+    let (key, new) = add_entry(&text, &entry, want).map_err(|e| e.replace("this paper", &doi))?;
     let tracked = w.known.contains_key(&rel) || !p.exists();
     if tracked {
         w.known.insert(rel.clone(), new.clone()); // the writer asked for it: not a change to review
@@ -2781,7 +2802,7 @@ async fn cite(ident: &str, from: &str) -> Result<Value, String> {
     if tracked {
         send(json!({"type": "file_changed", "path": rel, "content": new, "baseline": w.baseline.get(&rel)}));
     }
-    Ok(json!({"key": key, "bib": rel, "linked": linked, "added": true}))
+    Ok(json!({"key": key, "bib": rel, "linked": linked, "added": true, "wanted": want}))
 }
 
 async fn start_agent(agent_id: &str) -> Result<(), String> {
@@ -3080,7 +3101,7 @@ async fn handle(msg: &Value) -> Result<(), String> {
         "preview" => preview(f("path")?, f("to")?, msg["asked"].as_u64().unwrap_or(0)).await?,
         "scroll_preview" => ws().scroll_preview(f("path")?, &msg["line"], &msg["col"])?,
         "cite" => {
-            let mut result = cite(f("id")?, opt("path").unwrap_or("")).await?;
+            let mut result = cite(f("id")?, opt("path").unwrap_or(""), opt("key")).await?;
             (result["type"], result["req"]) = ("cite_result".into(), msg["req"].clone());
             send(result);
         }
@@ -4126,8 +4147,8 @@ mod tests {
         // A citation already in the .bib file is not fetched again.
         fs::write(root.join("refs.bib"), "@article{lecun2015, title={Deep learning}, doi={10.1038/Nature14539}}\n").unwrap();
         ws().known = map(&[("main.typ", r#"#bibliography("refs.bib")"#.to_string())]);
-        let r = cite("10.1038/nature14539", "main.typ").await.unwrap();
-        assert_eq!(r, json!({"key": "lecun2015", "bib": "refs.bib", "linked": true, "added": false}));
+        let r = cite("10.1038/nature14539", "main.typ", Some("deep")).await.unwrap();
+        assert_eq!(r, json!({"key": "lecun2015", "bib": "refs.bib", "linked": true, "added": false, "wanted": "deep"}));
 
         // Each language finds its .bib file its own way, and the LaTeX main file.
         {
@@ -4146,6 +4167,34 @@ mod tests {
             assert_eq!(w.latex_main("paper.tex"), "paper.tex");
         }
         let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn citation_entry_goes_under_the_writers_key() {
+        let entry = "@article{https://doi.org/10.1/x, author = {Knuth, Donald}, year = {1984}}\n";
+        // Empty bib: the wanted key is used, the made-up one is not.
+        let (key, text) = add_entry("", entry, Some("knuth1984")).unwrap();
+        assert_eq!((key.as_str(), text.starts_with("@article{knuth1984,")), ("knuth1984", true));
+        assert!(!text.contains("doi.org/10.1/x,"));
+        // No wanted key: made from author and year, as before; existing entries are kept.
+        let bib = "@book{a, title={A}}\n";
+        let (key, text) = add_entry(bib, entry, None).unwrap();
+        assert_eq!(key, "knuth1984");
+        assert!(text.starts_with("@book{a, title={A}}\n\n@article{knuth1984,"));
+        // The paper is already there under another key: reported, not added twice.
+        let bib = "@article{knuth1984a, title={T}, doi={10.1/X}}\n";
+        assert_eq!(doi_key(bib, "10.1/x").as_deref(), Some("knuth1984a"));
+        assert_eq!(doi_key(bib, "10.2/y"), None);
+        // The key belongs to a different paper: refused, bib untouched.
+        let err = add_entry("@book{knuth1984, title={Other}}", entry, Some("knuth1984")).unwrap_err();
+        assert!(err.contains("already used for a different paper"), "{err}");
+        // Keys BibTeX cannot read are refused; common punctuation is fine.
+        for bad in ["a b", "a,b", "a{b", "", "a=b", "é"] {
+            assert!(add_entry("", entry, Some(bad)).unwrap_err().contains("cannot be a citation key"), "{bad}");
+        }
+        assert!(add_entry("", entry, Some("fig:a-b_c.1+2")).is_ok());
+        // doi.org sent something that is not BibTeX.
+        assert!(add_entry("", "<html>", Some("k")).is_err());
     }
 
     #[test]
