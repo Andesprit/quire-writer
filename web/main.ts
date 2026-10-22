@@ -1966,9 +1966,11 @@ function renderAgentStatus(text?: string) {
   const busy = agentState === "starting" || agentState === "working"
   const label =
     text ??
-    { none: root ? `${name} is not running. Click to start it.` : "Open a folder to start the agent", starting: `Starting ${name}…`, ready: name, working: `${name} is working…` }[agentState]
+    { none: root ? `${name} off · click to start` : "Open a folder to start the agent", starting: `Starting ${name}…`, ready: name, working: `${name} is working…` }[agentState]
   $("sb-agent").innerHTML = `${icon(busy ? "loading" : "hubot", busy ? "codicon-modifier-spin" : "")} <span>${esc(label)}</span>`
-  $("sb-agent").title = root && agentState === "none" ? "Start the agent" : "Open chat"
+  const full = root && agentState === "none" ? `${name} is not running. Click to start it.` : agentState === "ready" ? `${name} is ready. Click to open chat.` : label
+  $("sb-agent").title = full
+  $("sb-agent").setAttribute("aria-label", full)
   setAgentReady(chApi() ? chReady() : agentState === "ready" || agentState === "working")
   if ($<HTMLDialogElement>("setup").open || !root) renderSetup()
   renderAgentNote(name, label)

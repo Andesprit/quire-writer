@@ -935,8 +935,8 @@ details.thought div { white-space: pre-wrap; margin-top: 4px; padding-left: 18px
 #sb-review { color: var(--modified); }
 #sb-pos, #sb-words { font-variant-numeric: tabular-nums; }
 /* The word count gives way first: it shrinks with an ellipsis (its title holds the full text) so no other item leaves the window. */
-#statusbar #sb-words { display: block; flex: 0 1 auto; min-width: 0; overflow: hidden; text-overflow: ellipsis; line-height: 21px; }
-#statusbar #sb-agent { flex: 0 1 auto; min-width: 0; }
+#statusbar #sb-words { display: block; flex: 0 5 auto; min-width: 0; overflow: hidden; text-overflow: ellipsis; line-height: 21px; }
+#statusbar #sb-agent { flex: 0 0 auto; }
 #statusbar #sb-agent span { overflow: hidden; text-overflow: ellipsis; }
 
 /* ---------- floating widgets ---------- */
