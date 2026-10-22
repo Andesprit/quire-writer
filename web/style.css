@@ -1218,3 +1218,6 @@ body.errors-pending #compile-jump, body.errors-pending #sb-errors { opacity: 0.7
 #app.focus #statusbar #sb-words { display: inline-flex; }
 #sb-words.reached::before { content: "\2713"; margin-right: 4px; color: var(--focus); }
 .row.drop, #tree.drop { background: var(--hover); outline: 1px dashed var(--focus); outline-offset: -1px; }
+.drag-ghost { position: fixed; left: 0; top: 0; z-index: 60; pointer-events: none; padding: 2px 8px; border-radius: 3px; background: var(--active); color: var(--fg-strong); font-size: 12px; box-shadow: 0 2px 8px rgba(0, 0, 0, .3); }
+body.dragging, body.dragging * { cursor: grabbing; user-select: none; }
+body.drag-refused, body.drag-refused * { cursor: not-allowed; }

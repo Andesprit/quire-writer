@@ -1078,14 +1078,26 @@ $("tree").onclick = (e) => {
     leaveThen({ type: "open_file", path }).then((ok) => ok && innerWidth < 640 && setPanel("sidebar", false))
   }
 }
+// Where a file or folder may go: any folder (or "" for the top level) except where it already is,
+// itself, or inside itself.
+const canMoveTo = (from: string, to: string) => to !== parentOf(from) && to !== from && !to.startsWith(from + "/")
+
+// A move is a rename into another folder: it saves first, keeps links working and offers Undo.
+function moveInto(from: string, to: string) {
+  const dest = joinPath(to, baseName(from))
+  lastName = null // a refusal now is about this move, not about a name typed earlier
+  if ([...files, ...dirs].some((p) => p.toLowerCase() === dest.toLowerCase()))
+    return void toast(`Nothing was moved: ${to ? `the folder "${baseName(to)}"` : "the top level of the project"} already has a file or folder called "${baseName(from)}". Rename one of them first.`)
+  renameFile(from, dest)
+}
+
 // Dragging a row onto a folder moves it. Pointer events on the document, not HTML5 drag-and-drop: the
 // desktop window's own drag handler would swallow those, and a plain click must stay a click.
 let dragging = false
 const dropDir = (el: Element | null, from: string): string | null => {
   const row = el?.closest<HTMLElement>(".row[data-path]")
   const to = row ? (row.dataset.dir ? row.dataset.path! : null) : el?.closest("#folder-name, #tree") ? "" : null
-  if (to === null || to === parentOf(from) || to === from || to.startsWith(from + "/")) return null
-  return to
+  return to === null || !canMoveTo(from, to) ? null : to
 }
 $("tree").addEventListener("pointerdown", (e) => {
   const row = (e.target as HTMLElement).closest<HTMLElement>(".row[data-path]")
@@ -1093,15 +1105,44 @@ $("tree").addEventListener("pointerdown", (e) => {
   const from = row.dataset.path!
   const x = e.clientX, y = e.clientY
   let target: Element | null = null
+  let ghost: HTMLElement | null = null
+  let expand = 0
+  let at: Element | null = null
+  let px = x, py = y
   const mark = (to: string | null, el: Element | null) => {
     target?.classList.remove("drop")
     target = to === null ? null : (el?.closest(".row[data-dir]") ?? $("tree"))
     target?.classList.add("drop")
+    document.body.classList.toggle("drag-refused", to === null)
+  }
+  // A collapsed folder under the pointer opens after a short wait, so a file can go into a subfolder.
+  const hover = (el: Element | null) => {
+    const dir = el?.closest<HTMLElement>(".row[data-dir]")
+    const path = dir?.dataset.path
+    clearTimeout(expand)
+    if (!path || !collapsed.has(path) || !canMoveTo(from, path)) return
+    expand = window.setTimeout(() => {
+      collapsed.delete(path)
+      renderTree()
+      at = document.elementFromPoint(px, py) // the rows were redrawn
+      mark(dropDir(at, from), at)
+    }, 600)
   }
   const move = (m: PointerEvent) => {
     if (!dragging && Math.hypot(m.clientX - x, m.clientY - y) < 4) return
-    dragging = true
+    if (!dragging) {
+      dragging = true
+      ghost = document.createElement("div")
+      ghost.className = "drag-ghost"
+      ghost.textContent = baseName(from)
+      document.body.append(ghost)
+      document.body.classList.add("dragging")
+    }
+    px = m.clientX
+    py = m.clientY
+    ghost!.style.transform = `translate(${m.clientX + 12}px, ${m.clientY + 12}px)`
     const el = document.elementFromPoint(m.clientX, m.clientY)
+    if (el !== at) hover((at = el))
     mark(dropDir(el, from), el)
   }
   const end = (u: PointerEvent) => {
@@ -1109,12 +1150,20 @@ $("tree").addEventListener("pointerdown", (e) => {
     document.removeEventListener("pointerup", end)
     document.removeEventListener("keydown", esc, true)
     const to = u.type === "pointerup" ? dropDir(document.elementFromPoint(u.clientX, u.clientY), from) : null
+    clearTimeout(expand)
     mark(null, null)
+    ghost?.remove()
+    document.body.classList.remove("dragging", "drag-refused")
     if (!dragging) return
     // The click that follows the release must not open or toggle the row.
-    document.addEventListener("click", (c) => c.stopPropagation(), { capture: true, once: true })
-    setTimeout(() => (dragging = false))
-    if (to !== null) renameFile(from, joinPath(to, baseName(from)))
+    // (No click comes when the release is on another element, so the guard must not outlive this turn.)
+    const stop = (c: Event) => c.stopPropagation()
+    document.addEventListener("click", stop, { capture: true, once: true })
+    setTimeout(() => {
+      document.removeEventListener("click", stop, true)
+      dragging = false
+    })
+    if (to !== null) moveInto(from, to)
   }
   const esc = (k: KeyboardEvent) => {
     if (k.key === "Escape" && dragging) {
@@ -1216,6 +1265,7 @@ $("tree").oncontextmenu = (e) => {
     items.push(
       "-",
       { label: "Rename…", keys: "F2", run: () => startRename(path) },
+      { label: "Move to Folder…", run: () => openPalette(MOVE, path) },
       { label: "Move to Trash", keys: "⌘⌫", run: () => trash(path) },
       "-",
       { label: "Copy Relative Path", run: () => navigator.clipboard?.writeText(path) },
@@ -3007,6 +3057,10 @@ function quickCommands(): QuickItem[] {
     { id: "new-file", label: "New file…", run: click("new-file") },
     { id: "new-folder", label: "New folder…", run: click("new-folder") },
   )
+  if (selected && [...files, ...dirs].includes(selected)) {
+    const path = selected
+    commands.push({ id: "move", label: `Move ${baseName(path)} to a folder…`, run: () => openPalette(MOVE, path) })
+  }
   if (current) commands.push(
     { id: "goal", label: "Set writing goal…", run: () => { goalAsk = true; openPalette() } },
     { id: "find", label: "Find in file", keys: commandKey + "F", run: click("open-find") },
@@ -3030,14 +3084,17 @@ function markedText(text: string, positions: number[], offset = 0) {
   return Array.from(text, (c) => { const mark = matched.has(at); at += c.length; return mark ? "<mark>" + esc(c) + "</mark>" : esc(c) }).join("")
 }
 
-type QuickKind = "files" | "commands" | "sections" | "labels" | "goal"
+type QuickKind = "files" | "commands" | "sections" | "labels" | "goal" | "folders"
 let quickKind: QuickKind = "files"
+let moveAsk: string | null = null // the list picks the folder this path moves into
+const MOVE = ""
 let goalAsk = false // the list asks for a word goal instead of listing files
 let renamePick = false // the "#" list picks the label to rename instead of going to it
 const QUICK = {
   files: { title: "Open a file", aria: "Search project files", noun: "file", icon: (id: string) => fileIcon(id) },
   commands: { title: "Run a command", aria: "Search commands", noun: "command", icon: () => icon("chevron-right") },
   sections: { title: "Go to a section", aria: "Search sections of this file", noun: "section", icon: () => icon("list-tree") },
+  folders: { title: "Move to a folder", aria: "Search folders", noun: "folder", icon: () => icon("folder") },
   goal: { title: "Set a writing goal", aria: "Words to write in this file", noun: "goal", icon: () => icon("target") },
   labels: { title: "Go to a label", aria: "Search labels in the project", noun: "label", icon: () => icon("tag") },
 }
@@ -3045,6 +3102,7 @@ const QUICK_EMPTY: Record<QuickKind, () => string> = {
   files: () => !root ? "Open a project to find its files. Type > for commands." : "No matching files. Try a file name or folder name.",
   commands: () => "No matching commands. Try a different word.",
   sections: () => !current || !syntax() ? "Open a Typst, LaTeX or Markdown file to see its sections." : "No matching sections. Try a word from the heading.",
+  folders: () => "No other folder to move it to. Create a folder first, or try another name.",
   goal: () => paletteQuery.value.trim() ? `Type a whole number from 1 to ${MAX_GOAL.toLocaleString()}, for example 500.` : "Type how many words you want to add to this file, for example 500.",
   labels: () => !root ? "Open a project to see its labels." : labels.length ? "No matching labels. Try a different word." : "No labels in this project yet. " + LABEL_HINT[lang],
 }
@@ -3053,6 +3111,7 @@ const QUICK_EMPTY: Record<QuickKind, () => string> = {
 // # labels of the project, anything else files.
 function quickMode(raw: string): [QuickKind, string] {
   if (goalAsk) return ["goal", raw]
+  if (moveAsk !== null) return ["folders", raw]
   const q = raw.trimStart()
   const kind = ({ ">": "commands", "@": "sections", "#": "labels" } as Record<string, QuickKind>)[q[0]] ?? "files"
   return [kind, kind === "files" ? raw : q.slice(1).trimStart()]
@@ -3068,6 +3127,13 @@ function renderPalette() {
   if (kind === "goal") {
     const n = parseGoal(query)
     quickItems = n ? [{ id: "goal-" + n, label: `Add ${n.toLocaleString()} words to this file`, run: () => setGoal(n) }] : []
+  } else if (kind === "folders") {
+    const from = moveAsk!
+    quickItems = ["", ...dirs].filter((d) => canMoveTo(from, d)).flatMap((d) => {
+      const label = d || "Top level of the project"
+      const match = fuzzyMatch(label, query)
+      return match ? [{ id: "folder-" + d, label, positions: match.positions, score: match.score, run: () => moveInto(from, d) }] : []
+    })
   } else if (kind === "commands") quickItems = quickCommands().flatMap((c) => {
     const match = fuzzyMatch(c.label, query)
     return match ? [{ ...c, ...match }] : []
@@ -3149,7 +3215,8 @@ function placePalette() {
   placePreview()
 }
 
-function openPalette(prefix = "") {
+function openPalette(prefix = "", moving: string | null = null) {
+  moveAsk = moving
   if (document.querySelector("dialog[open]") && !palette.open) return
   if (!palette.open) {
     quickOpener = document.activeElement as HTMLElement | null
@@ -3171,6 +3238,7 @@ function closePalette(restore = true) {
   if (!palette.open) return
   renamePick = false // the list's rows already know whether they rename
   goalAsk = false
+  moveAsk = null
   palette.close()
   if (restore) {
     const opener = quickOpener?.isConnected ? quickOpener : [...$("tree").querySelectorAll<HTMLElement>("[data-path]")].find((el) => el.dataset.path === quickOpenerPath)
@@ -3763,6 +3831,7 @@ function onMessage(msg: any) {
       replaced(msg.result)
       break
     case "renamed": {
+      lastName = null
       if (msg.req && msg.req === leaving) holdTyping(false)
       invalidateDiagnostics()
       const move = (p: string) => (within(p, msg.from) ? msg.to + p.slice(msg.from.length) : p)
@@ -3994,6 +4063,7 @@ function onMessage(msg: any) {
           delete: `Could not move ${baseName(lastTrashed)} to the Trash: `,
           export: `Could not export ${baseName(current ?? "the file")}: `,
           reveal: "Could not show the exported file: ",
+          rename: "Nothing was moved. ",
         }
         toast((what[msg.op] ?? "") + msg.message)
         if (agent && agentState === "starting") {
