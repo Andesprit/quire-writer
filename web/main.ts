@@ -2438,7 +2438,7 @@ function showSearch(req: number, hits: SearchHit[], more: boolean) {
       const n = hits.filter((x) => x.path === h.path).length
       html += `<div class="search-file" title="${esc(h.path)}"><span>${esc(h.path)}</span><em>${n}</em></div>`
     }
-    html += `<button class="search-hit" role="option" tabindex="-1" data-i="${i}" aria-selected="${i === 0}">${esc(h.before.trimStart())}<mark>${esc(h.hit)}</mark>${esc(h.after)}</button>`
+    html += `<button class="search-hit" role="option" tabindex="-1" data-i="${i}" aria-selected="${i === 0}">${esc(h.before.length > 24 ? "…" + h.before.slice(-24) : h.before.trimStart())}<mark>${esc(h.hit)}</mark>${esc(h.after)}</button>`
   })
   $("search-results").innerHTML = html
 }

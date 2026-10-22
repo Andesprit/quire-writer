@@ -311,6 +311,7 @@ body.resizing { cursor: ew-resize; user-select: none; }
 }
 #sidebar.searching > :not(.pane-title):not(#search-view), #sidebar:not(.searching) > #search-view { display: none; }
 #search-view { flex: 1; display: flex; flex-direction: column; min-height: 0; padding: 0 8px 8px; }
+#search-view .find-field { flex: none; }
 #search-view input { width: 100%; min-width: 0; height: 28px; padding: 3px 52px 3px 6px; color: var(--fg); background: var(--input); border: 1px solid var(--input-border); border-radius: 2px; font: 13px var(--ui); }
 #search-view input:focus { outline: 1px solid var(--focus); outline-offset: -1px; }
 #search-count { padding: 6px 2px; font-size: 12px; color: var(--fg); }
@@ -318,7 +319,7 @@ body.resizing { cursor: ew-resize; user-select: none; }
 .search-file { display: flex; gap: 6px; align-items: baseline; padding: 3px 8px; font-size: 12px; font-weight: 700; color: var(--fg-strong); }
 .search-file span { flex: 1; overflow: hidden; white-space: nowrap; text-overflow: ellipsis; }
 .search-file em { font-style: normal; font-weight: 400; font-size: 11px; color: var(--fg); }
-.search-hit { display: block; width: 100%; padding: 2px 8px 2px 20px; border: 0; background: none; color: var(--fg); font: 12px var(--ui); text-align: left; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; cursor: pointer; }
+.search-hit { width: 100%; padding: 2px 8px 2px 20px; border: 0; background: none; color: var(--fg); font: 12px var(--ui); text-align: left; overflow: hidden; display: -webkit-box; -webkit-box-orient: vertical; -webkit-line-clamp: 2; overflow-wrap: anywhere; cursor: pointer; }
 .search-hit:hover { background: var(--hover); }
 .search-hit[aria-selected="true"] { background: var(--selection); outline: 1px solid var(--focus); outline-offset: -1px; color: var(--fg-strong); }
 .search-hit mark { color: var(--fg-strong); background: var(--hover-strong); font-weight: 700; border-radius: 2px; }
