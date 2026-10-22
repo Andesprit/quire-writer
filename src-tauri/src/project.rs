@@ -148,6 +148,9 @@ static HIDDEN: LazyLock<Regex> =
 static TEX_LABEL: LazyLock<Regex> = LazyLock::new(|| re(r"\\label\{([^}]+)\}"));
 static TEX_REF: LazyLock<Regex> =
     LazyLock::new(|| re(r"\\(?:[cCvV]ref|ref|eqref|pageref|autoref|nameref|[cC]pageref|labelcref)\*?\{([^}]+)\}"));
+static TEX_CITE: LazyLock<Regex> = LazyLock::new(|| re(r"\\(?:[cC]ite\w*|parencite\w*|textcite\w*|autocite\w*|footcite\w*|nocite)\*?(?:\[[^\]]*\]){0,2}\{([^}*]+)\}"));
+static TEX_BIBITEM: LazyLock<Regex> = LazyLock::new(|| re(r"\\bibitem(?:\[[^\]]*\])?\{([^}]+)\}"));
+static QMD_CROSS: LazyLock<Regex> = LazyLock::new(|| re(r"^(?:fig|tbl|sec|eq|lst|thm|lem|cor|prp|cnj|def|exm|exr)-"));
 static TEX_HIDDEN: LazyLock<Regex> = LazyLock::new(|| {
     re(r"(?s)\\begin\{(?:verbatim|lstlisting|minted|comment)\*?\}.*?\\end\{(?:verbatim|lstlisting|minted|comment)\*?\}|%[^\n]*")
 });
@@ -224,9 +227,19 @@ fn search(texts: &BTreeMap<String, String>, query: &str, case: bool, word: bool,
     (hits, false)
 }
 
-/// Every label defined in the Typst, LaTeX and Quarto files, and how many times it is used.
-fn labels(texts: &BTreeMap<String, String>) -> Vec<Value> {
-    let (mut found, mut uses) = (vec![], HashMap::<String, u64>::new());
+/// A reference in the text: a label use, or (in LaTeX) a citation.
+struct Use {
+    key: String,
+    path: String,
+    line: usize,
+    col: usize,
+    cite: bool,
+    prefixed: bool, // Quarto: @fig-x, @sec-x and the like are cross-references, never citations
+}
+
+/// Every label defined in the Typst, LaTeX and Quarto files, and every use of a key.
+fn scan(texts: &BTreeMap<String, String>) -> (Vec<(String, String, usize, usize)>, Vec<Use>) {
+    let (mut found, mut uses) = (vec![], vec![]);
     for (rel, text) in texts {
         let lang = lang_of(rel);
         if !matches!(lang, Lang::Typst | Lang::Latex | Lang::Quarto) {
@@ -235,15 +248,27 @@ fn labels(texts: &BTreeMap<String, String>) -> Vec<Value> {
         let blanked = blank_hidden(text, lang);
         for (n, (line, raw)) in blanked.split('\n').zip(text.split('\n')).enumerate() {
             let mut define = |name: &str, at: usize| found.push((name.to_string(), rel.clone(), n, line[..at].chars().count()));
-            let mut refs = |name: &str| *uses.entry(name.trim().to_string()).or_default() += 1;
+            // `at` is where `names` starts in the line; a comma-separated list is one use per key.
+            let mut refs = |names: &str, at: usize, cite: bool| {
+                let mut start = at;
+                for name in names.split(',') {
+                    let key = name.trim();
+                    let col = line[..start + name.len() - name.trim_start().len()].chars().count();
+                    let prefixed = QMD_CROSS.is_match(key);
+                    uses.push(Use { key: key.to_string(), path: rel.clone(), line: n, col, cite, prefixed });
+                    start += name.len() + 1;
+                }
+            };
             if lang == Lang::Latex {
                 TEX_LABEL.captures_iter(line).for_each(|c| define(&c[1], c.get(0).unwrap().start()));
-                TEX_REF.captures_iter(line).for_each(|c| c[1].split(',').for_each(&mut refs));
+                TEX_REF.captures_iter(line).for_each(|c| refs(&c[1], c.get(1).unwrap().start(), false));
+                TEX_CITE.captures_iter(line).for_each(|c| refs(&c[1], c.get(1).unwrap().start(), true));
                 continue;
             }
-            // Not after a letter or a backslash: me@site.org and \@ are not references.
-            for c in find_not_after(&REF, line, 0, |b, _| b.is_alphanumeric() || b == '_' || b == '\\') {
-                refs(&c[1]);
+            // Not after a letter or a backslash: me@site.org and \@ are not references. In Typst
+            // a quote too: "@preview/pkg:1.0" is a package.
+            for c in find_not_after(&REF, line, 0, |b, _| b.is_alphanumeric() || b == '_' || b == '\\' || (lang == Lang::Typst && b == '"')) {
+                refs(&c[1], c.get(1).unwrap().start(), false);
             }
             if lang == Lang::Quarto {
                 QMD_LABEL.captures_iter(line).for_each(|c| define(&c[1], c.get(0).unwrap().start()));
@@ -254,19 +279,52 @@ fn labels(texts: &BTreeMap<String, String>) -> Vec<Value> {
             }
             for c in LABEL.captures_iter(line) {
                 if c.get(1).is_some() {
-                    refs(&c[2]);
+                    refs(&c[2], c.get(2).unwrap().start(), false);
                 } else {
                     define(&c[2], c.get(0).unwrap().start());
                 }
             }
         }
     }
+    (found, uses)
+}
+
+/// Every label defined in the Typst, LaTeX and Quarto files, and how many times it is used.
+fn labels(texts: &BTreeMap<String, String>) -> Vec<Value> {
+    let (found, uses) = scan(texts);
+    let mut count = HashMap::<&str, u64>::new();
+    uses.iter().filter(|u| !u.cite).for_each(|u| *count.entry(&u.key).or_default() += 1);
     found
         .into_iter()
         .map(|(name, path, line, col)| {
-            let refs = uses.get(&name).copied().unwrap_or(0);
+            let refs = count.get(name.as_str()).copied().unwrap_or(0);
             json!({"name": name, "path": path, "line": line, "col": col, "refs": refs})
         })
+        .collect()
+}
+
+/// Uses that match no label and no bibliography entry, each with its file, line and column.
+/// A citation is judged only when a .bib file (or \bibitem) gives keys to judge it by, and a
+/// Typst or Quarto @key that could be a citation only when no bibliography is declared that
+/// this cannot read (a .yml, a .json), so a miss is never a guess.
+fn missing(texts: &BTreeMap<String, String>) -> Vec<Value> {
+    let (defs, uses) = scan(texts);
+    let defs: HashSet<&str> = defs.iter().map(|d| d.0.as_str()).collect();
+    let bib: HashSet<&str> = texts
+        .iter()
+        .filter(|(rel, _)| rel.ends_with(".bib"))
+        .flat_map(|(_, t)| BIB_KEY.captures_iter(t).map(|c| c.get(1).unwrap().as_str()))
+        .chain(texts.values().flat_map(|t| TEX_BIBITEM.captures_iter(t).map(|c| c.get(1).unwrap().as_str())))
+        .collect();
+    let unreadable = bib.is_empty() && texts.iter().any(|(rel, t)| !rel.ends_with(".bib") && t.contains("bibliography"));
+    uses.iter()
+        .filter(|u| !defs.contains(u.key.as_str()) && !bib.contains(u.key.as_str()))
+        .filter(|u| match lang_of(&u.path) {
+            Lang::Latex => !u.cite || !bib.is_empty(),
+            Lang::Quarto => u.prefixed || !bib.is_empty(),
+            _ => !unreadable,
+        })
+        .map(|u| json!({"kind": if u.cite || (lang_of(&u.path) == Lang::Quarto && !u.prefixed) { "cite" } else { "ref" }, "key": u.key, "path": u.path, "line": u.line, "col": u.col}))
         .collect()
 }
 
@@ -2481,6 +2539,76 @@ mod tests {
 
     fn map<V: Clone>(pairs: &[(&str, V)]) -> BTreeMap<String, V> {
         pairs.iter().map(|(k, v)| (k.to_string(), v.clone())).collect()
+    }
+
+    fn sample() -> BTreeMap<String, String> {
+        let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("../sample");
+        let mut out = BTreeMap::new();
+        let mut todo = vec![root.clone()];
+        while let Some(d) = todo.pop() {
+            for e in fs::read_dir(d).unwrap().flatten() {
+                let p = e.path();
+                if p.is_dir() {
+                    todo.push(p);
+                } else if let Ok(t) = fs::read_to_string(&p) {
+                    out.insert(p.strip_prefix(&root).unwrap().to_string_lossy().into_owned(), t);
+                }
+            }
+        }
+        out
+    }
+
+    fn spots(found: &[Value]) -> Vec<(String, String, u64, u64)> {
+        found.iter().map(|f| (f["kind"].as_str().unwrap().into(), f["key"].as_str().unwrap().into(), f["line"].as_u64().unwrap(), f["col"].as_u64().unwrap())).collect()
+    }
+
+    #[test]
+    fn references_that_point_nowhere() {
+        let mut texts = sample();
+        assert!(!texts.is_empty());
+        assert_eq!(missing(&texts), Vec::<Value>::new(), "the sample has no broken reference");
+
+        // Planted mistakes, with a linked .bib for the citations.
+        texts.insert("refs.bib".into(), "@article{known2020, title={T}}\n@book{other, title={U}}".into());
+        texts.get_mut("latex/main.tex").unwrap().push_str("\nSee \\ref{sec:nope}, \\cref{sec:starter,fig:lost} \\citep{nobody2020,known2020}.\n");
+        texts.get_mut("main.typ").unwrap().push_str("\nAlso @nowhere and @known2020 and #cite(<ghost>).\n");
+        texts.get_mut("quarto/report.qmd").unwrap().push_str("\nSee @fig-missing and [@known2020; @unknown].\n");
+        let found = spots(&missing(&texts));
+        let has = |k: &str, key: &str| found.iter().any(|f| f.0 == k && f.1 == key);
+        assert!(has("ref", "sec:nope") && has("ref", "fig:lost") && has("cite", "nobody2020"));
+        assert!(has("ref", "nowhere") && has("ref", "ghost") && has("ref", "fig-missing") && has("cite", "unknown"));
+        assert_eq!(found.len(), 7, "{found:?}");
+        // Column of the second key of a list, counted in characters.
+        let lost = found.iter().find(|f| f.1 == "fig:lost").unwrap();
+        let line = texts["latex/main.tex"].split('\n').nth(lost.2 as usize).unwrap();
+        assert_eq!(&line[lost.3 as usize..lost.3 as usize + 8], "fig:lost");
+    }
+
+    #[test]
+    fn missing_is_never_a_guess() {
+        let quiet = |pairs: &[(&str, &str)]| {
+            let texts: BTreeMap<String, String> = pairs.iter().map(|(k, v)| (k.to_string(), v.to_string())).collect();
+            missing(&texts)
+        };
+        // E-mails, strings, comments, raw text and math.
+        assert!(quiet(&[("a.typ", "mail me@site.org, #import \"@preview/x:1.0.0\": y\n// @gone\n`@raw` $@m$")]).is_empty());
+        // Citations with no bibliography to judge them by.
+        assert!(quiet(&[("a.tex", "\\cite{x} \\nocite{*}"), ("b.qmd", "As [@smith2020] said.")]).is_empty());
+        // A bibliography this cannot read: Typst @key may be a citation.
+        assert!(quiet(&[("a.typ", "@smith\n#bibliography(\"refs.yml\")")]).is_empty());
+        // \bibitem entries are keys; cleveref lists and cite options; Quarto cross-refs are judged.
+        assert!(quiet(&[("a.tex", "\\begin{thebibliography}{9}\\bibitem{k1} A\\end{thebibliography} \\cite[p.~3]{k1} \\label{a}\\label{b} \\cref{a, b}")]).is_empty());
+        assert_eq!(quiet(&[("a.qmd", "@fig-x and [@smith]")]).len(), 1);
+    }
+
+    #[test]
+    fn missing_time_on_200_files() {
+        let texts: BTreeMap<String, String> = (0..200)
+            .map(|i| (format!("ch{i}.typ"), format!("= Chapter {i} <c{i}>\n{}", "Text with @c1 and a #link(<c2>)[x] and $x < y$.\n".repeat(150))))
+            .collect();
+        let t = Instant::now();
+        let n = missing(&texts).len();
+        eprintln!("missing() over 200 files, {} bytes: {:?}, {n} found", texts.values().map(String::len).sum::<usize>(), t.elapsed());
     }
 
     #[test]
