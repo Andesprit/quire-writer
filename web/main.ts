@@ -1969,6 +1969,7 @@ function renderAgentStatus(text?: string) {
     { none: root ? `${name} off · click to start` : "Open a folder to start the agent", starting: `Starting ${name}…`, ready: name, working: `${name} is working…` }[agentState]
   $("sb-agent").innerHTML = `${icon(busy ? "loading" : "hubot", busy ? "codicon-modifier-spin" : "")} <span>${esc(label)}</span>`
   const full = root && agentState === "none" ? `${name} is not running. Click to start it.` : agentState === "ready" ? `${name} is ready. Click to open chat.` : label
+  $("sb-agent").classList.toggle("capped", agentState !== "none")
   $("sb-agent").title = full
   $("sb-agent").setAttribute("aria-label", full)
   setAgentReady(chApi() ? chReady() : agentState === "ready" || agentState === "working")

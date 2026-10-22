@@ -938,6 +938,8 @@ details.thought div { white-space: pre-wrap; margin-top: 4px; padding-left: 18px
 #statusbar #sb-words { display: block; flex: 0 5 auto; min-width: 0; overflow: hidden; text-overflow: ellipsis; line-height: 21px; }
 #statusbar #sb-agent { flex: 0 0 auto; }
 #statusbar #sb-agent span { overflow: hidden; text-overflow: ellipsis; }
+/* A long agent name is cut once the agent runs; the short "off - click to start" text stays whole. */
+#statusbar #sb-agent.capped span { max-width: 22ch; }
 
 /* ---------- floating widgets ---------- */
 
