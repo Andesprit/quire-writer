@@ -161,7 +161,7 @@ pub fn diagnostics(file: &Path, root: &Path, typed: &BTreeMap<String, String>) -
                 text.get(range.as_ref()?.clone()).map(|t| t.trim_matches('"').to_string())
             }).flatten();
             json!({"path": path, "line": line, "col": col, "end_line": end_line, "end_col": end_col, "file": file,
-                "message": e.message.as_str(), "hints": e.hints.iter().map(|h| h.v.as_str()).collect::<Vec<_>>()})
+                "message": file.as_ref().map_or_else(|| e.message.to_string(), |f| format!("The file {f} was not found.")), "hints": e.hints.iter().map(|h| h.v.as_str()).collect::<Vec<_>>()})
         }).collect()
     })
 }
@@ -199,6 +199,7 @@ mod tests {
         let file = root.join("main.typ");
         fs::write(&file, "#image(\"figs/pic.png\")\n").unwrap();
         let errors = diagnostics(&file, &root, &BTreeMap::new()).unwrap();
+        assert_eq!(errors[0]["message"], "The file figs/pic.png was not found.");
         assert_eq!(errors[0]["file"], "figs/pic.png"); // Typst reports the first missing file only
         fs::write(&file, "#include \"ch.typ\"\n").unwrap();
         assert_eq!(diagnostics(&file, &root, &BTreeMap::new()).unwrap()[0]["file"], "ch.typ");

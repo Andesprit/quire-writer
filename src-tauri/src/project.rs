@@ -4178,6 +4178,21 @@ mod tests {
         // a context line with another number belongs to no one
         let d = latex_diagnostics("main.tex:3: Undefined control sequence.\nl.9 \\foo", &main, &root);
         assert!(d[0].get("command").is_none());
+        if let Ok(out) = std::env::var("QUIRE_DUMP") {
+            // What the page hears for the 0035 driver: real parsed logs and a real Typst diagnostic.
+            let fixture = |log: &str| latex_diagnostics(log, &main, &root);
+            let multi = "./ch/intro.tex:2: Undefined control sequence.\nl.2 \\SI\n{5}{m}\n\n./main.tex:3: LaTeX Error: File `figs/pik.png' not found.\nl.3 \\includegraphics{figs/pik.png}";
+            let dir = std::env::temp_dir().join(format!("quire-0035-{}", std::process::id()));
+            fs::create_dir_all(&dir).unwrap();
+            fs::write(dir.join("main.typ"), "#image(\"figs/pik.png\")\n").unwrap();
+            let typst = crate::engine::diagnostics(&dir.join("main.typ"), &dir, &BTreeMap::new()).unwrap();
+            let dump = json!({
+                "tex_a": fixture(include_str!("../../web/fixtures/tectonic-a.log")), "tex_d": fixture(include_str!("../../web/fixtures/tectonic-d.log")),
+                "tex_e": fixture(include_str!("../../web/fixtures/tectonic-e.log")), "tex_multi": fixture(multi), "typst_pic": typst,
+            });
+            fs::write(format!("{out}/error-fix-diagnostics.json"), dump.to_string()).unwrap();
+            let _ = fs::remove_dir_all(&dir);
+        }
     }
 
 }

@@ -3039,7 +3039,7 @@ async function exportAs(to: string) {
     const choice = problems.map((p) => p.nowhere && keyChoices(p.nowhere)[0])
     choice.slice(0, lines.length).forEach((k, i) => { if (k) lines[i] += `. Did you mean ${k}?` })
     const errFixes = problems.map((p) => (p.diag ? errorFix(p.diag) : null))
-    errFixes.slice(0, lines.length).forEach((f, i) => { if (f) lines[i] += `. ${f.label}?` })
+    errFixes.slice(0, lines.length).forEach((f, i) => { if (f) lines[i] += ` ${f.label}${f.label.endsWith("?") ? "" : "."}` })
     const more = elsewhere(path, compileMain, nowhere)
     if (more) lines.push(`${more} more reference${more > 1 ? "s" : ""} point${more > 1 ? "" : "s"} nowhere in other files (see Labels).`)
     const n = problems.length
