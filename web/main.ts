@@ -11,6 +11,7 @@ import { fuzzyMatch, rankFiles } from "./palette"
 import { diff, minimalChange, rebase, type Diff } from "./merge"
 import { $, ask, esc, fileIcon, icon, toast } from "./ui"
 import { FORMAT_KEYS, buildFormatBar, connectEditor, insertAt, select, setHeading, syntaxOf } from "./format"
+import { nameProblem } from "./names"
 import { changes, paragraphs, readFixes, type Fix } from "./suggest"
 import { add, connectChat, onFolderOpened, onPermission, onTurnEnd, onTurnStart, onUpdate, renderChips, running, setAgentReady } from "./chat"
 
@@ -745,6 +746,7 @@ let selected: string | null = null // the row the explorer actions apply to
 // A name box in the tree: a new file or folder inside `parent`, or a rename of `path`.
 let naming: { kind: "file" | "folder"; parent: string } | { kind: "rename"; path: string } | null = null
 let rendering = false
+let nameError = "" // why the name box refuses what was typed, shown right under it
 
 const parentOf = (p: string) => (p.includes("/") ? p.slice(0, p.lastIndexOf("/")) : "")
 const baseName = (p: string) => p.slice(p.lastIndexOf("/") + 1)
@@ -786,7 +788,8 @@ function renderTree() {
   const rows: string[] = []
   const nameBox = (depth: number, iconHtml: string, value: string) =>
     `<div class="row naming" style="--depth:${depth}"><span class="twist"></span>${iconHtml}` +
-    `<input class="tree-input" id="tree-input" value="${esc(value)}" spellcheck="false" autocomplete="off" aria-label="Name"></div>`
+    `<input class="tree-input" id="tree-input" value="${esc(value)}" spellcheck="false" autocomplete="off" aria-label="Name"${nameError ? ' aria-invalid="true" aria-describedby="name-msg"' : ""}></div>` +
+    (nameError ? `<div class="name-msg" id="name-msg" role="alert" style="--depth:${depth}">${esc(nameError)}</div>` : "")
   const newBox = (parent: string, depth: number) => {
     if (!naming || naming.kind === "rename" || naming.parent !== parent) return
     rows.push(nameBox(depth, naming.kind === "folder" ? icon("folder") : icon("file", "ft-other"), ""))
@@ -833,33 +836,41 @@ function startNew(kind: "file" | "folder") {
   const parent = selected ? (isDir(selected) ? selected : parentOf(selected)) : ""
   collapsed.delete(parent)
   naming = { kind, parent }
+  nameError = ""
   setPanel("sidebar", true)
   renderTree()
 }
 
 function startRename(path: string) {
   naming = { kind: "rename", path }
+  nameError = ""
   renderTree()
 }
 
-function commitName() {
+// `leaving`: the box lost focus; a refused name then closes the box instead of pulling focus back.
+function commitName(leaving = false) {
   const input = document.getElementById("tree-input") as HTMLInputElement | null
   const n = naming
-  naming = null
   const name = input?.value.trim().replace(/^\/+|\/+$/g, "") ?? ""
-  if (n && name) {
-    if (n.kind === "rename") {
-      const to = joinPath(parentOf(n.path), name)
-      if (to !== n.path) send({ type: "rename", from: n.path, to })
-      selected = to
-    } else {
-      const path = joinPath(n.parent, name)
+  if (n) {
+    const to = joinPath(n.kind === "rename" ? parentOf(n.path) : n.parent, name)
+    const problem = nameProblem(name, to, [...files, ...dirs], n.kind === "rename" ? n.path : undefined)
+    if (problem && !leaving) {
+      nameError = problem
+      renderTree()
+      return
+    }
+    if (!problem) {
+      if (n.kind === "rename") {
+        if (to !== n.path) send({ type: "rename", from: n.path, to })
+      } else if (n.kind === "folder") send({ type: "create", path: to, folder: true })
       // A new file opens, replacing the open one: ask first when that one has unsaved changes.
-      if (n.kind === "folder") send({ type: "create", path, folder: true })
-      else leaveThen({ type: "create", path, folder: false })
-      selected = path
+      else leaveThen({ type: "create", path: to, folder: false })
+      selected = to
     }
   }
+  naming = null
+  nameError = ""
   renderTree()
 }
 
@@ -895,6 +906,7 @@ $("tree").addEventListener("keydown", (e) => {
     } else if (e.key === "Escape") {
       e.preventDefault()
       naming = null
+      nameError = ""
       renderTree()
     }
     return
@@ -911,7 +923,14 @@ $("tree").addEventListener("keydown", (e) => {
 })
 // Leaving the name box keeps the name, as in VS Code (a redraw is not leaving).
 $("tree").addEventListener("focusout", (e) => {
-  if ((e.target as HTMLElement).id === "tree-input" && naming && !rendering) commitName()
+  if ((e.target as HTMLElement).id === "tree-input" && naming && !rendering) commitName(true)
+})
+$("tree").addEventListener("input", (e) => {
+  if ((e.target as HTMLElement).id === "tree-input" && nameError) {
+    nameError = ""
+    document.getElementById("name-msg")?.remove()
+    ;(e.target as HTMLElement).removeAttribute("aria-invalid")
+  }
 })
 $("tree").addEventListener("focusin", (e) => {
   const path = (e.target as HTMLElement).dataset.path

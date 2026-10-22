@@ -328,6 +328,16 @@ body.resizing { cursor: ew-resize; user-select: none; }
 .row.selected:not(.active) { background: var(--hover); }
 #tree:focus-within .row.selected { outline: 1px solid var(--focus); outline-offset: -1px; }
 .row.naming { padding-right: 6px; }
+.name-msg {
+  margin: 0 6px 2px calc(30px + var(--depth, 0) * 8px);
+  padding: 3px 6px;
+  border: 1px solid var(--danger, #be1100);
+  background: var(--input);
+  color: var(--fg);
+  font-size: 12px;
+  line-height: 1.35;
+}
+.tree-input[aria-invalid] { border-color: var(--danger, #be1100); }
 .tree-input {
   flex: 1;
   min-width: 0;
