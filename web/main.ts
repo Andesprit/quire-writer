@@ -1906,12 +1906,15 @@ const rwCard = $("rewrite-card")
 const rwAsk = $<HTMLTextAreaElement>("rewrite-ask")
 let rw: { from: number; to: number; selected: string; req: number; text: string } | null = null
 let menuTimer = 0
+let jumpSel: [number, number] | null = null // a selection made by goTo: the writer did not ask for the menu
 
 // The menu shows under a selection once it stops changing.
 function scheduleMenu() {
   clearTimeout(menuTimer)
   menu.hidden = true
   if (!findBox.hidden) return
+  if (jumpSel && ta.selectionStart === jumpSel[0] && ta.selectionEnd === jumpSel[1]) return
+  jumpSel = null
   menuTimer = window.setTimeout(placeMenu, 250)
 }
 
@@ -2965,6 +2968,7 @@ function goTo(path: string, line: number, col: number, utf16 = false, len = 0) {
   const text = lineText(l)
   const pos = lineStarts[l] + (utf16 ? Math.min(col, text.length) : [...text].slice(0, col).join("").length)
   ta.focus({ preventScroll: true })
+  jumpSel = len ? [pos, pos + len] : null
   ta.setSelectionRange(pos, pos + len) // a search result selects the match
   const div = hl.children[l] as HTMLElement | undefined
   if (div) ta.scrollTop = Math.max(0, div.offsetTop - ta.clientHeight / 3)
