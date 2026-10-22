@@ -289,6 +289,17 @@ fn scan(texts: &BTreeMap<String, String>) -> (Vec<(String, String, usize, usize)
     (found, uses)
 }
 
+/// The new text of every file that `edits` (from `rename_edits`) changes.
+fn apply_rename(texts: &BTreeMap<String, String>, edits: &[(String, usize, usize)], from: &str, to: &str) -> BTreeMap<String, String> {
+    let mut out = BTreeMap::new();
+    for (path, line, col) in edits.iter().rev() {
+        let text = out.entry(path.clone()).or_insert_with(|| texts[path].split('\n').map(String::from).collect::<Vec<_>>());
+        let at = text[*line].char_indices().nth(*col).unwrap().0;
+        text[*line].replace_range(at..at + from.len(), to);
+    }
+    out.into_iter().map(|(path, lines)| (path, lines.join("\n"))).collect()
+}
+
 static TYPST_NAME: LazyLock<Regex> = LazyLock::new(|| re(r"^[\w:.-]+$"));
 static TEX_NAME: LazyLock<Regex> = LazyLock::new(|| re(r"^[^\s{}%,\\]+$"));
 static QMD_NAME: LazyLock<Regex> = LazyLock::new(|| re(r"^[A-Za-z][\w:.-]*$"));
@@ -806,6 +817,36 @@ impl Workspace {
             }
             send(json!({"type": "file_changed", "path": f, "content": "", "baseline": null, "deleted": true}));
         }
+    }
+
+    /// Renames the label `from` to `to` in the files of `home`'s language. All or nothing:
+    /// a file whose disk text is not what the editor knows stops the whole rename.
+    fn rename_label(&mut self, home: &str, from: &str, to: &str) -> Result<(usize, usize), String> {
+        let edits = rename_edits(&self.known, home, from, to)?;
+        let new = apply_rename(&self.known, &edits, from, to);
+        for path in new.keys() {
+            if self.read(path).as_ref() != self.known.get(path) {
+                return Err(format!("{path} changed on disk; open it and try again."));
+            }
+            if self.typed_text.get(path).is_some_and(|t| Some(t) != self.known.get(path)) {
+                return Err(format!("{path} has changes that are not saved yet; save it and try again."));
+            }
+        }
+        let mut done: Vec<String> = vec![];
+        for (path, text) in &new {
+            if let Err(e) = fs::write(self.path(path)?, text) {
+                for p in &done {
+                    let _ = fs::write(self.path(p)?, &self.known[p]);
+                }
+                return Err(format!("{path} was not changed: {} Nothing was renamed.", err(e)));
+            }
+            done.push(path.clone());
+        }
+        for (path, text) in new {
+            self.external(&path, text);
+        }
+        send(self.state());
+        Ok((done.len(), edits.len()))
     }
 
     /// Returns whether the built preview (LaTeX's PDF, Word) should build again.
@@ -2322,7 +2363,7 @@ async fn send_apple() {
 
 // Messages that read or write files. Each carries the folder the page is showing, so a
 // page still showing another folder can never write into this one.
-const FILE_OPS: [&str; 11] = ["open_file", "save", "typed", "review", "create", "rename", "delete", "preview", "restore", "cite", "export"];
+const FILE_OPS: [&str; 12] = ["open_file", "save", "typed", "review", "create", "rename", "rename_label", "delete", "preview", "restore", "cite", "export"];
 
 fn field<'a>(msg: &'a Value, key: &str) -> Result<&'a str, String> {
     msg[key].as_str().ok_or_else(|| format!("'{key}' is missing"))
@@ -2395,6 +2436,15 @@ async fn handle(msg: &Value) -> Result<(), String> {
         }
         "create" => ws().create(f("path")?, msg["folder"].as_bool().unwrap_or(false))?,
         "rename" => ws().rename(f("from")?, f("to")?)?,
+        "rename_label" => {
+            // The answer carries the reason when it is refused: the page shows it by the name box.
+            let result = ws().rename_label(f("path")?, f("from")?, f("to")?);
+            let reply = match result {
+                Ok((files, places)) => json!({"ok": true, "files": files, "places": places}),
+                Err(error) => json!({"ok": false, "error": error}),
+            };
+            send(json!({"type": "label_renamed", "req": msg["req"], "from": f("from")?, "to": f("to")?, "result": reply}));
+        }
         "delete" => ws().delete(f("path")?)?,
         "preview" => preview(f("path")?, f("to")?, msg["asked"].as_u64().unwrap_or(0)).await?,
         "scroll_preview" => ws().scroll_preview(f("path")?, &msg["line"], &msg["col"])?,
@@ -2635,12 +2685,7 @@ mod tests {
     /// Applies `rename_edits` to the texts, for the tests.
     fn renamed(texts: &BTreeMap<String, String>, home: &str, from: &str, to: &str) -> BTreeMap<String, String> {
         let mut out = texts.clone();
-        for (path, line, col) in rename_edits(texts, home, from, to).unwrap().into_iter().rev() {
-            let mut lines: Vec<String> = out[&path].split('\n').map(String::from).collect();
-            let at = lines[line].char_indices().nth(col).unwrap().0;
-            lines[line].replace_range(at..at + from.len(), to);
-            out.insert(path, lines.join("\n"));
-        }
+        out.extend(apply_rename(texts, &rename_edits(texts, home, from, to).unwrap(), from, to));
         out
     }
 
@@ -2665,6 +2710,51 @@ mod tests {
             assert!(rename_edits(&t, "a.tex", "sec:intro", to).unwrap_err().contains(bad), "{to}");
         }
         assert!(rename_edits(&t, "a.tex", "nope", "x").is_err());
+    }
+
+    #[test]
+    fn rename_label_writes_for_review_or_not_at_all() {
+        let dir = std::env::temp_dir().join(format!("quire-rename-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&dir);
+        let before = sample();
+        for (rel, text) in &before {
+            fs::create_dir_all(dir.join(rel).parent().unwrap()).unwrap();
+            fs::write(dir.join(rel), text).unwrap();
+        }
+        let mut w = Workspace { root: Some(dir.canonicalize().unwrap()), known: before.clone(), ..Default::default() };
+        // A file changed on disk since the editor read it: nothing is written anywhere.
+        fs::write(dir.join("main.typ"), format!("{}\nmore", before["main.typ"])).unwrap();
+        let refused = w.rename_label("main.typ", "timeline", "schedule").unwrap_err();
+        assert_eq!(refused, "main.typ changed on disk; open it and try again.");
+        fs::write(dir.join("main.typ"), &before["main.typ"]).unwrap();
+        // Unsaved typing in a file the rename would change: refused as well.
+        w.typed_text.insert("main.typ".into(), "typing".into());
+        assert!(w.rename_label("main.typ", "timeline", "schedule").unwrap_err().contains("not saved yet"));
+        w.typed_text.clear();
+        for f in before.keys() {
+            assert_eq!(fs::read_to_string(dir.join(f)).unwrap(), before[f], "{f} untouched after a refusal");
+        }
+        let (files, places) = w.rename_label("main.typ", "timeline", "schedule").unwrap();
+        assert_eq!((files, places), (1, 2), "the definition and its one use");
+        let after = fs::read_to_string(dir.join("main.typ")).unwrap();
+        assert_eq!(after, before["main.typ"].replace("<timeline>", "<schedule>").replace("@timeline", "@schedule"));
+        assert_eq!(w.known["main.typ"], after);
+        assert_eq!(w.baseline["main.typ"], before["main.typ"], "Reject all brings back the exact old text");
+        assert_eq!(fs::read_to_string(dir.join("latex/main.tex")).unwrap(), before["latex/main.tex"], "another language is left alone");
+        let (labels, nowhere, _) = references(&w.known);
+        let uses = |name: &str| labels.iter().find(|l| l["name"] == name).map(|l| l["refs"].as_u64().unwrap());
+        assert_eq!((uses("schedule"), uses("timeline")), (Some(1), None));
+        assert!(nowhere.is_empty());
+        if let Ok(out) = std::env::var("QUIRE_DUMP") {
+            let reply = json!({"type": "label_renamed", "from": "timeline", "to": "schedule", "result": {"ok": true, "files": files, "places": places}});
+            fs::write(format!("{out}/rename-reply.json"), reply.to_string()).unwrap();
+            fs::write(format!("{out}/rename-folder.json"), w.state().to_string()).unwrap();
+            fs::write(format!("{out}/rename-files.json"), json!(w.known).to_string()).unwrap();
+            fs::write(format!("{out}/rename-before-files.json"), json!(before).to_string()).unwrap();
+            let refused = json!({"type": "label_renamed", "from": "timeline", "to": "schedule", "result": {"ok": false, "error": refused}});
+            fs::write(format!("{out}/rename-refused.json"), refused.to_string()).unwrap();
+        }
+        let _ = fs::remove_dir_all(&dir);
     }
 
     #[test]
