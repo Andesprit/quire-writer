@@ -804,9 +804,14 @@ impl Workspace {
     /// Keeps `old`, the text a write is about to replace, as an earlier version of `rel`. `force`:
     /// not routine typing, so it is kept even right after another version.
     fn keep(&self, rel: &str, old: &str, force: bool) {
+        self.keep_as(rel, old, force, false)
+    }
+
+    /// `outside`: an agent or another program wrote the text, so it counts against a separate, smaller allowance.
+    fn keep_as(&self, rel: &str, old: &str, force: bool, outside: bool) {
         if let (Some(base), Some(root)) = (&self.history, &self.root) {
             let now = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map_or(0, |d| d.as_millis() as u64);
-            history::record(base, &page(root), rel, old, now, force);
+            history::record(base, &page(root), rel, old, now, force, outside);
         }
     }
 
@@ -1164,7 +1169,7 @@ impl Workspace {
         }
         self.unshadow(rel);
         if let Some(old) = &old {
-            self.keep(rel, old, true);
+            self.keep_as(rel, old, true, true);
         }
         self.known.insert(rel.into(), new.clone());
         let base = self.baseline.entry(rel.into()).or_insert_with(|| old.clone().unwrap_or_default()).clone();

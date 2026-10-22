@@ -602,6 +602,8 @@ async function leaveCurrent(): Promise<boolean> {
 // for the app's answer to this request ("done" or an error), not for a timer.
 async function leaveThen(msg: object) {
   const ok = await leaveCurrent()
+  // A fix waits only for the file it asked for: opening anything else drops it.
+  if (ok && pendingFix && (msg as { path?: string }).path !== pendingFix.path) pendingFix = null
   if (ok) send({ ...msg, req: (leaving = ++reqSeq) })
   return ok
 }
@@ -1529,8 +1531,8 @@ function markOutlineHere() {
   if (n === outlineHere) return
   outlineHere = n
   const box = $("outline")
-  box.querySelector(".here")?.classList.remove("here")
   box.querySelector(".here")?.removeAttribute("aria-current")
+  box.querySelector(".here")?.classList.remove("here")
   const row = box.querySelector<HTMLElement>(`.row[data-i="${n}"]`)
   row?.classList.add("here")
   row?.setAttribute("aria-current", "location")
@@ -3587,7 +3589,7 @@ $("sb-keys").onclick = openShortcuts
 const hist = $<HTMLDialogElement>("history-sheet")
 let historyFor: string | null = null // a file to show the history of once it is open
 let historyReq = 0
-let historyRows: { at: number; text: string; lines: Line[]; coarse: boolean }[] = []
+let historyRows: { at: number; text: string; lines?: Line[]; coarse?: boolean }[] = []
 let historyAt = 0
 let historyOpener: HTMLElement | null = null
 
@@ -3606,15 +3608,12 @@ function openHistory(path = current) {
 function showHistory(req: number, path: string, versions: { at: number; text: string }[]) {
   if (req !== historyReq || path !== current) return
   const now = Date.now()
-  historyRows = versions.map((v) => ({ ...v, ...diffLines(ta.value, v.text) }))
+  historyRows = versions.map((v) => ({ ...v })) // compared with the text now only when needed
   historyAt = 0
   $("history-title").textContent = `File history: ${baseName(path)}`
   $("history-empty").hidden = historyRows.length > 0
   $("history-body").hidden = historyRows.length === 0
-  $("history-list").innerHTML = historyRows.map((r, i) => {
-    const c = changeCount(r.lines)
-    return `<button class="history-row" role="option" data-i="${i}"><span>${esc(whenText(r.at, now))}</span><span class="history-count"><b class="add">+${c.added}</b> <b class="del">\u2212${c.removed}</b></span></button>`
-  }).join("")
+  $("history-list").innerHTML = historyRows.map((r, i) => `<button class="history-row" role="option" data-i="${i}"><span>${esc(whenText(r.at, now))}</span><span class="history-count"></span></button>`).join("")
   hist.showModal()
   const editor = $("editor-group").getBoundingClientRect()
   const width = Math.min(620, innerWidth - 16)
@@ -3625,10 +3624,30 @@ function showHistory(req: number, path: string, versions: { at: number; text: st
   if (historyRows.length) pickVersion(0)
   else $("history-close").focus()
   placePreview()
+  fillCounts(req)
+}
+// The first version is compared at once; the other rows get their +/- counts one at a time while the writer reads,
+// so a long file with many versions opens without waiting for all of them.
+function compared(i: number) {
+  const r = historyRows[i]
+  if (!r.lines) Object.assign(r, diffLines(ta.value, r.text))
+  return r as typeof r & { lines: Line[]; coarse: boolean }
+}
+function countCell(i: number) {
+  const c = changeCount(compared(i).lines)
+  $("history-list").children[i].querySelector(".history-count")!.innerHTML = `<b class="add">+${c.added}</b> <b class="del">\u2212${c.removed}</b>`
+}
+async function fillCounts(req: number) {
+  for (let i = 0; i < historyRows.length; i++) {
+    await new Promise((r) => setTimeout(r, 0))
+    if (req !== historyReq || !hist.open) return
+    countCell(i)
+  }
 }
 function pickVersion(i: number) {
   historyAt = Math.max(0, Math.min(i, historyRows.length - 1))
-  const r = historyRows[historyAt]
+  const r = compared(historyAt)
+  countCell(historyAt)
   const rows = [...$("history-list").children] as HTMLElement[]
   rows.forEach((el, n) => { el.classList.toggle("on", n === historyAt); el.setAttribute("aria-selected", String(n === historyAt)) })
   rows[historyAt].scrollIntoView({ block: "nearest" })
@@ -3841,7 +3860,7 @@ function showDiagnosticAtCaret() {
     return
   }
   const fix = errorFix(d)
-  const html = `<strong>${esc(d.message)}</strong>${d.hints.map((h) => `<p>${esc(h)}</p>`).join("")}` +
+  const html = `<strong>${esc(d.message)}</strong>${(fix ? [] : d.hints).map((h) => `<p>${esc(h)}</p>`).join("")}` +
     (fix ? `<button type="button" class="btn secondary sm errfix" title="Alt+Enter">${esc(fix.label)}</button>` : "")
   if (card.innerHTML !== html) card.innerHTML = html
   ta.setAttribute("aria-describedby", "diagnostic-card")
@@ -3929,19 +3948,23 @@ function restorePos(s: Spot) {
 }
 function goPlace(dir: "back" | "forward") {
   if (!current) return void toast("Open a file first.")
+  const before = { back: [...trail.back], fwd: [...trail.fwd] }
   const p = (dir === "back" ? goBack : goForward)(trail, here(), (path) => files.includes(path))
   if (!p) return void toast(dir === "back" ? "Nothing to go back to." : "Nothing to go forward to.")
-  goTo(p.path, p.line, p.col, true, 0, false)
+  goTo(p.path, p.line, p.col, true, 0, false).then((ok) => {
+    if (!ok) { trail.back = before.back; trail.fwd = before.fwd } // the save question was cancelled: the stop stays
+  })
 }
 
 // tinymist counts columns in characters; the text field counts UTF-16 units.
 // track: the jump is a place to come Back to (false for Back and Forward themselves, and for the second half
 // of a jump that opened its file, which openFile has already recorded).
-function goTo(path: string, line: number, col: number, utf16 = false, len = 0, track = true) {
+async function goTo(path: string, line: number, col: number, utf16 = false, len = 0, track = true): Promise<boolean> {
   if (path !== current) {
     pendingJump = { path, line, col, utf16, len, track }
-    leaveThen({ type: "open_file", path })
-    return
+    const ok = await leaveThen({ type: "open_file", path })
+    if (!ok && pendingJump?.path === path) pendingJump = null
+    return ok
   }
   pendingJump = null
   if (track) leave(trail, here(), { path, line, col })
@@ -3955,6 +3978,7 @@ function goTo(path: string, line: number, col: number, utf16 = false, len = 0, t
   const div = hl.children[l] as HTMLElement | undefined
   if (div) ta.scrollTop = Math.max(0, div.offsetTop - ta.clientHeight / 3)
   showDiagnosticAtCaret()
+  return true
 }
 
 // Replace a key that points nowhere with the one the writer picked, as one undo step. In another file the file
@@ -4514,7 +4538,10 @@ function onMessage(msg: any) {
         pictureReplies.delete(msg.req)
         return
       }
-      if (msg.req && msg.req === leaving) holdTyping(false) // the open text stays, and the writer can type again
+      if (msg.req && msg.req === leaving) {
+        holdTyping(false) // the open text stays, and the writer can type again
+        pendingFix = null // the file a fix waited for did not open: nothing is applied later without a click
+      }
       if (msg.op === "replace_in_project") {
         replaced({ ok: false, files: 0, places: 0, error: msg.message, op: 0, paths: [] })
         return
