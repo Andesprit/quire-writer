@@ -964,6 +964,16 @@ details.thought div { white-space: pre-wrap; margin-top: 4px; padding-left: 18px
 .ctx-menu .keys { opacity: 0.7; font-size: 12px; }
 .ctx-menu hr { margin: 4px 6px; border: 0; border-top: 1px solid var(--widget-border); }
 
+#problems { position: fixed; z-index: 50; width: 420px; max-width: calc(100vw - 8px); max-height: 50vh; overflow-y: auto; padding: 4px; background: var(--widget); border: 1px solid var(--widget-border); border-radius: 6px; box-shadow: var(--shadow); font-size: 13px; }
+#problems[hidden] { display: none; }
+.problems-file { padding: 4px 8px 2px; font-size: 12px; font-weight: 600; opacity: .7; }
+.problems-item { display: flex; flex-direction: column; align-items: flex-start; gap: 2px; padding-bottom: 4px; }
+.problems-row { width: 100%; padding: 3px 8px; border: 0; border-radius: 4px; background: none; color: var(--fg); font: inherit; text-align: left; cursor: pointer; }
+.problems-row:hover, .problems-row:focus-visible { background: var(--btn); color: var(--btn-fg); outline: none; }
+.problems-line { opacity: .7; margin-right: 6px; font-variant-numeric: tabular-nums; }
+.problems-item .fix { margin-left: 8px; }
+.problems-empty { margin: 0; padding: 6px 8px; }
+
 /* Quick input uses the editor's width; the native preview steps aside on overlap. */
 #quick-input { position: fixed; inset: auto; margin: 0; padding: 8px; max-width: calc(100vw - 16px); max-height: calc(100dvh - 100px); overflow: hidden; border: 1px solid var(--widget-border); border-top: 2px solid var(--focus); border-radius: 6px; background: var(--widget); color: var(--fg); box-shadow: var(--shadow); font: 13px var(--ui); }
 #keys-sheet { position: fixed; inset: auto; margin: 0; padding: 8px; max-width: calc(100vw - 16px); max-height: calc(100dvh - 100px); overflow: hidden; border: 1px solid var(--widget-border); border-top: 2px solid var(--focus); border-radius: 6px; background: var(--widget); color: var(--fg); box-shadow: var(--shadow); font: 13px var(--ui); }

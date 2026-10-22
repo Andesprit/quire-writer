@@ -22,7 +22,7 @@ import { MAX_GOAL, goalProgress, parseGoal, readGoal, type Goal } from "./goal"
 import { goBack, goForward, leave, newTrail, rename as renameTrail, type Place } from "./places"
 import { HINTS, SHORTCUTS, docShortcut, filterShortcuts, keyCaps, keysForCommand, keyText, placeKey, shortcutFor, type DocShortcutId, type Shortcut } from "./shortcuts"
 import { labelAt, labelProblem, nameProblem } from "./names"
-import { elsewhere, gatherProblems, problemLines } from "./preflight"
+import { elsewhere, gatherProblems, problemLines, projectProblems, stepProblem, type Problem } from "./preflight"
 import { changes, paragraphs, readFixes, type Fix } from "./suggest"
 import { add, connectChat, onFolderOpened, onPermission, onTurnEnd, onTurnStart, onUpdate, renderChips, running, setAgentReady } from "./chat"
 
@@ -187,6 +187,11 @@ document.addEventListener(
       e.stopPropagation()
       return void goPlace(nav)
     }
+    if (e.key === "F8" && !e.metaKey && !e.ctrlKey && !e.altKey && root) {
+      e.preventDefault()
+      e.stopPropagation()
+      return stepProblems(e.shiftKey ? -1 : 1)
+    }
     const id = docShortcut(e)
     // Cmd+B and Cmd+I are bold and italic in the text; Chrome keeps Cmd+L for itself.
     if (!id) return
@@ -200,7 +205,7 @@ document.addEventListener(
 // Escape leaves focus mode only when nothing else wanted it. What is open is read before any
 // other handler runs (capture), because most of them close their thing without preventDefault.
 let escapeFree = false
-const OVERLAYS = ["find-box", "inline-box", "diagnostic-card", "rewrite-menu", "rewrite-card", "fix-card", "ref-list", "ctx-menu"]
+const OVERLAYS = ["problems", "find-box", "inline-box", "diagnostic-card", "rewrite-menu", "rewrite-card", "fix-card", "ref-list", "ctx-menu"]
 document.addEventListener("keydown", (e) => {
   if (e.key === "Escape") escapeFree = !document.querySelector("dialog[open]") && !ghost && !cardMark && OVERLAYS.every((id) => $(id).hidden)
 }, true)
@@ -3322,6 +3327,11 @@ function quickCommands(): QuickItem[] {
     run: () => { setPanel("preview", true); document.querySelector<HTMLElement>('[data-as="' + as + '"]')!.click() },
   })
   if (compileDiagnostics[0]?.path && files.includes(compileDiagnostics[0].path)) commands.push({ id: "first-error", label: "Go to first error", run: () => jumpToDiagnostic() })
+  if (root) commands.push( // last, so "Go to" still lists sections and labels first
+    { id: "problems", label: "Show problems", run: openProblems },
+    { id: "next-problem", label: "Go to next problem", keys: kc("next-problem"), run: () => stepProblems(1) },
+    { id: "prev-problem", label: "Go to previous problem", keys: kc("prev-problem"), run: () => stepProblems(-1) },
+  )
   return commands
 }
 
@@ -3706,7 +3716,7 @@ $("shortcuts").innerHTML = HINTS.map((id) => {
 
 // The web view sits over #preview. A native view covers whatever the page floats over it, so
 // it steps aside while a dialog or menu would sit under it, and notices go to its left.
-const floating = ["quick-input", "keys-sheet", "history-sheet", "ask", "new-project-ask", "setup", "ac-settings", "ck-settings", "ed-settings", "ch-settings", "inline-box", "fix-card", "diagnostic-card", "rewrite-menu", "rewrite-card", "ref-list", "ctx-menu", "toasts", "sidebar", "chat"].map((id) => $(id))
+const floating = ["quick-input", "keys-sheet", "history-sheet", "ask", "new-project-ask", "setup", "ac-settings", "ck-settings", "ed-settings", "ch-settings", "inline-box", "fix-card", "diagnostic-card", "rewrite-menu", "rewrite-card", "ref-list", "ctx-menu", "problems", "toasts", "sidebar", "chat"].map((id) => $(id))
 let placing = 0
 let placed = "" // the place last sent
 let bgSent = "" // the theme's preview background last sent: the web view shows it while a preview loads
@@ -3802,19 +3812,14 @@ function receiveDiagnostics(batch: DiagnosticBatch, log = "", tool = "") {
 function jumpToDiagnostic(d = compileDiagnostics[0]) {
   if (d?.path) goTo(d.path, d.line, d.col, true)
 }
-$("sb-errors").onclick = () => jumpToDiagnostic()
+$("sb-errors").onclick = () => ($("problems").hidden ? openProblems() : closeProblems())
 $("compile-jump").onclick = () => jumpToDiagnostic()
 $("compile-setup").onclick = () => send({ type: "check_setup" })
 
 function renderDiagnostics(pending = false) {
   document.body.classList.toggle("errors-pending", pending)
   const first = compileDiagnostics[0]
-  const n = errorCount(compileDiagnostics)
-  const status = $("sb-errors") as HTMLButtonElement
-  status.hidden = !n
-  status.disabled = !first?.path
-  status.innerHTML = `${icon("error")} <span>${n} error${n === 1 ? "" : "s"}</span>`
-  status.title = first ? `${first.message} — Go to the first error` : ""
+  renderProblems()
   $("compile-banner").hidden = !first && !compileTool
   $("compile-setup").hidden = !compileTool
   $("compile-note").textContent = compileMain && compiledMains.has(compileMain)
@@ -3832,6 +3837,93 @@ function renderDiagnostics(pending = false) {
   $("compile-log-text").textContent = compileLog
   if (!compileLog) $("compile-log").removeAttribute("open")
   paintDiagnostics()
+}
+
+// Every problem in the project: compile errors and keys that point nowhere. The status bar counts them, the
+// list under it shows them, and F8 steps through them in the same order.
+function problemList(): Problem[] {
+  return projectProblems(compileDiagnostics, document.body.classList.contains("errors-pending"), nowhere)
+}
+
+function renderProblems() {
+  const list = problemList()
+  const n = list.length, errors = errorCount(compileDiagnostics)
+  const status = $("sb-errors") as HTMLButtonElement
+  const open = !$("problems").hidden
+  status.hidden = !n && !open
+  const noun = n === errors ? "error" : "problem"
+  status.innerHTML = `${icon("error")} <span>${n} ${noun}${n === 1 ? "" : "s"}</span>`
+  status.title = n ? "Show the problems" : "No problems"
+  status.setAttribute("aria-expanded", String(open))
+  if (!open) return
+  const box = $("problems")
+  const had = box.contains(document.activeElement) ? [...box.querySelectorAll("button")].indexOf(document.activeElement as HTMLButtonElement) : -1
+  let html = n ? "" : `<p class="muted problems-empty">No problems.</p>`
+  let file = ""
+  list.forEach((p, i) => {
+    if (p.path !== file) html += `<div class="problems-file">${esc(p.path)}</div>`
+    file = p.path
+    const fix = p.diag ? errorFix(p.diag) : null
+    const key = p.nowhere ? keyChoices(p.nowhere)[0] : undefined
+    html += `<div class="problems-item"><button type="button" class="problems-row" data-i="${i}" title="Go to this problem"><span class="problems-line">Line ${p.line + 1}</span> ${esc(p.text)}</button>` +
+      (fix ? `<button type="button" class="fix" data-i="${i}" data-fix="1">${esc(fix.label)}</button>` : key ? `<button type="button" class="fix" data-i="${i}" data-fix="1">Did you mean ${esc(key)}?</button>` : "") + "</div>"
+  })
+  box.innerHTML = html
+  if (had >= 0) (box.querySelectorAll("button")[Math.min(had, box.querySelectorAll("button").length - 1)] as HTMLElement | undefined)?.focus()
+  placeProblems()
+}
+
+// Above the status bar, under the item that opened it.
+function placeProblems() {
+  const box = $("problems"), r = $("sb-errors").getBoundingClientRect()
+  box.style.left = `${Math.max(4, Math.min(r.left, innerWidth - box.offsetWidth - 4))}px`
+  box.style.bottom = `${innerHeight - r.top + 4}px`
+}
+
+function openProblems() {
+  $("problems").hidden = false
+  renderProblems()
+  ;($("problems").querySelector(".problems-row") as HTMLElement | null)?.focus()
+}
+
+function closeProblems(focusEditor = true) {
+  if ($("problems").hidden) return
+  $("problems").hidden = true
+  renderProblems()
+  if (focusEditor && mode === "edit" && current) ta.focus({ preventScroll: true })
+}
+
+$("problems").addEventListener("click", (e) => {
+  const b = (e.target as HTMLElement).closest<HTMLElement>("button")
+  const p = b && problemList()[Number(b.dataset.i)]
+  if (!p) return
+  closeProblems(false)
+  if (!b.dataset.fix) return void goTo(p.path, p.line, p.col, p.utf16)
+  const fix = p.diag && errorFix(p.diag)
+  const key = p.nowhere && keyChoices(p.nowhere)[0]
+  if (fix) applyErrorFix(fix)
+  else if (p.nowhere && key) applyKeyFix(p.nowhere, key)
+})
+$("problems").addEventListener("keydown", (e) => {
+  if (e.key === "Escape") { e.preventDefault(); closeProblems(); return }
+  if (e.key !== "ArrowDown" && e.key !== "ArrowUp") return
+  const rows = [...$("problems").querySelectorAll<HTMLElement>(".problems-row")]
+  const i = rows.indexOf((document.activeElement as HTMLElement).closest(".problems-item")?.querySelector(".problems-row") as HTMLElement)
+  e.preventDefault()
+  rows[(i + (e.key === "ArrowDown" ? 1 : -1) + rows.length) % rows.length]?.focus()
+})
+document.addEventListener("mousedown", (e) => {
+  if (!$("problems").hidden && !$("problems").contains(e.target as Node) && !$("sb-errors").contains(e.target as Node)) closeProblems(false)
+})
+
+// F8 and Shift+F8: the next or previous problem after the caret, across files. At the end it wraps and says so.
+function stepProblems(dir: 1 | -1) {
+  const list = problemList()
+  if (!list.length) return void toast("No problems.", "info")
+  const r = stepProblem(list, { path: current ?? "", line: current ? lineOf(ta.selectionStart) : -1 }, dir)!
+  closeProblems(false)
+  if (r.wrapped) toast(dir === 1 ? "Back to the first problem." : "Back to the last problem.", "info")
+  goTo(r.problem.path, r.problem.line, r.problem.col, r.problem.utf16)
 }
 
 function paintDiagnostics() {
@@ -4262,6 +4354,7 @@ function onMessage(msg: any) {
       labels = msg.labels ?? []
       cites = msg.cites ?? []
       nowhere = msg.missing ?? []
+      renderProblems()
       if (selected && !files.includes(selected) && !dirs.includes(selected)) selected = null
       renderTree()
       renderLabels()

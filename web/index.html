@@ -246,7 +246,7 @@
     <footer id="statusbar">
       <button class="item" id="sb-agent" title="Open chat"><i class="codicon codicon-hubot"></i> <span>No agent</span></button>
       <button class="item" id="sb-review" hidden title="Go to the next change"><i class="codicon codicon-diff"></i> <span id="sb-review-text"></span></button>
-      <button class="item" id="sb-errors" hidden title="Go to the first error"></button>
+      <button class="item" id="sb-errors" hidden title="Show the problems" aria-haspopup="dialog" aria-expanded="false"></button>
       <span class="spacer"></span>
       <span class="item" id="sb-pos"></span>
       <span class="item" id="sb-words"></span>
@@ -494,6 +494,7 @@
       </div>
     </form>
   </dialog>
+  <div id="problems" role="dialog" aria-label="Problems" hidden></div>
   <div id="ctx-menu" class="ctx-menu" role="menu" hidden></div>
   <div id="toasts" aria-live="assertive"></div>
   <script type="module" src="./main.ts"></script>

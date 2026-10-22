@@ -21,6 +21,8 @@ export const SHORTCUTS = [
   { id: "label-prefix", action: "Go to label (type # in the open-a-file box)", group: "Go to", keys: "#" },
   { id: "rename-label", action: "Rename the label under the caret", group: "Go to", keys: "F2", cmd: "rename-label", src: '"F2"' },
   { id: "outline-move", action: "Move the focused Outline section up or down", group: "Go to", keys: "⌥↑↓", src: 'e.altKey && (e.key === "ArrowUp"' },
+  { id: "next-problem", action: "Go to the next problem", group: "Go to", keys: "F8", cmd: "next-problem", src: '"F8"' },
+  { id: "prev-problem", action: "Go to the previous problem", group: "Go to", keys: "⇧F8", win: "Shift+F8", cmd: "prev-problem", src: "stepProblems(" },
   { id: "back", action: "Go back to the previous place", group: "Go to", keys: "Mod[", win: "Alt+←", cmd: "back", src: "placeKey(" },
   { id: "forward", action: "Go forward to the next place", group: "Go to", keys: "Mod]", win: "Alt+→", cmd: "forward", src: "placeKey(" },
   { id: "save", action: "Save", group: "File", keys: "ModS", cmd: "save", doc: { key: "s", shift: false } },
@@ -80,7 +82,7 @@ export function placeKey(e: KeyLike & { code?: string }, mac: boolean): "back" |
   return e.key === "ArrowLeft" ? "back" : e.key === "ArrowRight" ? "forward" : undefined
 }
 // "⌘⇧P" as ["⌘", "⇧", "P"] for kbd boxes; Tab, Esc, F2 and Ctrl+ stay whole.
-export const keyCaps = (s: Shortcut, mac: boolean) => keyText(s, mac).match(/Ctrl\+|Alt\+|Tab|Esc|F\d|[^]/gu) ?? []
+export const keyCaps = (s: Shortcut, mac: boolean) => keyText(s, mac).match(/Ctrl\+|Alt\+|Shift\+|Tab|Esc|F\d|[^]/gu) ?? []
 
 export const shortcutFor = (id: string) => SHORTCUTS.find((s) => s.id === id)
 export const keysForCommand = (cmd: string, mac: boolean) => {
