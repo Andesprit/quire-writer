@@ -7,6 +7,8 @@ export interface Diagnostic {
   end_col: number
   message: string
   hints: string[]
+  command?: string // LaTeX: the command an "Unknown command" error stopped at
+  file?: string | null // a missing file: the path as the compiler names it
 }
 export interface DiagnosticBatch {
   root: string

@@ -6,6 +6,7 @@ import "@fontsource/ia-writer-quattro/700-italic.css"
 import { Chunk } from "@codemirror/merge"
 import { highlightHTML, highlightLine, langOf, startState, sameState, type Lang, type State } from "./highlight"
 import { suggestKeys, keySpan } from "./suggestkeys"
+import { fixFor, planEdit, type Fix as ErrorFix } from "./errorfix"
 import { diagnosticRange, errorCount, missingTool, isCurrentDiagnostic, shiftDiagnostics, type Diagnostic, type DiagnosticBatch } from "./diagnostics"
 import { findMatches, replacementEdit, type Match } from "./find"
 import { fuzzyMatch, rankFiles } from "./palette"
@@ -3037,12 +3038,15 @@ async function exportAs(to: string) {
     const lines = problemLines(path, problems)
     const choice = problems.map((p) => p.nowhere && keyChoices(p.nowhere)[0])
     choice.slice(0, lines.length).forEach((k, i) => { if (k) lines[i] += `. Did you mean ${k}?` })
+    const errFixes = problems.map((p) => (p.diag ? errorFix(p.diag) : null))
+    errFixes.slice(0, lines.length).forEach((f, i) => { if (f) lines[i] += `. ${f.label}?` })
     const more = elsewhere(path, compileMain, nowhere)
     if (more) lines.push(`${more} more reference${more > 1 ? "s" : ""} point${more > 1 ? "" : "s"} nowhere in other files (see Labels).`)
     const n = problems.length
     const fix = choice[0] // the first problem is a broken key with a likely fix: offer it where "Go to first problem" would be
-    const answer = await ask(`${baseName(path)} has ${n} problem${n > 1 ? "s" : ""}`, lines.join("\n"), "Export anyway", undefined, fix ? `Fix ${problems[0].nowhere!.key} to ${fix}` : "Go to first problem")
-    if (answer === "extra") fix ? applyKeyFix(problems[0].nowhere!, fix) : goTo(problems[0].path, problems[0].line, problems[0].col, problems[0].utf16)
+    const errFix = errFixes[0]
+    const answer = await ask(`${baseName(path)} has ${n} problem${n > 1 ? "s" : ""}`, lines.join("\n"), "Export anyway", undefined, fix ? `Fix ${problems[0].nowhere!.key} to ${fix}` : errFix ? errFix.label : "Go to first problem")
+    if (answer === "extra") fix ? applyKeyFix(problems[0].nowhere!, fix) : errFix ? applyErrorFix(errFix) : goTo(problems[0].path, problems[0].line, problems[0].col, problems[0].utf16)
     if (answer !== "save") return
   }
   send({ type: "export", req: ++reqSeq, path, to })
@@ -3836,12 +3840,30 @@ function showDiagnosticAtCaret() {
     ta.removeAttribute("aria-describedby")
     return
   }
-  const html = `<strong>${esc(d.message)}</strong>${d.hints.map((h) => `<p>${esc(h)}</p>`).join("")}`
+  const fix = errorFix(d)
+  const html = `<strong>${esc(d.message)}</strong>${d.hints.map((h) => `<p>${esc(h)}</p>`).join("")}` +
+    (fix ? `<button type="button" class="btn secondary sm errfix" title="Alt+Enter">${esc(fix.label)}</button>` : "")
   if (card.innerHTML !== html) card.innerHTML = html
   ta.setAttribute("aria-describedby", "diagnostic-card")
   floatAt(card, ta.selectionStart, ta.selectionStart)
 }
 ta.addEventListener("blur", () => { $("diagnostic-card").hidden = true })
+// The card floats over the text: a press on its button must not take the caret out of the field, or the card would close first.
+$("diagnostic-card").addEventListener("mousedown", (e) => e.preventDefault())
+$("diagnostic-card").addEventListener("click", (e) => {
+  if (!(e.target as HTMLElement).closest(".errfix")) return
+  const d = compileDiagnostics.find((d) => d.path === current && d.line === lineOf(ta.selectionStart))
+  const fix = d && errorFix(d)
+  if (fix) applyErrorFix(fix)
+})
+ta.addEventListener("keydown", (e) => {
+  if (e.key !== "Enter" || !e.altKey || e.metaKey || e.ctrlKey || e.shiftKey || e.isComposing || mode !== "edit") return
+  const d = compileDiagnostics.find((d) => d.path === current && d.line === lineOf(ta.selectionStart))
+  const fix = d && errorFix(d)
+  if (!fix) return
+  e.preventDefault()
+  applyErrorFix(fix)
+})
 ta.addEventListener("keydown", (e) => { if (e.key === "Escape") $("diagnostic-card").hidden = true })
 ta.addEventListener("keydown", (e) => { if (e.key === "F2" && !e.isComposing && renameLabelAtCaret()) e.preventDefault() })
 
@@ -3938,11 +3960,11 @@ function goTo(path: string, line: number, col: number, utf16 = false, len = 0, t
 // Replace a key that points nowhere with the one the writer picked, as one undo step. In another file the file
 // opens first (the same save question as any file change) and the key is replaced once it is open; the page never
 // writes to a file it has not opened.
-let pendingFix: { n: Nowhere; key: string } | null = null
+let pendingFix: { path: string; run: () => void } | null = null
 function applyKeyFix(n: Nowhere, key: string) {
   if (!n) return
   if (n.path !== current) {
-    pendingFix = { n, key }
+    pendingFix = { path: n.path, run: () => applyKeyFix(n, key) }
     pendingJump = { path: n.path, line: n.line, col: n.col }
     leaveThen({ type: "open_file", path: n.path }).then((ok) => { if (!ok) pendingFix = null })
     return
@@ -3954,6 +3976,37 @@ function applyKeyFix(n: Nowhere, key: string) {
   const at = lineStarts[n.line] + span.from
   edit(at, lineStarts[n.line] + span.to, key)
   ta.setSelectionRange(at, at + key.length)
+}
+
+// The fix for a compile error, if one is certain. Command names the project defines come from the open file only.
+function errorFix(d: Diagnostic): ErrorFix | null {
+  const custom = d.path === current ? [...ta.value.matchAll(/\\(?:re)?newcommand\*?\s*\{?\\([A-Za-z@]+)|\\def\\([A-Za-z@]+)/g)].map((m) => m[1] ?? m[2]) : []
+  return fixFor(d, { main: compileMain, files, custom, suggest: suggestKeys })
+}
+
+// Apply a fix as one undo step. The file it belongs to opens first (the same save question as any file change) and the
+// text is read only once it is open; a stale position edits nothing.
+async function applyErrorFix(fix: ErrorFix) {
+  const target = fix.kind === "package" ? compileMain : fix.at.path
+  if (!target) return
+  if (target !== current) {
+    pendingFix = { path: target, run: () => applyErrorFix(fix) }
+    leaveThen({ type: "open_file", path: target }).then((ok) => { if (!ok) pendingFix = null })
+    return
+  }
+  if (ta.readOnly || leaving) return void toast("Wait a moment, then try again.")
+  if (mode === "review") setMode("edit")
+  if (fix.kind === "path" && fix.to === undefined) {
+    const r = await askPicture({ type: "pick_image" })
+    if (r.cancelled) return
+    if (r.error) return void toast(r.error)
+    if (current !== target || ta.readOnly) return void toast("You changed file, so the path was not replaced.")
+    fix = { ...fix, to: r.rel }
+  }
+  const c = planEdit(fix, ta.value)
+  if (!c) return void toast(fix.kind === "package" ? `${fix.pkg} is already loaded, or the preamble is not in ${baseName(target)}. Add it by hand.` : "That line has changed. Open it to fix by hand.")
+  edit(c.from, c.to, c.insert)
+  ta.setSelectionRange(c.from, c.from + c.insert.length)
 }
 
 function followCaret() {
@@ -4284,7 +4337,7 @@ function onMessage(msg: any) {
       if (pendingFix && !ta.readOnly) { // the file a fix waits for is open and typing is free again
         const fix = pendingFix
         pendingFix = null
-        if (fix.n.path === current) applyKeyFix(fix.n, fix.key)
+        if (fix.path === current) fix.run()
       }
       break
     case "label_renamed": {
