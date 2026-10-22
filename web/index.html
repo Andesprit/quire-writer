@@ -23,13 +23,25 @@
 
     <nav id="activitybar" aria-label="Views">
       <button class="activity active" id="act-explorer" title="Explorer (Cmd+Shift+E)"><i class="codicon codicon-files"></i></button>
+      <button class="activity" id="act-search" title="Search (Cmd+Shift+F)" aria-label="Search in project"><i class="codicon codicon-search"></i></button>
       <button class="activity" id="act-chat" title="Chat (Cmd+J)"><i class="codicon codicon-comment-discussion"></i></button>
       <div class="spacer"></div>
       <button class="activity" id="theme" title="Color theme" aria-haspopup="menu"><i class="codicon codicon-color-mode"></i></button>
     </nav>
 
     <aside id="sidebar" aria-label="Explorer">
-      <div class="pane-title">Explorer</div>
+      <div class="pane-title"><span id="pane-name">Explorer</span></div>
+      <div id="search-view" role="search" aria-label="Search in project">
+        <div class="find-field">
+          <input id="search-query" aria-label="Search in project" placeholder="Search" spellcheck="false" autocomplete="off" aria-describedby="search-count" />
+          <div class="find-options">
+            <button id="search-case" title="Match case" aria-label="Match case" aria-pressed="false">Aa</button>
+            <button id="search-word" title="Match whole word" aria-label="Match whole word" aria-pressed="false"><u>ab</u></button>
+          </div>
+        </div>
+        <div id="search-count" role="status" aria-live="polite" aria-atomic="true"></div>
+        <div id="search-results" role="listbox" aria-label="Results"></div>
+      </div>
       <div class="section-head">
         <i class="codicon codicon-chevron-down"></i>
         <span id="folder-name">No folder opened</span>

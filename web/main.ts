@@ -75,7 +75,11 @@ function setPanel(p: Panel, open: boolean) {
   app.classList.toggle(panels[p], !open)
   store.set(`panel.${p}`, open ? "1" : "0")
   $(`toggle-${p}`).setAttribute("aria-pressed", String(open))
-  if (p === "sidebar") $("act-explorer").classList.toggle("active", open)
+  if (p === "sidebar") {
+    const searching = sidebar.classList.contains("searching")
+    $("act-explorer").classList.toggle("active", open && !searching)
+    $("act-search").classList.toggle("active", open && searching)
+  }
   if (p === "chat") $("act-chat").classList.toggle("active", open)
   scheduleRender() // the text column may have changed width
 }
@@ -86,7 +90,19 @@ function openChat() {
   setPanel("chat", true)
   $("chat-input").focus()
 }
-$("toggle-sidebar").onclick = $("act-explorer").onclick = () => togglePanel("sidebar")
+const sidebar = $("sidebar")
+// The sidebar shows the explorer or the search results; its button leaves the search first.
+function showExplorer() {
+  sidebar.classList.remove("searching")
+  $("pane-name").textContent = "Explorer"
+  $("act-search").classList.remove("active")
+  $("act-explorer").classList.toggle("active", isOpen("sidebar"))
+}
+$("toggle-sidebar").onclick = $("act-explorer").onclick = () => {
+  if (sidebar.classList.contains("searching") && isOpen("sidebar")) showExplorer()
+  else togglePanel("sidebar")
+}
+$("act-search").onclick = () => (sidebar.classList.contains("searching") && isOpen("sidebar") ? setPanel("sidebar", false) : openSearch())
 $("toggle-preview").onclick = $("open-preview-side").onclick = () => togglePanel("preview")
 $("close-preview").onclick = () => setPanel("preview", false)
 $("toggle-chat").onclick = $("act-chat").onclick = $("close-chat").onclick = () => togglePanel("chat")
@@ -112,7 +128,10 @@ document.addEventListener(
     // Cmd+B and Cmd+I are bold and italic in the text; Chrome keeps Cmd+L for itself.
     if (key === "p") openPalette(e.shiftKey)
     else if (key === "s" && !e.shiftKey) flushSave(true)
-    else if (key === "e" && e.shiftKey) togglePanel("sidebar")
+    else if (key === "e" && e.shiftKey) {
+      if (sidebar.classList.contains("searching") && isOpen("sidebar")) showExplorer()
+      else togglePanel("sidebar")
+    } else if (key === "f" && e.shiftKey) openSearch()
     else if (key === "\\") togglePanel("preview")
     else if (key === "j" && !e.shiftKey) {
       if (isOpen("chat") && document.activeElement === $("chat-input")) {
@@ -564,7 +583,7 @@ function openFile(path: string, content: string, base: string | null) {
     previewing = target
     requestPreview(target)
   }
-  if (pendingJump?.path === path) goTo(path, pendingJump.line, pendingJump.col, pendingJump.utf16)
+  if (pendingJump?.path === path) goTo(path, pendingJump.line, pendingJump.col, pendingJump.utf16, pendingJump.len)
 }
 
 function closeFile(message?: string) {
@@ -2371,6 +2390,88 @@ const paletteList = $("quick-list")
 type QuickItem = { id: string; label: string; detail?: string; keys?: string; positions?: number[]; run: () => void }
 let quickItems: QuickItem[] = []
 let quickIndex = 0
+// ---------- search in the project ----------
+
+type SearchHit = { path: string; line: number; col: number; len: number; before: string; hit: string; after: string }
+const searchQuery = $("search-query") as HTMLInputElement
+const searchCase = $("search-case"), searchWord = $("search-word")
+let searchReq = 0 // the newest search: an older answer that comes later is dropped
+let searchHits: SearchHit[] = []
+let searchSel = 0
+let searchTimer = 0
+
+function openSearch() {
+  if (!root) return
+  setPanel("sidebar", true)
+  sidebar.classList.add("searching")
+  $("pane-name").textContent = "Search"
+  $("act-explorer").classList.remove("active")
+  $("act-search").classList.add("active")
+  const picked = ta.value.slice(ta.selectionStart, ta.selectionEnd)
+  if (picked && !picked.includes("\n") && document.activeElement === ta) searchQuery.value = picked
+  searchQuery.focus()
+  searchQuery.select()
+  runSearch()
+}
+
+function runSearch() {
+  clearTimeout(searchTimer)
+  if (!searchQuery.value) return showSearch(++searchReq, [], false)
+  const msg: Record<string, unknown> = { type: "search", req: ++searchReq, query: searchQuery.value, case: searchCase.getAttribute("aria-pressed") === "true", word: searchWord.getAttribute("aria-pressed") === "true" }
+  if (current) { msg.path = current; msg.content = ta.value } // the text as typed, not as last sent
+  send(msg)
+}
+
+function showSearch(req: number, hits: SearchHit[], more: boolean) {
+  if (req !== searchReq) return
+  searchHits = hits
+  searchSel = 0
+  const files = new Set(hits.map((h) => h.path)).size
+  const q = searchQuery.value
+  $("search-count").textContent = !q ? "" : !hits.length ? `No results for "${q}"`
+    : more ? `${hits.length}+ results: refine the search`
+    : `${hits.length} result${hits.length === 1 ? "" : "s"} in ${files} file${files === 1 ? "" : "s"}`
+  let html = "", last = ""
+  hits.forEach((h, i) => {
+    if (h.path !== last) {
+      last = h.path
+      const n = hits.filter((x) => x.path === h.path).length
+      html += `<div class="search-file" title="${esc(h.path)}"><span>${esc(h.path)}</span><em>${n}</em></div>`
+    }
+    html += `<button class="search-hit" role="option" tabindex="-1" data-i="${i}" aria-selected="${i === 0}">${esc(h.before.trimStart())}<mark>${esc(h.hit)}</mark>${esc(h.after)}</button>`
+  })
+  $("search-results").innerHTML = html
+}
+
+function selectHit(i: number) {
+  if (!searchHits.length) return
+  searchSel = (i + searchHits.length) % searchHits.length
+  for (const el of $("search-results").querySelectorAll<HTMLElement>(".search-hit")) {
+    const on = Number(el.dataset.i) === searchSel
+    el.setAttribute("aria-selected", String(on))
+    if (on) el.scrollIntoView({ block: "nearest" })
+  }
+}
+
+function openHit(i = searchSel) {
+  const h = searchHits[i]
+  if (h) goTo(h.path, h.line, h.col, true, h.len)
+}
+
+searchQuery.oninput = () => { clearTimeout(searchTimer); searchTimer = window.setTimeout(runSearch, 150) }
+for (const b of [searchCase, searchWord]) b.onclick = () => { b.setAttribute("aria-pressed", String(b.getAttribute("aria-pressed") !== "true")); runSearch(); searchQuery.focus() }
+searchQuery.addEventListener("keydown", (e) => {
+  if (e.isComposing) return
+  if (e.key === "ArrowDown" || e.key === "ArrowUp") { selectHit(searchSel + (e.key === "ArrowDown" ? 1 : -1)); e.preventDefault() }
+  else if (e.key === "Enter") { clearTimeout(searchTimer); if (searchReq && searchHits.length) openHit(); e.preventDefault() }
+  else if (e.key === "Escape") { if (current) ta.focus({ preventScroll: true }); e.preventDefault() }
+})
+$("search-results").onmousedown = (e) => e.preventDefault()
+$("search-results").onclick = (e) => {
+  const row = (e.target as HTMLElement).closest<HTMLElement>("[data-i]")
+  if (row) { selectHit(Number(row.dataset.i)); openHit() }
+}
+
 let quickOpener: HTMLElement | null = null
 let quickOpenerPath: string | undefined
 const commandKey = /Mac/i.test(navigator.platform) ? "⌘" : "Ctrl+"
@@ -2406,6 +2507,7 @@ function quickCommands(): QuickItem[] {
     ...THEMES.flatMap((t) => t === "-" ? [] : [{ id: "theme-" + t[0], label: "Color theme: " + t[1], run: () => { store.set("theme", t[0]); applyTheme() } }]),
   ]
   if (root) commands.push(
+    { id: "search", label: "Search in project…", keys: commandKey + "⇧F", run: openSearch },
     { id: "preview", label: "Toggle preview", keys: commandKey + "\\", run: click("toggle-preview") },
     { id: "new-file", label: "New file…", run: click("new-file") },
     { id: "new-folder", label: "New folder…", run: click("new-folder") },
@@ -2707,14 +2809,14 @@ ta.addEventListener("keydown", (e) => { if (e.key === "Escape") $("diagnostic-ca
 
 // ---------- preview sync: a click in the preview shows that text; the preview follows the caret ----------
 
-let pendingJump: { path: string; line: number; col: number; utf16?: boolean } | null = null
+let pendingJump: { path: string; line: number; col: number; utf16?: boolean; len?: number } | null = null
 let followed = "" // the caret line the preview last scrolled to
 let followTimer = 0
 
 // tinymist counts columns in characters; the text field counts UTF-16 units.
-function goTo(path: string, line: number, col: number, utf16 = false) {
+function goTo(path: string, line: number, col: number, utf16 = false, len = 0) {
   if (path !== current) {
-    pendingJump = { path, line, col, utf16 }
+    pendingJump = { path, line, col, utf16, len }
     leaveThen({ type: "open_file", path })
     return
   }
@@ -2724,7 +2826,7 @@ function goTo(path: string, line: number, col: number, utf16 = false) {
   const text = lineText(l)
   const pos = lineStarts[l] + (utf16 ? Math.min(col, text.length) : [...text].slice(0, col).join("").length)
   ta.focus({ preventScroll: true })
-  ta.setSelectionRange(pos, pos)
+  ta.setSelectionRange(pos, pos + len) // a search result selects the match
   const div = hl.children[l] as HTMLElement | undefined
   if (div) ta.scrollTop = Math.max(0, div.offsetTop - ta.clientHeight / 3)
   showDiagnosticAtCaret()
@@ -3071,6 +3173,9 @@ function onMessage(msg: any) {
       break
     case "cite_result":
       applyCite(msg)
+      break
+    case "search_result":
+      showSearch(msg.req, msg.hits, msg.more)
       break
     case "jump":
       followed = `${msg.path}:${msg.line}` // the preview is already there
