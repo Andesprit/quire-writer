@@ -1078,6 +1078,54 @@ $("tree").onclick = (e) => {
     leaveThen({ type: "open_file", path }).then((ok) => ok && innerWidth < 640 && setPanel("sidebar", false))
   }
 }
+// Dragging a row onto a folder moves it. Pointer events on the document, not HTML5 drag-and-drop: the
+// desktop window's own drag handler would swallow those, and a plain click must stay a click.
+let dragging = false
+const dropDir = (el: Element | null, from: string): string | null => {
+  const row = el?.closest<HTMLElement>(".row[data-path]")
+  const to = row ? (row.dataset.dir ? row.dataset.path! : null) : el?.closest("#folder-name, #tree") ? "" : null
+  if (to === null || to === parentOf(from) || to === from || to.startsWith(from + "/")) return null
+  return to
+}
+$("tree").addEventListener("pointerdown", (e) => {
+  const row = (e.target as HTMLElement).closest<HTMLElement>(".row[data-path]")
+  if (!row || e.button !== 0) return
+  const from = row.dataset.path!
+  const x = e.clientX, y = e.clientY
+  let target: Element | null = null
+  const mark = (to: string | null, el: Element | null) => {
+    target?.classList.remove("drop")
+    target = to === null ? null : (el?.closest(".row[data-dir]") ?? $("tree"))
+    target?.classList.add("drop")
+  }
+  const move = (m: PointerEvent) => {
+    if (!dragging && Math.hypot(m.clientX - x, m.clientY - y) < 4) return
+    dragging = true
+    const el = document.elementFromPoint(m.clientX, m.clientY)
+    mark(dropDir(el, from), el)
+  }
+  const end = (u: PointerEvent) => {
+    document.removeEventListener("pointermove", move)
+    document.removeEventListener("pointerup", end)
+    document.removeEventListener("keydown", esc, true)
+    const to = u.type === "pointerup" ? dropDir(document.elementFromPoint(u.clientX, u.clientY), from) : null
+    mark(null, null)
+    if (!dragging) return
+    // The click that follows the release must not open or toggle the row.
+    document.addEventListener("click", (c) => c.stopPropagation(), { capture: true, once: true })
+    setTimeout(() => (dragging = false))
+    if (to !== null) renameFile(from, joinPath(to, baseName(from)))
+  }
+  const esc = (k: KeyboardEvent) => {
+    if (k.key === "Escape" && dragging) {
+      k.preventDefault()
+      end(new PointerEvent("pointercancel"))
+    }
+  }
+  document.addEventListener("pointermove", move)
+  document.addEventListener("pointerup", end)
+  document.addEventListener("keydown", esc, true)
+})
 $("tree").addEventListener("keydown", (e) => {
   const el = e.target as HTMLElement
   if (el.id === "tree-input") {
