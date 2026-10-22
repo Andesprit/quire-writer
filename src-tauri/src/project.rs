@@ -186,6 +186,39 @@ fn blank_hidden(text: &str, lang: Lang) -> String {
     out + &text[at..]
 }
 
+/// Where `query` appears in the project's text, one literal match at a time: the file, the
+/// 0-based line, the UTF-16 column and length (as the editor counts), and the line around it.
+/// `texts` is the editor's text where there is one, so unsaved typing is searched.
+fn search(texts: &BTreeMap<String, String>, query: &str, case: bool, word: bool, cap: usize) -> (Vec<Value>, bool) {
+    let mut hits = Vec::new();
+    if query.is_empty() {
+        return (hits, false);
+    }
+    let found = Regex::new(&format!("(?{}u){}", if case { "" } else { "i" }, regex::escape(query))).unwrap();
+    let is_word = |c: char| c.is_alphanumeric() || c == '_';
+    for (path, text) in texts {
+        for (line, content) in text.split('\n').enumerate() {
+            let content = content.strip_suffix('\r').unwrap_or(content);
+            for m in found.find_iter(content) {
+                if word && (content[..m.start()].chars().next_back().is_some_and(is_word) || content[m.end()..].chars().next().is_some_and(is_word)) {
+                    continue;
+                }
+                if hits.len() == cap {
+                    return (hits, true);
+                }
+                let before: Vec<char> = content[..m.start()].chars().rev().take(40).collect();
+                hits.push(json!({
+                    "path": path, "line": line, "col": content[..m.start()].encode_utf16().count(),
+                    "len": m.as_str().encode_utf16().count(),
+                    "before": before.into_iter().rev().collect::<String>(),
+                    "hit": m.as_str(), "after": content[m.end()..].chars().take(100).collect::<String>(),
+                }));
+            }
+        }
+    }
+    (hits, false)
+}
+
 /// Every label defined in the Typst, LaTeX and Quarto files, and how many times it is used.
 fn labels(texts: &BTreeMap<String, String>) -> Vec<Value> {
     let (mut found, mut uses) = (vec![], HashMap::<String, u64>::new());
@@ -519,6 +552,13 @@ impl Workspace {
         send(json!({"type": "deleted", "path": rel}));
         send(self.state());
         Ok(())
+    }
+
+    /// `search` over the editor's text where it has one, else what editor and disk agree on.
+    fn find(&self, query: &str, case: bool, word: bool, cap: usize) -> (Vec<Value>, bool) {
+        let mut texts = self.known.clone();
+        texts.extend(self.typed_text.clone());
+        search(&texts, query, case, word, cap)
     }
 
     fn read(&self, rel: &str) -> Option<String> {
@@ -2196,6 +2236,10 @@ async fn handle(msg: &Value) -> Result<(), String> {
             let content = w.read(rel).ok_or_else(|| format!("Cannot open {rel}"))?;
             send(json!({"type": "file", "path": rel, "content": content, "baseline": w.baseline.get(rel)}));
         }
+        "search" => {
+            let (hits, more) = ws().find(f("query")?, msg["case"].as_bool().unwrap_or(false), msg["word"].as_bool().unwrap_or(false), 2000);
+            send(json!({"type": "search_result", "req": msg["req"], "hits": hits, "more": more}));
+        }
         "save" => {
             // Each save hears back by its `req`: the page keeps its text as unsaved until then.
             let ok = ws().save(f("path")?, f("content")?, opt("baseline").map(String::from))?;
@@ -2460,6 +2504,20 @@ mod tests {
         assert_eq!(fs::read_to_string(&html).unwrap(), want);
         assert_eq!((fs::read(&png).unwrap(), fs::read_to_string(&svg).unwrap()), (b"hi".to_vec(), "<svg>".into()));
         let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn search_finds_text_across_files() {
+        let mut w = Workspace { known: map(&[("a.typ", "Yeast rises\r\nno yeasty here, yeast".to_string()), ("b/c.tex", "caf\u{e9} \u{1F600} yeast".to_string()), ("d.md", "bread".to_string())]), ..Default::default() };
+        let cols = |(h, _): (Vec<Value>, bool)| h.iter().map(|x| (x["path"].as_str().unwrap().to_string(), x["line"].as_u64().unwrap(), x["col"].as_u64().unwrap())).collect::<Vec<_>>();
+        let all = cols(w.find("yeast", false, false, 99));
+        assert_eq!(all, [("a.typ".into(), 0, 0), ("a.typ".into(), 1, 3), ("a.typ".into(), 1, 16), ("b/c.tex".into(), 0, 8)]); // emoji counts 2 in UTF-16
+        assert_eq!(cols(w.find("yeast", true, false, 99)).len(), 3); // match case drops "Yeast"
+        assert_eq!(cols(w.find("yeast", false, true, 99)).len(), 3); // whole word drops "yeasty"
+        assert_eq!(w.find("yeast", false, false, 2), (w.find("yeast", false, false, 2).0, true)); // capped
+        assert!(w.find("", false, false, 9).0.is_empty() && w.find("zzz", false, false, 9).0.is_empty());
+        w.typed_text.insert("d.md".into(), "unsaved yeast".into()); // typed text wins over disk
+        assert_eq!(cols(w.find("yeast", false, false, 99)).last().unwrap(), &("d.md".to_string(), 0, 8));
     }
 
     #[test]
