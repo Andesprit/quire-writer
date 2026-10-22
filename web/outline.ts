@@ -47,3 +47,22 @@ export function outline(text: string, lang: Lang, headingOf: HeadingOf): Heading
   }
   return out
 }
+
+// What a writer should read as a heading's name. headingOf keeps the whole rest of a LaTeX
+// line ("Starter}\label{sec:a") because setHeading writes it back to keep the label, so this
+// is for display only: the first balanced brace group, and no trailing label.
+export function headingTitle(lang: Lang, raw: string): string {
+  let t = raw
+  if (lang === "latex") {
+    let depth = 0
+    for (let i = 0; i < t.length; i++) {
+      if (t[i] === "\\") i++
+      else if (t[i] === "{") depth++
+      else if (t[i] === "}" && --depth < 0) {
+        t = t.slice(0, i)
+        break
+      }
+    }
+  } else t = t.replace(/\s*(?:<[\w:.-]+>|\{#[\w:.-]+\})\s*$/, "")
+  return t.trim()
+}

@@ -8,6 +8,7 @@ import { highlightHTML, highlightLine, langOf, startState, sameState, type Lang,
 import { diagnosticRange, errorCount, missingTool, isCurrentDiagnostic, type Diagnostic, type DiagnosticBatch } from "./diagnostics"
 import { findMatches, replacementEdit, type Match } from "./find"
 import { fuzzyMatch, rankFiles } from "./palette"
+import { headingTitle, outline } from "./outline"
 import { diff, minimalChange, rebase, type Diff } from "./merge"
 import { $, ask, esc, fileIcon, icon, toast } from "./ui"
 import { FORMAT_KEYS, buildFormatBar, connectEditor, insertAt, select, setHeading, syntaxOf } from "./format"
@@ -127,7 +128,8 @@ document.addEventListener(
     if (!(e.metaKey || e.ctrlKey) || e.altKey) return
     const key = e.key.toLowerCase()
     // Cmd+B and Cmd+I are bold and italic in the text; Chrome keeps Cmd+L for itself.
-    if (key === "p") openPalette(e.shiftKey)
+    if (key === "p") openPalette(e.shiftKey ? ">" : "")
+    else if (key === "o" && e.shiftKey) openPalette("@")
     else if (key === "s" && !e.shiftKey) flushSave(true)
     else if (key === "e" && e.shiftKey) {
       if (sidebar.classList.contains("searching") && isOpen("sidebar")) showExplorer()
@@ -1052,6 +1054,8 @@ function renderLabels() {
     : `<p class="muted labels-empty">No labels yet. ${esc(LABEL_HINT[lang])}</p>`
 }
 
+$("breadcrumbs").onclick = (e) => { if ((e.target as HTMLElement).closest(".section-crumb")) openPalette("@") }
+
 $("labels-head").onclick = () => {
   store.set("labels", store.get("labels") === "closed" ? "open" : "closed")
   renderLabels()
@@ -1175,7 +1179,7 @@ const lineText = (n: number) => ta.value.slice(lineStarts[n], (lineStarts[n + 1]
 function currentHeading(): string | null {
   for (let n = lineOf(ta.selectionStart); n >= 0; n--) {
     const h = syntax()?.headingOf(lineText(n))
-    if (h) return h[1]
+    if (h) return headingTitle(lang, h[1])
   }
   return null
 }
@@ -1208,7 +1212,7 @@ function updateInfo() {
   const heading = currentHeading()
   if (heading) crumbs.push(heading)
   $("breadcrumbs").innerHTML = crumbs
-    .map((c, i) => (i ? icon("chevron-right") : "") + `<span class="crumb">${esc(c)}</span>`)
+    .map((c, i) => (i ? icon("chevron-right") : "") + (heading && i === crumbs.length - 1 ? `<button class="crumb section-crumb" title="Go to section">${esc(c)}</button>` : `<span class="crumb">${esc(c)}</span>`))
     .join("")
   renderChips()
 }
@@ -2419,7 +2423,7 @@ renderPreviewAs()
 const palette = $<HTMLDialogElement>("quick-input")
 const paletteQuery = $<HTMLInputElement>("quick-query")
 const paletteList = $("quick-list")
-type QuickItem = { id: string; label: string; detail?: string; keys?: string; positions?: number[]; run: () => void }
+type QuickItem = { id: string; label: string; dir?: string; indent?: number; score?: number; here?: boolean; detail?: string; keys?: string; positions?: number[]; run: () => void }
 let quickItems: QuickItem[] = []
 let quickIndex = 0
 // ---------- search in the project ----------
@@ -2548,6 +2552,8 @@ function quickCommands(): QuickItem[] {
     { id: "find", label: "Find in file", keys: commandKey + "F", run: click("open-find") },
     { id: "save", label: "Save file", keys: commandKey + "S", run: () => flushSave(true) },
   )
+  if (current && syntax()) commands.push({ id: "sections", label: "Go to section…", keys: commandKey + "⇧O", run: () => openPalette("@") })
+  if (root) commands.push({ id: "labels", label: "Go to label…", run: () => openPalette("#") })
   if (current && syntax()) commands.push({ id: "export", label: "Export document…", run: click("export") })
   if (previewing && files.includes(previewing)) for (const [as, label] of Object.entries(PREVIEW_AS)) commands.push({
     id: "preview-" + as, label: "Preview as " + label,
@@ -2563,17 +2569,58 @@ function markedText(text: string, positions: number[], offset = 0) {
   return Array.from(text, (c) => { const mark = matched.has(at); at += c.length; return mark ? "<mark>" + esc(c) + "</mark>" : esc(c) }).join("")
 }
 
+type QuickKind = "files" | "commands" | "sections" | "labels"
+let quickKind: QuickKind = "files"
+const QUICK = {
+  files: { title: "Open a file", aria: "Search project files", noun: "file", icon: (id: string) => fileIcon(id) },
+  commands: { title: "Run a command", aria: "Search commands", noun: "command", icon: () => icon("chevron-right") },
+  sections: { title: "Go to a section", aria: "Search sections of this file", noun: "section", icon: () => icon("list-tree") },
+  labels: { title: "Go to a label", aria: "Search labels in the project", noun: "label", icon: () => icon("tag") },
+}
+const QUICK_EMPTY: Record<QuickKind, () => string> = {
+  files: () => !root ? "Open a project to find its files. Type > for commands." : "No matching files. Try a file name or folder name.",
+  commands: () => "No matching commands. Try a different word.",
+  sections: () => !current || !syntax() ? "Open a Typst, LaTeX or Markdown file to see its sections." : "No matching sections. Try a word from the heading.",
+  labels: () => !root ? "Open a project to see its labels." : labels.length ? "No matching labels. Try a different word." : "No labels in this project yet. " + LABEL_HINT[lang],
+}
+
+// The text up to the first character picks the list: > commands, @ sections of this file,
+// # labels of the project, anything else files.
+function quickMode(raw: string): [QuickKind, string] {
+  const q = raw.trimStart()
+  const kind = ({ ">": "commands", "@": "sections", "#": "labels" } as Record<string, QuickKind>)[q[0]] ?? "files"
+  return [kind, kind === "files" ? raw : q.slice(1).trimStart()]
+}
+
 function renderPalette() {
   if (!palette.open) return
-  const commands = paletteQuery.value.trimStart().startsWith(">")
-  const query = commands ? paletteQuery.value.trimStart().slice(1).trimStart() : paletteQuery.value
-  $("quick-title").textContent = commands ? "Run a command" : "Open a file"
-  paletteQuery.setAttribute("aria-label", commands ? "Search commands" : "Search project files")
-  if (commands) quickItems = quickCommands().flatMap((c) => {
+  const [kind, query] = quickMode(paletteQuery.value)
+  quickKind = kind
+  const q = QUICK[kind]
+  $("quick-title").textContent = q.title
+  paletteQuery.setAttribute("aria-label", q.aria)
+  if (kind === "commands") quickItems = quickCommands().flatMap((c) => {
     const match = fuzzyMatch(c.label, query)
     return match ? [{ ...c, ...match }] : []
   }).sort((a, b) => b.score - a.score)
-  else {
+  else if (kind === "sections") {
+    const heads = current && syntax() ? outline(ta.value, lang, syntax()!.headingOf) : []
+    const caret = lineOf(ta.selectionStart)
+    const here = heads.filter((h) => h.line <= caret).length - 1
+    const items = heads.flatMap((h, i) => {
+      const title = headingTitle(lang, h.title)
+      const match = fuzzyMatch(title, query)
+      return match ? [{ id: "section-" + h.line, label: title, indent: h.level - 1, detail: i === here ? "Current" : "Line " + (h.line + 1), score: match.score, positions: match.positions, run: () => goTo(current!, h.line, 0), here: i === here }] : []
+    })
+    quickItems = query.trim() ? items.sort((a, b) => b.score - a.score) : items // document order when nothing is typed
+    if (!query.trim() && quickIndex === 0) quickIndex = Math.max(0, items.findIndex((i) => i.here))
+  } else if (kind === "labels") {
+    quickItems = labels.flatMap((l) => {
+      const match = fuzzyMatch(l.name, query)
+      return match ? [{ id: "label-" + l.path + ":" + l.line + ":" + l.name, label: l.name, dir: l.path, detail: l.refs ? `${l.refs} use${l.refs > 1 ? "s" : ""}` : "unused", score: match.score, positions: match.positions, run: () => goTo(l.path, l.line, l.col) }] : []
+    })
+    if (query.trim()) quickItems.sort((a, b) => b.score! - a.score!)
+  } else {
     const recent = recentFiles()
     const folder = root
     quickItems = rankFiles(files, query, recent).map((m) => ({
@@ -2589,16 +2636,18 @@ function renderPalette() {
   }
   quickIndex = Math.min(quickIndex, Math.max(0, quickItems.length - 1))
   paletteList.innerHTML = quickItems.map((item, i) => {
-    const start = commands ? 0 : item.label.lastIndexOf("/") + 1
+    const isFile = kind === "files"
+    const start = isFile ? item.label.lastIndexOf("/") + 1 : 0
     const name = markedText(item.label.slice(start), item.positions ?? [], start)
-    const directory = start ? markedText(item.label.slice(0, start - 1), item.positions ?? []) : ""
-    return '<div id="quick-option-' + i + '" role="option" aria-selected="' + (i === quickIndex) + '" data-index="' + i + '" class="quick-row" title="' + esc(item.label) + '">' +
-      (commands ? icon("chevron-right") : fileIcon(item.id)) + '<span class="quick-name">' + name + '</span>' +
+    const directory = isFile ? (start ? markedText(item.label.slice(0, start - 1), item.positions ?? []) : "") : esc(item.dir ?? "")
+    return '<div id="quick-option-' + i + '" role="option" aria-selected="' + (i === quickIndex) + '" data-index="' + i + '" class="quick-row" title="' + esc(item.dir ? item.label + " in " + item.dir : item.label) + '"' +
+      (item.indent ? ' style="padding-left:' + (8 + item.indent * 14) + 'px"' : "") + '>' +
+      q.icon(item.id) + '<span class="quick-name">' + name + '</span>' +
       (directory ? '<span class="quick-path">' + directory + '</span>' : "") + '<span class="quick-detail">' + esc(item.keys ?? item.detail ?? "") + '</span></div>'
   }).join("")
   $("quick-empty").hidden = !!quickItems.length
-  $("quick-empty").textContent = commands ? "No matching commands. Try a different word." : !root ? "Open a project to find its files. Type > for commands." : "No matching files. Try a file name or folder name."
-  $("quick-count").textContent = `${quickItems.length} ${commands ? "command" : "file"}${quickItems.length === 1 ? "" : "s"}`
+  $("quick-empty").textContent = QUICK_EMPTY[kind]()
+  $("quick-count").textContent = `${quickItems.length} ${q.noun}${quickItems.length === 1 ? "" : "s"}`
   selectQuickItem(quickIndex)
 }
 
@@ -2623,7 +2672,7 @@ function placePalette() {
   placePreview()
 }
 
-function openPalette(commands = false) {
+function openPalette(prefix = "") {
   if (document.querySelector("dialog[open]") && !palette.open) return
   if (!palette.open) {
     quickOpener = document.activeElement as HTMLElement | null
@@ -2634,7 +2683,7 @@ function openPalette(commands = false) {
     $("diagnostic-card").hidden = true
     palette.showModal()
   }
-  paletteQuery.value = commands ? ">" : ""
+  paletteQuery.value = prefix
   quickIndex = 0
   renderPalette()
   placePalette()
@@ -2654,7 +2703,7 @@ function closePalette(restore = true) {
 function runQuickItem(index = quickIndex) {
   const item = quickItems[index]
   if (!item) return
-  const commands = paletteQuery.value.trimStart().startsWith(">")
+  const commands = quickKind === "commands"
   closePalette()
   // Recheck availability: a file or build result may have changed while the list was open.
   if (commands) quickCommands().find((c) => c.id === item.id)?.run()
@@ -2675,7 +2724,8 @@ $("quick-close").onclick = () => closePalette()
 $("open-quick").onclick = () => openPalette()
 palette.addEventListener("keydown", (e) => {
   if (e.isComposing) return
-  if ((e.metaKey || e.ctrlKey) && e.key.toLowerCase() === "p") openPalette(e.shiftKey)
+  if ((e.metaKey || e.ctrlKey) && e.key.toLowerCase() === "p") openPalette(e.shiftKey ? ">" : "")
+  else if ((e.metaKey || e.ctrlKey) && e.shiftKey && e.key.toLowerCase() === "o") openPalette("@")
   else if (e.key === "ArrowDown" || e.key === "ArrowUp") {
     if (quickItems.length) selectQuickItem((quickIndex + (e.key === "ArrowDown" ? 1 : -1) + quickItems.length) % quickItems.length)
   } else if (e.key === "Enter" && e.target === paletteQuery) runQuickItem()

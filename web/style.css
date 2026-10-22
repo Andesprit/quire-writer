@@ -1175,3 +1175,5 @@ details.thought div { white-space: pre-wrap; margin-top: 4px; padding-left: 18px
 #compile-log pre { max-height: 140px; overflow: auto; white-space: pre-wrap; font-size: 11px; }
 #diagnostic-card { position: fixed; z-index: 25; max-width: min(380px, calc(100vw - 16px)); padding: 8px 10px; border: 1px solid var(--widget-border); border-left: 3px solid var(--danger); border-radius: 6px; background: var(--widget); color: var(--fg); box-shadow: var(--shadow); font-size: 12px; line-height: 1.5; pointer-events: none; }
 #diagnostic-card p { margin: 4px 0 0; color: var(--muted); }
+.breadcrumbs .section-crumb { background: none; border: 0; padding: 0; font: inherit; color: inherit; cursor: pointer; }
+.breadcrumbs .section-crumb:hover { text-decoration: underline; }
