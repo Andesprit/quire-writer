@@ -3081,8 +3081,20 @@ function applyInline(req: number, text: string) {
   goToChunk(0)
 }
 
-// ponytail: opens the bib at the top; the page does not hold its text, so the entry's line is unknown
-const showBib = (bib: string) => [{ label: "Show", run: () => void goTo(bib, 0, 0) }]
+// Opens the bib on the entry line for the key (the top when the key is not found). In another file the entry is
+// searched once the file is open, through pendingFix.
+const showBib = (bib: string, key = "") => [{
+  label: "Show",
+  run: () => {
+    const entry = () => {
+      const at = key ? ta.value.indexOf("{" + key + ",") : -1
+      void goTo(bib, at < 0 ? 0 : ta.value.slice(0, at).split("\n").length - 1, 0)
+    }
+    if (bib === current) return entry()
+    pendingFix = { path: bib, run: entry }
+    void goTo(bib, 0, 0).then((ok) => { if (!ok) pendingFix = null })
+  },
+}]
 
 function applyCite(msg: { req: number; key: string; bib: string; linked: boolean; added: boolean; wanted?: string }) {
   if (inlineWant?.req !== msg.req) return
@@ -3093,7 +3105,7 @@ function applyCite(msg: { req: number; key: string; bib: string; linked: boolean
       return
     }
     closeInline()
-    return void toast(msg.added ? `Added ${msg.key} to ${msg.bib}.` : `${msg.key} is already in ${msg.bib}.`, "info", showBib(msg.bib))
+    return void toast(msg.added ? `Added ${msg.key} to ${msg.bib}.` : `${msg.key} is already in ${msg.bib}.`, "info", showBib(msg.bib, msg.key))
   }
   box.hidden = true
   inlineWant = null
@@ -3107,7 +3119,7 @@ function applyCite(msg: { req: number; key: string; bib: string; linked: boolean
     markdown: `Add "bibliography: ${msg.bib}" to the YAML header.`,
     text: "",
   }[lang]
-  toast((msg.added ? `Added ${msg.key} to ${msg.bib}.` : `${msg.key} is already in ${msg.bib}.`) + (msg.linked ? "" : ` ${link}`), "info", showBib(msg.bib))
+  toast((msg.added ? `Added ${msg.key} to ${msg.bib}.` : `${msg.key} is already in ${msg.bib}.`) + (msg.linked ? "" : ` ${link}`), "info", showBib(msg.bib, msg.key))
 }
 
 // ---------- export: the whole document as PDF, Word or another format ----------
