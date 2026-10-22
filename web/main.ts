@@ -1045,7 +1045,7 @@ function renderLabels() {
   $("labels-head").setAttribute("aria-expanded", String(open))
   $("labels-head").querySelector(".codicon")!.className = `codicon codicon-chevron-${open ? "down" : "right"}`
   $("labels-count").textContent = [
-    nowhere.length && `${nowhere.length} point${nowhere.length > 1 ? "" : "s"} nowhere`,
+    nowhere.length && `${nowhere.length} reference${nowhere.length > 1 ? "s point" : " points"} nowhere`,
     unused && `${unused} unused`,
   ].filter(Boolean).join(", ")
   $("labels").classList.toggle("closed", !open)
@@ -1139,6 +1139,9 @@ function resetForFolder(newRoot: string) {
   naming = null
   collapsed.clear()
   changed.clear()
+  clearTimeout(refreshTimer)
+  searchQuery.value = ""
+  showSearch(++searchReq, [], false)
   onFolderOpened(baseName(newRoot.replace(/\/$/, "")))
 }
 
@@ -2165,8 +2168,8 @@ function openFind(replace = false) {
   findBox.hidden = false
   if (replace) toggleFindReplace(true)
   refreshFind(true)
-  findQuery.focus()
-  findQuery.select()
+  if (replace && findQuery.value) { findReplacement.focus(); findReplacement.select() } // the query is there: next is the replacement
+  else { findQuery.focus(); findQuery.select() }
 }
 
 function closeFind(focus = true) {
@@ -2223,6 +2226,7 @@ document.addEventListener("keydown", (e) => {
   if (mod && (key === "f" || e.code === "KeyF") && !e.shiftKey) openFind(e.altKey)
   else if (mod && key === "g" && !e.altKey) stepFind(e.shiftKey ? -1 : 1)
   else if (!findBox.hidden && e.key === "Escape") closeFind()
+  else if (e.key === "Tab" && !$("find-replace-row").hidden && !findBox.hidden && !e.metaKey && !e.ctrlKey && !e.altKey && e.target === (e.shiftKey ? findReplacement : findQuery)) (e.shiftKey ? findQuery : findReplacement).focus()
   else if (!findBox.hidden && (e.target === findQuery || e.target === findReplacement) && e.key === "Enter") {
     if (e.target === findReplacement && !e.shiftKey) replaceFind(false)
     else stepFind(e.shiftKey ? -1 : 1)
@@ -2403,7 +2407,7 @@ async function exportAs(to: string) {
     if (more) lines.push(`${more} more reference${more > 1 ? "s" : ""} point${more > 1 ? "" : "s"} nowhere in other files (see Labels).`)
     const n = problems.length
     const answer = await ask(`${baseName(path)} has ${n} problem${n > 1 ? "s" : ""}`, lines.join("\n"), "Export anyway", undefined, "Go to first problem")
-    if (answer === "extra") goTo(problems[0].path, problems[0].line, problems[0].col, true)
+    if (answer === "extra") goTo(problems[0].path, problems[0].line, problems[0].col, problems[0].utf16)
     if (answer !== "save") return
   }
   send({ type: "export", req: ++reqSeq, path, to })
@@ -2465,6 +2469,19 @@ let searchReq = 0 // the newest search: an older answer that comes later is drop
 let searchHits: SearchHit[] = []
 let searchSel = 0
 let searchTimer = 0
+let searchKeep = "" // path:line:col of the row to stay on when a refreshed search answers
+let refreshTimer = 0
+
+// The project changed under an open Search view: ask again, so a row never points at a moved line.
+function refreshSearch() {
+  clearTimeout(refreshTimer)
+  if (!sidebar.classList.contains("searching") || !isOpen("sidebar") || !searchQuery.value) return
+  refreshTimer = window.setTimeout(() => {
+    const h = searchHits[searchSel]
+    searchKeep = h ? `${h.path}:${h.line}:${h.col}` : ""
+    runSearch()
+  }, 300)
+}
 
 function openSearch() {
   if (!root) return
@@ -2483,6 +2500,7 @@ function openSearch() {
 function runSearch() {
   clearTimeout(searchTimer)
   if (!searchQuery.value) return showSearch(++searchReq, [], false)
+  if (!searchQuery.value) searchKeep = ""
   const msg: Record<string, unknown> = { type: "search", req: ++searchReq, query: searchQuery.value, case: searchCase.getAttribute("aria-pressed") === "true", word: searchWord.getAttribute("aria-pressed") === "true" }
   if (current) { msg.path = current; msg.content = ta.value } // the text as typed, not as last sent
   send(msg)
@@ -2491,7 +2509,8 @@ function runSearch() {
 function showSearch(req: number, hits: SearchHit[], more: boolean) {
   if (req !== searchReq) return
   searchHits = hits
-  searchSel = 0
+  searchSel = Math.max(0, hits.findIndex((h) => `${h.path}:${h.line}:${h.col}` === searchKeep))
+  searchKeep = ""
   const files = new Set(hits.map((h) => h.path)).size
   const q = searchQuery.value
   $("search-count").textContent = !q ? "" : !hits.length ? `No results for "${q}"`
@@ -2504,7 +2523,7 @@ function showSearch(req: number, hits: SearchHit[], more: boolean) {
       const n = hits.filter((x) => x.path === h.path).length
       html += `<div class="search-file" title="${esc(h.path)}"><span>${esc(h.path)}</span><em>${n}</em></div>`
     }
-    html += `<button class="search-hit" role="option" tabindex="-1" data-i="${i}" aria-selected="${i === 0}">${esc(h.before.length > 24 ? "…" + h.before.slice(-24) : h.before.trimStart())}<mark>${esc(h.hit)}</mark>${esc(h.after)}</button>`
+    html += `<button class="search-hit" role="option" tabindex="-1" data-i="${i}" aria-selected="${i === searchSel}">${esc(h.before.length > 24 ? "…" + h.before.slice(-24) : h.before.trimStart())}<mark>${esc(h.hit)}</mark>${esc(h.after)}</button>`
   })
   $("search-results").innerHTML = html
 }
@@ -3098,6 +3117,7 @@ function onMessage(msg: any) {
       if (selected && !files.includes(selected) && !dirs.includes(selected)) selected = null
       renderTree()
       renderLabels()
+      refreshSearch()
       renderTab()
       renderReviewStatus()
       renderAgentStatus()
