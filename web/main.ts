@@ -1350,13 +1350,16 @@ function keyChoices(n: Nowhere): string[] {
 }
 
 // A citation with no similar key can still be added from its DOI, under the key the text already uses.
+// Typst writes a citation like a reference (@key), so its "ref" rows may be citations; LaTeX \ref never is.
+const canAddFromDoi = (n: Nowhere) => n.kind === "cite" || langOf(n.path) === "typst"
+
 function doiButton(n: Nowhere, i: number): string {
-  return n.kind === "cite" ? `<button class="fix" data-doi="${i}" title="Look up a paper and add it to the bibliography as ${esc(n.key)}">Add from DOI…</button>` : ""
+  return canAddFromDoi(n) ? `<button class="fix" data-doi="${i}" title="Look up a paper and add it to the bibliography as ${esc(n.key)}">Add from DOI…</button>` : ""
 }
 
 function fixRow(n: Nowhere, i: number): string {
   const [top, ...more] = keyChoices(n)
-  if (!top) return `<div class="fixes"><span class="muted">No similar ${n.kind === "cite" ? "citation" : "label"}</span>${doiButton(n, i)}</div>`
+  if (!top) return `<div class="fixes"><span class="muted">No similar ${n.kind === "cite" ? "citation" : langOf(n.path) === "typst" ? "label or citation" : "label"}</span>${doiButton(n, i)}</div>`
   return `<div class="fixes"><button class="fix" data-fix="${i}" data-key="${esc(top)}" title="Replace ${esc(n.key)} with ${esc(top)}">Did you mean ${esc(top)}?</button>` +
     more.map((k) => `<button class="fix alt" data-fix="${i}" data-key="${esc(k)}" title="Replace ${esc(n.key)} with ${esc(k)}">${esc(k)}</button>`).join("") + "</div>"
 }
@@ -3938,7 +3941,7 @@ function renderProblems() {
     const fix = p.diag ? errorFix(p.diag) : null
     const key = p.nowhere ? keyChoices(p.nowhere)[0] : undefined
     html += `<div class="problems-item"><button type="button" class="problems-row" data-i="${i}" title="Go to this problem"><span class="problems-line">Line ${p.line + 1}</span> ${esc(p.text)}</button>` +
-      (fix ? `<button type="button" class="fix" data-i="${i}" data-fix="1">${esc(fix.label)}</button>` : key ? `<button type="button" class="fix" data-i="${i}" data-fix="1">Did you mean ${esc(key)}?</button>` : p.nowhere?.kind === "cite" ? `<button type="button" class="fix" data-i="${i}" data-doi="1">Add from DOI…</button>` : "") + "</div>"
+      (fix ? `<button type="button" class="fix" data-i="${i}" data-fix="1">${esc(fix.label)}</button>` : key ? `<button type="button" class="fix" data-i="${i}" data-fix="1">Did you mean ${esc(key)}?</button>` : p.nowhere && canAddFromDoi(p.nowhere) ? `<button type="button" class="fix" data-i="${i}" data-doi="1">Add from DOI…</button>` : "") + "</div>"
   })
   box.innerHTML = html
   if (had >= 0) (box.querySelectorAll("button")[Math.min(had, box.querySelectorAll("button").length - 1)] as HTMLElement | undefined)?.focus()
