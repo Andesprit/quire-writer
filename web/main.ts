@@ -1025,6 +1025,10 @@ $("collapse-all").onclick = () => {
 // ---------- labels: every <label> in the project, and which ones nothing refers to ----------
 
 let labels: { name: string; path: string; line: number; col: number; refs: number }[] = []
+// Uses of a label or citation key that match nothing in the project.
+type Nowhere = { kind: "ref" | "cite"; key: string; path: string; line: number; col: number }
+let nowhere: Nowhere[] = []
+const NOWHERE_HINT = "Citations are judged only when a bibliography (.bib) is found in the project."
 const LABEL_HINT: Record<Lang, string> = {
   typst: "Put <name> after a heading, figure or equation, then refer to it with @name.",
   latex: "Put \\label{name} in a section, figure or equation, then refer to it with \\ref{name}.",
@@ -1039,9 +1043,19 @@ function renderLabels() {
   $("labels-head").hidden = $("labels").hidden = !root
   $("labels-head").setAttribute("aria-expanded", String(open))
   $("labels-head").querySelector(".codicon")!.className = `codicon codicon-chevron-${open ? "down" : "right"}`
-  $("labels-count").textContent = unused ? `${unused} unused` : ""
+  $("labels-count").textContent = [
+    nowhere.length && `${nowhere.length} point${nowhere.length > 1 ? "" : "s"} nowhere`,
+    unused && `${unused} unused`,
+  ].filter(Boolean).join(", ")
   $("labels").classList.toggle("closed", !open)
-  $("labels").innerHTML = labels.length
+  const broken = nowhere.length
+    ? `<div class="labels-group" title="${esc(NOWHERE_HINT)}">Points nowhere</div>` +
+      nowhere.map((n, i) =>
+        `<button class="row label broken" data-m="${i}" title="${esc(`${n.path}, line ${n.line + 1}. No ${n.kind === "cite" ? "citation" : "label"} named ${n.key}. ${NOWHERE_HINT}`)}">` +
+        `${icon("warning")}<span class="name">${esc(n.key)}</span>` +
+        `<span class="refs">${n.kind === "cite" ? "citation" : "reference"} · ${esc(n.path.split("/").pop()!)}:${n.line + 1}</span></button>`).join("")
+    : ""
+  $("labels").innerHTML = broken + (labels.length
     ? labels
         .map(
           (l, i) =>
@@ -1051,7 +1065,7 @@ function renderLabels() {
             `<span class="refs">${l.refs ? `${l.refs} use${l.refs > 1 ? "s" : ""}` : "unused"}</span></button>`,
         )
         .join("")
-    : `<p class="muted labels-empty">No labels yet. ${esc(LABEL_HINT[lang])}</p>`
+    : nowhere.length ? "" : `<p class="muted labels-empty">No labels yet. ${esc(LABEL_HINT[lang])}</p>`)
 }
 
 $("breadcrumbs").onclick = (e) => { if ((e.target as HTMLElement).closest(".section-crumb")) openPalette("@") }
@@ -1061,7 +1075,8 @@ $("labels-head").onclick = () => {
   renderLabels()
 }
 $("labels").onclick = (e) => {
-  const l = labels[Number((e.target as HTMLElement).closest<HTMLElement>(".row[data-i]")?.dataset.i)]
+  const row = (e.target as HTMLElement).closest<HTMLElement>(".row")
+  const l = row?.dataset.m ? nowhere[Number(row.dataset.m)] : labels[Number(row?.dataset.i)]
   if (l) goTo(l.path, l.line, l.col)
 }
 
@@ -2615,11 +2630,18 @@ function renderPalette() {
     quickItems = query.trim() ? items.sort((a, b) => b.score - a.score) : items // document order when nothing is typed
     if (!query.trim() && quickIndex === 0) quickIndex = Math.max(0, items.findIndex((i) => i.here))
   } else if (kind === "labels") {
+    const broken = nowhere.flatMap((n) => {
+      const match = fuzzyMatch(n.key, query)
+      return match ? [{ id: "missing-" + n.path + ":" + n.line + ":" + n.col, label: n.key, dir: n.path, detail: "points nowhere", score: match.score, positions: match.positions, run: () => goTo(n.path, n.line, n.col) }] : []
+    })
     quickItems = labels.flatMap((l) => {
       const match = fuzzyMatch(l.name, query)
       return match ? [{ id: "label-" + l.path + ":" + l.line + ":" + l.name, label: l.name, dir: l.path, detail: l.refs ? `${l.refs} use${l.refs > 1 ? "s" : ""}` : "unused", score: match.score, positions: match.positions, run: () => goTo(l.path, l.line, l.col) }] : []
     })
-    if (query.trim()) quickItems.sort((a, b) => b.score! - a.score!)
+    if (query.trim()) {
+      quickItems.push(...broken)
+      quickItems.sort((a, b) => b.score! - a.score!)
+    } else quickItems.unshift(...broken) // broken keys first when nothing is typed
   } else {
     const recent = recentFiles()
     const folder = root
@@ -3042,6 +3064,7 @@ function onMessage(msg: any) {
       dirs = msg.dirs ?? []
       changed = new Set(msg.changed)
       labels = msg.labels ?? []
+      nowhere = msg.missing ?? []
       if (selected && !files.includes(selected) && !dirs.includes(selected)) selected = null
       renderTree()
       renderLabels()

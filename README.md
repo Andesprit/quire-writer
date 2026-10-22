@@ -52,7 +52,9 @@ autocomplete, your own agent, Grammarly, themes, and how Quire compares with VS 
   - The export button next to them saves the document in the format the preview shows.
 - Labels: a list under the explorer of every label in the project (Typst `<name>`, LaTeX
   `\label{name}`, Quarto `{#sec-name}`), how often it is used, and which ones nothing refers
-  to. Click one to go to it.
+  to. Click one to go to it. Uses that match no label (or, when a `.bib` file is found, no
+  citation key) are listed at the top as "Points nowhere"; citations are judged only when a
+  bibliography is found.
 - Cite by DOI or arXiv ID (formatting bar): adds the paper to your `.bib` file and the
   citation at the cursor (`@key`, `\cite{key}` or `[@key]`). Needs the internet (doi.org).
 - Export (button at the right of the file tab): the whole document as PDF or Word, or as

@@ -375,6 +375,8 @@ body.resizing { cursor: ew-resize; user-select: none; }
 .row.label .codicon[class] { color: var(--syn-label); }
 .row.label .refs { flex: none; font-size: 11px; color: var(--muted); }
 .row.label.unused .refs { color: var(--warn); }
+.labels-group { padding: 4px 20px 2px; font-size: 11px; text-transform: uppercase; letter-spacing: .04em; color: var(--warn); }
+.row.label.broken .codicon[class] { color: var(--warn); }
 .labels-empty { margin: 4px 20px 8px; line-height: 1.5; }
 
 .empty-pane { padding: 12px 20px; }
