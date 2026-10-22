@@ -809,6 +809,18 @@ impl Workspace {
         }
     }
 
+    /// The answer to the Figure button once the chooser closed: no choice is a Cancel, which
+    /// changes nothing and is not an error; a choice is imported like a dropped picture.
+    fn picked_image(&mut self, req: &Value, open: &str, choice: Option<String>) -> Value {
+        match choice {
+            None => json!({"type": "image_added", "req": req, "cancelled": true}),
+            Some(from) => {
+                let added = self.import_image(&from);
+                self.image_reply(req, open, added)
+            }
+        }
+    }
+
     fn rename(&mut self, old: &str, new: &str) -> Result<(), String> {
         let (old, new) = (self.norm(old)?, self.norm(new)?);
         let (src, dst) = (self.path(&old)?, self.path(&new)?);
@@ -2497,6 +2509,30 @@ async fn pick_folder(prompt: &str) -> Option<String> {
     }
 }
 
+/// The Figure button's chooser. None is Cancel. On the Mac osascript's "User canceled" (-128)
+/// is the only quiet exit; any other failure is reported. Elsewhere the app's own dialog does.
+async fn pick_image() -> Result<Option<String>, String> {
+    #[cfg(target_os = "macos")]
+    {
+        let out = Command::new("osascript")
+            .args(["-e", r#"POSIX path of (choose file of type {"public.image", "com.adobe.pdf"} with prompt "Choose a picture to add")"#])
+            .output()
+            .await
+            .map_err(|e| format!("The picture chooser could not open. {}", err(e)))?;
+        if out.status.success() {
+            return Ok(Some(String::from_utf8_lossy(&out.stdout).trim().to_string()).filter(|p| !p.is_empty()));
+        }
+        let why = String::from_utf8_lossy(&out.stderr);
+        if why.contains("-128") { Ok(None) } else { Err("The picture chooser could not open. Drop the picture on the editor instead.".into()) }
+    }
+    #[cfg(not(target_os = "macos"))]
+    {
+        use tauri_plugin_dialog::DialogExt;
+        let app = APP.get().ok_or("The picture chooser could not open. Drop the picture on the editor instead.")?;
+        Ok(app.dialog().file().set_title("Choose a picture to add").add_filter("Pictures", &["png", "jpg", "jpeg", "gif", "svg", "webp", "pdf"]).blocking_pick_file().and_then(|f| f.into_path().ok().map(|p| page(&p))))
+    }
+}
+
 /// The kinds of new project: id, name, starter file and its text.
 const TEMPLATES: [(&str, &str, &str, &str); 4] = [
     ("typst", "Typst", "main.typ", include_str!("../templates/main.typ")),
@@ -2590,7 +2626,7 @@ async fn send_apple() {
 
 // Messages that read or write files. Each carries the folder the page is showing, so a
 // page still showing another folder can never write into this one.
-const FILE_OPS: [&str; 16] = ["import_image", "paste_image", "open_file", "save", "typed", "review", "create", "rename", "rename_label", "replace_in_project", "undo_operation", "delete", "preview", "restore", "cite", "export"];
+const FILE_OPS: [&str; 17] = ["pick_image", "import_image", "paste_image", "open_file", "save", "typed", "review", "create", "rename", "rename_label", "replace_in_project", "undo_operation", "delete", "preview", "restore", "cite", "export"];
 
 fn field<'a>(msg: &'a Value, key: &str) -> Result<&'a str, String> {
     msg[key].as_str().ok_or_else(|| format!("'{key}' is missing"))
@@ -2667,6 +2703,16 @@ async fn handle(msg: &Value) -> Result<(), String> {
             let mut w = ws();
             let added = w.import_image(f("from")?);
             send(w.image_reply(&msg["req"], f("path")?, added));
+        }
+        "pick_image" => {
+            // The chooser runs before the workspace is locked: it waits for the writer.
+            let choice = pick_image().await;
+            let mut w = ws();
+            let reply = match choice {
+                Ok(choice) => w.picked_image(&msg["req"], f("path")?, choice),
+                Err(error) => w.image_reply(&msg["req"], f("path")?, Err(error)),
+            };
+            send(reply);
         }
         "paste_image" => {
             let mut w = ws();
@@ -3371,6 +3417,22 @@ mod tests {
         assert_eq!(r(&w, "latex/ch/one.tex", ok("latex/figures/a.png"))["rel"], "figures/a.png"); // from main.tex, not one.tex
         assert_eq!(r(&w, "latex/main.tex", ok("figures/a.png"))["rel"], "../figures/a.png");
         assert_eq!(r(&w, "main.typ", Err("nope".into()))["error"], "nope");
+        // The Figure button: a choice outside the project is copied, inside it is referenced,
+        // Cancel writes nothing and is not an error.
+        #[cfg(unix)]
+        fs::remove_file(root.join("figures")).unwrap(); // the link from above
+        fs::write(out.join("pick.png"), "x").unwrap();
+        let mut w = Workspace { root: Some(root.clone()), ..Default::default() };
+        let picked = w.picked_image(&json!(3), "chap/a.typ", Some(out.join("pick.png").to_str().unwrap().to_string()));
+        assert_eq!((picked["path"].as_str(), picked["rel"].as_str(), picked["copied"].as_bool()), (Some("figures/pick.png"), Some("../figures/pick.png"), Some(true)));
+        assert!(root.join("figures/pick.png").exists());
+        let picked = w.picked_image(&json!(4), "main.typ", Some(inside.clone()));
+        assert_eq!((picked["path"].as_str(), picked["copied"].as_bool()), (Some("img/a.png"), Some(false)));
+        let before = fs::read_dir(root.join("figures")).unwrap().count();
+        let cancelled = w.picked_image(&json!(5), "main.typ", None);
+        assert_eq!(cancelled, json!({"type": "image_added", "req": 5, "cancelled": true}));
+        assert_eq!(fs::read_dir(root.join("figures")).unwrap().count(), before);
+        assert!(w.picked_image(&json!(6), "main.typ", Some("/tmp/notes.txt".into()))["error"].is_string());
         if let Ok(out) = std::env::var("QUIRE_DUMP") {
             let replies = json!({
                 "typst": r(&w, "main.typ", ok("figures/results.png")),
