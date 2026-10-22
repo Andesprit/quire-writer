@@ -2598,6 +2598,7 @@ mod tests {
                 json!({"type": "folder", "labels": labels, "missing": missing})
             };
             fs::write(format!("{dir}/planted.json"), state(&texts).to_string()).unwrap();
+            fs::write(format!("{dir}/planted-files.json"), json!(texts).to_string()).unwrap();
             let mut fixed = texts.clone();
             fixed.insert("main.typ".into(), texts["main.typ"].replace("@nowhere", "@timeline"));
             fs::write(format!("{dir}/planted-fixed.json"), state(&fixed).to_string()).unwrap();
