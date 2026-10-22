@@ -19,3 +19,17 @@ assert.equal(elsewhere("main.typ", "main.typ", [n("main.typ", 1), n("ch1.typ", 2
 assert.equal(elsewhere("main.typ", null, [n("ch1.typ", 2)]), 0, "not the compiled main")
 assert.deepEqual(both.map((p) => p.utf16), [true, false], "compile errors count UTF-16, references characters")
 console.log("preflight ok")
+
+import { projectProblems, stepProblem } from "./preflight.ts"
+const all = projectProblems([d("b.typ", 4), d("a.typ", 9), d("a.typ", 9, "dup")], false, [n("a.typ", 2), n("a.typ", 20)])
+assert.deepEqual(all.map((p) => p.path + ":" + p.line), ["a.typ:2", "a.typ:9", "a.typ:20", "b.typ:4"], "ordered by file then line, one error per line")
+assert.match(projectProblems([d("a.typ", 1)], true, [])[0].text, /possibly outdated/, "pending marks every row")
+const at = (path: string, line: number, dir: 1 | -1) => { const r = stepProblem(all, { path, line }, dir)!; return r.problem.path + ":" + r.problem.line + (r.wrapped ? "!" : "") }
+assert.equal(at("a.typ", 0, 1), "a.typ:2", "next from before the first")
+assert.equal(at("a.typ", 2, 1), "a.typ:9", "next skips the caret's own line")
+assert.equal(at("a.typ", 20, 1), "b.typ:4", "next crosses files")
+assert.equal(at("b.typ", 4, 1), "a.typ:2!", "next wraps")
+assert.equal(at("b.typ", 4, -1), "a.typ:20", "previous crosses files")
+assert.equal(at("a.typ", 2, -1), "b.typ:4!", "previous wraps")
+assert.equal(at("c.typ", 0, 1), "a.typ:2!", "a file with no problems after the last one wraps")
+assert.equal(stepProblem([], { path: "a.typ", line: 0 }, 1), undefined, "nothing to step to")
