@@ -452,7 +452,7 @@ async function leaveCurrent(): Promise<boolean> {
     }
     const error = await flushSave(true)
     answer = error
-      ? await ask(`${name} was not saved`, `${error} Your changes are still here. Save tries again. Don't Save drops them.`)
+      ? (await ask(`${name} was not saved`, `${error} Your changes are still here. Save tries again. Don't Save drops them.`)) || "cancel" // Escape stays
       : autosave && !holdSave ? "save" : ""
   }
   return true
