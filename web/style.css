@@ -1207,3 +1207,13 @@ body.errors-pending #compile-jump, body.errors-pending #sb-errors { opacity: 0.7
 .label-naming .twist { width: 14px; }
 .name-msg[hidden] { display: none; }
 #labels .name-msg { margin-left: 30px; }
+
+/* ---------- focus mode: only the text, a quiet counter and anything that needs attention ---------- */
+#app.focus { grid-template-columns: 0 0 0 minmax(0, 1fr) 0 0 0 0; }
+#app.focus #activitybar, #app.focus .tabs, #app.focus #format-bar, #app.focus #breadcrumbs { display: none; }
+#app.focus .layer { padding-left: max(24px, calc((100% - 70ch) / 2)); padding-right: max(24px, calc((100% - 70ch) / 2)); }
+#app.focus #statusbar { background: transparent; border-top-color: transparent; opacity: 0.45; transition: opacity 0.2s; }
+#app.focus #statusbar:hover, #app.focus #statusbar:focus-within { opacity: 1; }
+#app.focus #statusbar .item:not(#sb-words, #sb-errors, #sb-review) { display: none; }
+#app.focus #statusbar #sb-words { display: inline-flex; }
+#sb-words.reached::before { content: "\2713"; margin-right: 4px; color: var(--focus); }

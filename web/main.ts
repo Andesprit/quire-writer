@@ -14,6 +14,7 @@ import { diff, minimalChange, rebase, type Diff } from "./merge"
 import { $, ask, esc, fileIcon, icon, toast } from "./ui"
 import { FORMAT_KEYS, buildFormatBar, connectEditor, insertAt, select, setHeading, syntaxOf } from "./format"
 import { figureSnippet } from "./figure"
+import { MAX_GOAL, goalProgress, parseGoal, readGoal, type Goal } from "./goal"
 import { labelAt, labelProblem, nameProblem } from "./names"
 import { elsewhere, gatherProblems, problemLines } from "./preflight"
 import { changes, paragraphs, readFixes, type Fix } from "./suggest"
@@ -76,9 +77,14 @@ const panels = { sidebar: "no-sidebar", preview: "no-preview", chat: "no-chat" }
 type Panel = keyof typeof panels
 const defaults: Record<Panel, boolean> = { sidebar: true, preview: true, chat: false }
 
+// Focus mode closes the panels without touching the saved layout, so a reload or quit in it
+// comes back normal. Opening a panel by hand ends it.
+let focusSaved: Record<Panel, boolean> | null = null
+let leavingFocus = false
 function setPanel(p: Panel, open: boolean) {
+  if (open && focusSaved && !leavingFocus) toggleFocus()
   app.classList.toggle(panels[p], !open)
-  store.set(`panel.${p}`, open ? "1" : "0")
+  if (!focusSaved) store.set(`panel.${p}`, open ? "1" : "0")
   $(`toggle-${p}`).setAttribute("aria-pressed", String(open))
   if (p === "sidebar") {
     const searching = sidebar.classList.contains("searching")
@@ -90,6 +96,24 @@ function setPanel(p: Panel, open: boolean) {
 }
 const isOpen = (p: Panel) => !app.classList.contains(panels[p])
 const togglePanel = (p: Panel) => setPanel(p, !isOpen(p))
+function toggleFocus() {
+  const all = Object.keys(panels) as Panel[]
+  if (focusSaved) {
+    const saved = focusSaved
+    leavingFocus = true
+    for (const p of all) setPanel(p, saved[p]) // still in focus mode here: nothing is written
+    leavingFocus = false
+    focusSaved = null
+    app.classList.remove("focus")
+    ta.focus({ preventScroll: true })
+  } else {
+    focusSaved = { sidebar: isOpen("sidebar"), preview: isOpen("preview"), chat: isOpen("chat") }
+    for (const p of all) setPanel(p, false)
+    app.classList.add("focus")
+    if (current && mode === "edit") ta.focus({ preventScroll: true })
+  }
+  paintWords()
+}
 
 function openChat() {
   setPanel("chat", true)
@@ -131,7 +155,8 @@ document.addEventListener(
     if (!(e.metaKey || e.ctrlKey) || e.altKey) return
     const key = e.key.toLowerCase()
     // Cmd+B and Cmd+I are bold and italic in the text; Chrome keeps Cmd+L for itself.
-    if (key === "p") openPalette(e.shiftKey ? ">" : "")
+    if (key === "enter" && e.shiftKey) toggleFocus()
+    else if (key === "p") openPalette(e.shiftKey ? ">" : "")
     else if (key === "o" && e.shiftKey) openPalette("@")
     else if (key === "s" && !e.shiftKey) flushSave(true)
     else if (key === "e" && e.shiftKey) {
@@ -153,6 +178,20 @@ document.addEventListener(
   },
   true,
 )
+
+// Escape leaves focus mode only when nothing else wanted it. What is open is read before any
+// other handler runs (capture), because most of them close their thing without preventDefault.
+let escapeFree = false
+const OVERLAYS = ["find-box", "inline-box", "diagnostic-card", "rewrite-menu", "rewrite-card", "fix-card", "ref-list", "ctx-menu"]
+document.addEventListener("keydown", (e) => {
+  if (e.key === "Escape") escapeFree = !document.querySelector("dialog[open]") && !ghost && !cardMark && OVERLAYS.every((id) => $(id).hidden)
+}, true)
+document.addEventListener("keydown", (e) => {
+  if (e.key === "Escape" && focusSaved && escapeFree && !e.defaultPrevented && !e.isComposing && !e.metaKey && !e.ctrlKey && !e.altKey && !e.shiftKey) {
+    e.preventDefault()
+    toggleFocus()
+  }
+})
 
 for (const sash of document.querySelectorAll<HTMLElement>(".sash")) {
   sash.onpointerdown = (e) => {
@@ -1417,6 +1456,34 @@ function currentHeading(): string | null {
   return null
 }
 
+// A writing goal is kept per file: how many words it had when the goal was set.
+const goals = new Map<string, Goal>() // the same, in memory, for when storage is not available
+const goalKey = () => `goal.${root ?? ""}\n${current}`
+function currentGoal(): Goal | null {
+  if (!current) return null
+  const key = goalKey()
+  if (!goals.has(key)) { const g = readGoal(store.get(key)); if (g) goals.set(key, g) }
+  return goals.get(key) ?? null
+}
+function setGoal(n: number) {
+  if (!current) return
+  const g = { goal: n, start: countWords(ta.value) }
+  goals.set(goalKey(), g)
+  store.set(goalKey(), JSON.stringify(g))
+  paintWords(g.start)
+}
+let words = { total: 0, picked: 0 }
+function paintWords(total = words.total, picked = words.picked) {
+  words = { total, picked }
+  const g = currentGoal()
+  const p = g && goalProgress(g.start, total, g.goal)
+  const el = $("sb-words")
+  const goalText = p ? `${p.done.toLocaleString()} / ${g!.goal.toLocaleString()}` : ""
+  el.textContent = app.classList.contains("focus") && goalText ? goalText : `${total.toLocaleString()} words` + (picked ? ` (${picked.toLocaleString()} selected)` : "") + (goalText ? ` · ${goalText}` : "")
+  el.classList.toggle("reached", !!p?.reached)
+  el.title = p ? (p.reached ? "Writing goal reached" : "Words added to this file since you set the goal") : ""
+}
+
 let wordsTimer = 0
 function updateInfo() {
   document.documentElement.dataset.lang = current ? lang : "" // Quire Series colours by kind of file
@@ -1439,7 +1506,7 @@ function updateInfo() {
   wordsTimer = window.setTimeout(() => {
     const total = countWords(ta.value)
     const picked = ta.selectionEnd > ta.selectionStart ? countWords(ta.value.slice(ta.selectionStart, ta.selectionEnd)) : 0
-    $("sb-words").textContent = `${total.toLocaleString()} words` + (picked ? ` (${picked.toLocaleString()} selected)` : "")
+    paintWords(total, picked)
   }, 250)
   const crumbs = [...(root ? [root.split("/").filter(Boolean).pop()!] : []), ...current.split("/")]
   const heading = currentHeading()
@@ -2851,6 +2918,7 @@ function quickCommands(): QuickItem[] {
     { id: "open-project", label: "Open project…", run: click("open-folder") },
     { id: "new-project", label: "New project…", run: click("new-project") },
     { id: "sidebar", label: "Toggle explorer", keys: commandKey + "⇧E", run: click("toggle-sidebar") },
+    { id: "focus", label: "Toggle focus mode", keys: commandKey + "⇧↩", run: toggleFocus },
     { id: "chat", label: "Toggle chat", keys: commandKey + "J", run: () => { if (isOpen("chat")) setPanel("chat", false); else openChat() } },
     { id: "setup", label: "Check Setup…", run: () => send({ type: "check_setup" }) },
     { id: "autocomplete", label: "Turn autocomplete " + (acToggle.checked ? "off" : "on"), run: () => acToggle.click() },
@@ -2872,6 +2940,7 @@ function quickCommands(): QuickItem[] {
     { id: "new-folder", label: "New folder…", run: click("new-folder") },
   )
   if (current) commands.push(
+    { id: "goal", label: "Set writing goal…", run: () => { goalAsk = true; openPalette() } },
     { id: "find", label: "Find in file", keys: commandKey + "F", run: click("open-find") },
     { id: "save", label: "Save file", keys: commandKey + "S", run: () => flushSave(true) },
   )
@@ -2893,25 +2962,29 @@ function markedText(text: string, positions: number[], offset = 0) {
   return Array.from(text, (c) => { const mark = matched.has(at); at += c.length; return mark ? "<mark>" + esc(c) + "</mark>" : esc(c) }).join("")
 }
 
-type QuickKind = "files" | "commands" | "sections" | "labels"
+type QuickKind = "files" | "commands" | "sections" | "labels" | "goal"
 let quickKind: QuickKind = "files"
+let goalAsk = false // the list asks for a word goal instead of listing files
 let renamePick = false // the "#" list picks the label to rename instead of going to it
 const QUICK = {
   files: { title: "Open a file", aria: "Search project files", noun: "file", icon: (id: string) => fileIcon(id) },
   commands: { title: "Run a command", aria: "Search commands", noun: "command", icon: () => icon("chevron-right") },
   sections: { title: "Go to a section", aria: "Search sections of this file", noun: "section", icon: () => icon("list-tree") },
+  goal: { title: "Set a writing goal", aria: "Words to write in this file", noun: "goal", icon: () => icon("target") },
   labels: { title: "Go to a label", aria: "Search labels in the project", noun: "label", icon: () => icon("tag") },
 }
 const QUICK_EMPTY: Record<QuickKind, () => string> = {
   files: () => !root ? "Open a project to find its files. Type > for commands." : "No matching files. Try a file name or folder name.",
   commands: () => "No matching commands. Try a different word.",
   sections: () => !current || !syntax() ? "Open a Typst, LaTeX or Markdown file to see its sections." : "No matching sections. Try a word from the heading.",
+  goal: () => paletteQuery.value.trim() ? `Type a whole number from 1 to ${MAX_GOAL.toLocaleString()}, for example 500.` : "Type how many words you want to add to this file, for example 500.",
   labels: () => !root ? "Open a project to see its labels." : labels.length ? "No matching labels. Try a different word." : "No labels in this project yet. " + LABEL_HINT[lang],
 }
 
 // The text up to the first character picks the list: > commands, @ sections of this file,
 // # labels of the project, anything else files.
 function quickMode(raw: string): [QuickKind, string] {
+  if (goalAsk) return ["goal", raw]
   const q = raw.trimStart()
   const kind = ({ ">": "commands", "@": "sections", "#": "labels" } as Record<string, QuickKind>)[q[0]] ?? "files"
   return [kind, kind === "files" ? raw : q.slice(1).trimStart()]
@@ -2924,7 +2997,10 @@ function renderPalette() {
   const q = QUICK[kind]
   $("quick-title").textContent = kind === "labels" && renamePick ? "Rename a label" : q.title
   paletteQuery.setAttribute("aria-label", q.aria)
-  if (kind === "commands") quickItems = quickCommands().flatMap((c) => {
+  if (kind === "goal") {
+    const n = parseGoal(query)
+    quickItems = n ? [{ id: "goal-" + n, label: `Add ${n.toLocaleString()} words to this file`, run: () => setGoal(n) }] : []
+  } else if (kind === "commands") quickItems = quickCommands().flatMap((c) => {
     const match = fuzzyMatch(c.label, query)
     return match ? [{ ...c, ...match }] : []
   }).sort((a, b) => b.score - a.score)
@@ -3026,6 +3102,7 @@ function openPalette(prefix = "") {
 function closePalette(restore = true) {
   if (!palette.open) return
   renamePick = false // the list's rows already know whether they rename
+  goalAsk = false
   palette.close()
   if (restore) {
     const opener = quickOpener?.isConnected ? quickOpener : [...$("tree").querySelectorAll<HTMLElement>("[data-path]")].find((el) => el.dataset.path === quickOpenerPath)
