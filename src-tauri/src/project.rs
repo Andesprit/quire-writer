@@ -3422,29 +3422,31 @@ mod tests {
         #[cfg(unix)]
         fs::remove_file(root.join("figures")).unwrap(); // the link from above
         fs::write(out.join("pick.png"), "x").unwrap();
-        let mut w = Workspace { root: Some(root.clone()), ..Default::default() };
-        let picked = w.picked_image(&json!(3), "chap/a.typ", Some(out.join("pick.png").to_str().unwrap().to_string()));
+        let mut pw = Workspace { root: Some(root.clone()), ..Default::default() };
+        let picked = pw.picked_image(&json!(3), "chap/a.typ", Some(out.join("pick.png").to_str().unwrap().to_string()));
         assert_eq!((picked["path"].as_str(), picked["rel"].as_str(), picked["copied"].as_bool()), (Some("figures/pick.png"), Some("../figures/pick.png"), Some(true)));
         assert!(root.join("figures/pick.png").exists());
-        let picked = w.picked_image(&json!(4), "main.typ", Some(inside.clone()));
+        let picked = pw.picked_image(&json!(4), "main.typ", Some(inside.clone()));
         assert_eq!((picked["path"].as_str(), picked["copied"].as_bool()), (Some("img/a.png"), Some(false)));
         let before = fs::read_dir(root.join("figures")).unwrap().count();
-        let cancelled = w.picked_image(&json!(5), "main.typ", None);
+        let cancelled = pw.picked_image(&json!(5), "main.typ", None);
         assert_eq!(cancelled, json!({"type": "image_added", "req": 5, "cancelled": true}));
         assert_eq!(fs::read_dir(root.join("figures")).unwrap().count(), before);
-        assert!(w.picked_image(&json!(6), "main.typ", Some("/tmp/notes.txt".into()))["error"].is_string());
-        if let Ok(out) = std::env::var("QUIRE_DUMP") {
+        assert!(pw.picked_image(&json!(6), "main.typ", Some("/tmp/notes.txt".into()))["error"].is_string());
+        if let Ok(dump) = std::env::var("QUIRE_DUMP") {
             let replies = json!({
                 "typst": r(&w, "main.typ", ok("figures/results.png")),
                 "typst_sub": r(&w, "chap/a.typ", ok("figures/results.png")),
                 "latex_chapter": r(&w, "latex/ch/one.tex", ok("latex/figures/results.png")),
                 "markdown": r(&w, "markdown/notes.md", ok("figures/my-plot.png")),
                 "quarto": r(&w, "quarto/report.qmd", ok("figures/my-plot.png")),
+                "pick_cancelled": pw.picked_image(&json!(7), "main.typ", None),
+                "pick_outside": pw.picked_image(&json!(7), "main.typ", Some(out.join("pick.png").to_str().unwrap().to_string())),
                 "inside": r(&w, "main.typ", Ok(("img/a.png".into(), false))),
                 "unsupported": r(&w, "main.typ", Workspace { root: Some(root.clone()), ..Default::default() }.import_image("/tmp/notes.txt")),
                 "oversized": r(&w, "main.typ", Err(Workspace::default().paste_image("big.png", "image/png", &big).unwrap_err())),
             });
-            fs::write(format!("{out}/image-replies.json"), replies.to_string()).unwrap();
+            fs::write(format!("{dump}/image-replies.json"), replies.to_string()).unwrap();
         }
         let _ = fs::remove_dir_all(&dir);
     }

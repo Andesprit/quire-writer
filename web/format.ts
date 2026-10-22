@@ -9,9 +9,11 @@ const ta = $<HTMLTextAreaElement>("text")
 // cites by DOI. main.ts connects both at start.
 let edit: (from: number, to: number, text: string) => void
 let openCite: () => void
-export function connectEditor(editor: typeof edit, cite: () => void) {
+let pickPicture: () => boolean // asks for a picture and inserts the figure; false when the placeholder is all there is
+export function connectEditor(editor: typeof edit, cite: () => void, pick: () => boolean) {
   edit = editor
   openCite = cite
+  pickPicture = pick
 }
 
 const WORD = /[\p{L}\p{N}'’-]/u
@@ -257,7 +259,7 @@ function formats(sx: Syntax): Fmt[] {
     ...(sx.label ? [{ icon: "tag", label: `Label (${sx.label})`, run: () => insertAt(sx.label!, "name") }] : []),
     { icon: "note", label: "Footnote", run: () => (hasSelection() ? wrap(...sx.footnote, "") : insertAt(sx.footnote.join("Footnote text"), "Footnote text", false)) },
     "|",
-    { icon: "file-media", label: "Figure", run: () => insertBlock(sx.figure, "image.png") },
+    { icon: "file-media", label: "Figure", run: () => pickPicture() || insertBlock(sx.figure, "image.png") },
     { icon: "table", label: "Table", run: () => insertBlock(sx.table, "Header") },
     { icon: "comment", label: "Comment out", keys: "Cmd+/", run: sx.comment },
   ]

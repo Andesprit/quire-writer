@@ -3292,7 +3292,12 @@ function followCaret() {
 
 // ---------- start ----------
 
-connectEditor(edit, () => openInline("cite"))
+// The Figure button asks for the picture when a project is open; without one it keeps the placeholder.
+connectEditor(edit, () => openInline("cite"), () => {
+  if (!root || !current || !syntax()) return false
+  addPictures([{ type: "pick_image" }], ta.selectionEnd)
+  return true
+})
 connectChat({
   send: (msg: any) => send(msg.type === "prompt" ? { ...msg, ...chApi() } : msg),
   context: () => ({ path: current, selection: ta.selectionEnd > ta.selectionStart ? ta.value.slice(ta.selectionStart, ta.selectionEnd) : null }),
@@ -3405,6 +3410,7 @@ async function addPictures(adds: object[], at: number) {
   const said: string[] = []
   for (const add of adds) {
     const r = await askPicture(add)
+    if (r.cancelled) continue // Cancel: nothing to say, nothing to insert
     if (r.error) toast(r.error)
     else {
       blocks.push(figureSnippet(syntax()!.figure, r.rel, lang))
