@@ -64,7 +64,12 @@ fn err(e: std::io::Error) -> String {
     // The writer sees this: plain words for the usual cause, not the system's error number.
     match e.kind() {
         ErrorKind::PermissionDenied | ErrorKind::ReadOnlyFilesystem => "Permission denied: it may be read-only, or Quire is not allowed to use it.".into(),
-        _ => e.to_string(),
+        ErrorKind::NotFound => "It was not found: it may have been moved or deleted.".into(),
+        _ => {
+            // No "(os error 2)" tail: the number means nothing to a writer.
+            let text = e.to_string();
+            text.split(" (os error ").next().unwrap_or(&text).to_string()
+        }
     }
 }
 
@@ -2476,6 +2481,14 @@ mod tests {
 
     fn map<V: Clone>(pairs: &[(&str, V)]) -> BTreeMap<String, V> {
         pairs.iter().map(|(k, v)| (k.to_string(), v.clone())).collect()
+    }
+
+    #[test]
+    fn file_errors_have_no_os_codes() {
+        let gone = std::io::Error::from_raw_os_error(2);
+        assert!(err(gone).contains("moved or deleted"));
+        let other = std::io::Error::from_raw_os_error(21); // is a directory
+        assert!(!err(other).contains("os error"));
     }
 
     #[test]

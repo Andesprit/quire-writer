@@ -744,8 +744,11 @@ let previewing: string | null = null
 const collapsed = new Set<string>()
 let selected: string | null = null // the row the explorer actions apply to
 // A name box in the tree: a new file or folder inside `parent`, or a rename of `path`.
-let naming: { kind: "file" | "folder"; parent: string } | { kind: "rename"; path: string } | null = null
+type Naming = { kind: "file" | "folder"; parent: string } | { kind: "rename"; path: string }
+let naming: Naming | null = null
 let rendering = false
+let lastName: { n: Naming; name: string } | null = null // the name just sent, to reopen if the app refuses it
+let nameDraft: string | null = null // what to put in the name box when it reopens after a refusal
 let nameError = "" // why the name box refuses what was typed, shown right under it
 
 const parentOf = (p: string) => (p.includes("/") ? p.slice(0, p.lastIndexOf("/")) : "")
@@ -792,13 +795,13 @@ function renderTree() {
     (nameError ? `<div class="name-msg" id="name-msg" role="alert" style="--depth:${depth}">${esc(nameError)}</div>` : "")
   const newBox = (parent: string, depth: number) => {
     if (!naming || naming.kind === "rename" || naming.parent !== parent) return
-    rows.push(nameBox(depth, naming.kind === "folder" ? icon("folder") : icon("file", "ft-other"), ""))
+    rows.push(nameBox(depth, naming.kind === "folder" ? icon("folder") : icon("file", "ft-other"), nameDraft ?? ""))
   }
   const walk = (nodes: TreeNode[], depth: number) => {
     for (const n of nodes) {
       const open = !collapsed.has(n.path)
       const lead = n.dir ? icon(open ? "chevron-down" : "chevron-right") : `<span class="twist"></span>${fileIcon(n.path)}`
-      if (naming?.kind === "rename" && naming.path === n.path) rows.push(nameBox(depth, lead.replace('<span class="twist"></span>', ""), n.name))
+      if (naming?.kind === "rename" && naming.path === n.path) rows.push(nameBox(depth, lead.replace('<span class="twist"></span>', ""), nameDraft ?? n.name))
       else {
         const dirty = n.dir ? [...changed].some((c) => c.startsWith(n.path + "/")) : changed.has(n.path)
         rows.push(
@@ -819,6 +822,7 @@ function renderTree() {
   tree.innerHTML = rows.join("")
   rendering = false
 
+  nameDraft = null
   const input = document.getElementById("tree-input") as HTMLInputElement | null
   if (!input) return
   input.focus()
@@ -867,6 +871,7 @@ function commitName(leaving = false) {
       // A new file opens, replacing the open one: ask first when that one has unsaved changes.
       else leaveThen({ type: "create", path: to, folder: false })
       selected = to
+      lastName = { n, name }
     }
   }
   naming = null
@@ -874,11 +879,16 @@ function commitName(leaving = false) {
   renderTree()
 }
 
+let lastTrashed = ""
 function trash(path: string) {
   const what = isDir(path) ? `the folder "${baseName(path)}" and everything in it` : `"${baseName(path)}"`
   // Not confirm(): the desktop app's window answers it with "no" without showing it.
   ask(`Move ${what} to the Trash?`, "You can get it back from the Trash.", "Move to Trash").then(
-    (a) => a === "save" && send({ type: "delete", path }),
+    (a) => {
+      if (a !== "save") return
+      lastTrashed = path
+      send({ type: "delete", path })
+    },
   )
 }
 
@@ -2363,6 +2373,7 @@ async function exportAs(to: string) {
   send({ type: "export", req: ++reqSeq, path, to })
 }
 
+const toolErrors = new Map<string, HTMLElement>() // missing-tool notices still on screen, by tool
 let exporting: HTMLElement | null = null // the "Exporting…" notice
 
 function exported(path: string | null) {
@@ -3205,8 +3216,32 @@ function onMessage(msg: any) {
       if (msg.op === "export") exporting?.remove()
       if (msg.op === "open_folder" && opening) {
         // A recent project that is gone or cannot be read: do not offer it again.
-        renderRecent(recent().filter((p) => p !== opening))
+        const gone = opening
+        renderRecent(recent().filter((p) => p !== gone))
         opening = ""
+        toast(
+          /^Not a folder/.test(msg.message)
+            ? `This project folder was moved or deleted: ${gone}. It was removed from Recent projects.`
+            : `Could not open the project ${baseName(gone.replace(/\/$/, ""))}: ${msg.message} It was removed from Recent projects.`,
+        )
+        return
+      }
+      if ((msg.op === "create" || msg.op === "rename") && lastName) {
+        // The app refused a name the page accepted: the box comes back with what was typed.
+        naming = lastName.n
+        nameDraft = lastName.name
+        nameError = msg.message
+        lastName = null
+        renderTree()
+        return
+      }
+      const tool = msg.op === "preview" || msg.op === "export" ? /\b(tinymist|TeX|LaTeX|Quarto|Pandoc|tectonic|latexmk)\b/.exec(String(msg.message).split("\n")[0]) : null
+      if (tool && /needs|not found|not installed|install|could not show a preview/i.test(msg.message)) {
+        // One notice per missing tool, however often the writer tries again.
+        const old = toolErrors.get(tool[1])
+        if (!old?.isConnected)
+          toolErrors.set(tool[1], toast(msg.message, "error", [{ label: "Check Setup", run: () => send({ type: "check_setup" }) }]))
+        return
       }
       if (msg.op === "save") {
         const s = saving.get(msg.req)
@@ -3247,7 +3282,12 @@ function onMessage(msg: any) {
         const agent = !["open_file", "typed", "review", "create", "rename", "delete", "preview", "restore", "cite", "export", "reveal"].includes(msg.op)
         // The agent's own errors (no op) go to the chat too, as when it stopped and starts again.
         if (agent && (running || !msg.op)) add("chat-error", `${icon("error")}<span>${esc(msg.message)}</span>`)
-        toast(msg.message)
+        const what: Record<string, string> = {
+          delete: `Could not move ${baseName(lastTrashed)} to the Trash: `,
+          export: `Could not export ${baseName(current ?? "the file")}: `,
+          reveal: "Could not show the exported file: ",
+        }
+        toast((what[msg.op] ?? "") + msg.message)
         if (agent && agentState === "starting") {
           agentState = "none"
           agentError = msg.message
