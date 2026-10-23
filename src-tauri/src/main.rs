@@ -4,6 +4,7 @@
 
 mod agent;
 mod engine;
+mod history;
 mod project;
 
 #[cfg(unix)]

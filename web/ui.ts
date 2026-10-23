@@ -5,8 +5,9 @@ export const esc = (s: string) => s.replace(/[&<>"]/g, (c) => ({ "&": "&amp;", "
 export const icon = (name: string, extra = "") => `<i class="codicon codicon-${name} ${extra}"></i>`
 
 // With `ok`, a yes/no question whose yes button says `ok` (answer "save"). With `command`,
-// the question shows a command of its own, so the writer sees exactly what would run.
-export function ask(title: string, body: string, ok?: string, command?: string): Promise<string> {
+// the question shows a command of its own, so the writer sees exactly what would run. With
+// `extra`, a button of that name sits before the yes button (answer "extra").
+export function ask(title: string, body: string, ok?: string, command?: string, extra?: string): Promise<string> {
   const d = $<HTMLDialogElement>("ask")
   d.querySelector(".ask-title")!.textContent = title
   d.querySelector(".ask-body")!.textContent = body
@@ -15,6 +16,9 @@ export function ask(title: string, body: string, ok?: string, command?: string):
   if (command) cmd.querySelector("code")!.textContent = command
   d.querySelector<HTMLElement>('button[value="discard"]')!.hidden = !!ok
   const primary = d.querySelector<HTMLElement>('button[value="save"]')!
+  const more = d.querySelector<HTMLElement>('button[value="extra"]')!
+  more.hidden = !extra
+  more.textContent = extra ?? ""
   primary.textContent = ok ?? "Save"
   d.returnValue = ""
   d.showModal()

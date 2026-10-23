@@ -1,0 +1,58 @@
+import type { Diagnostic } from "./diagnostics.ts"
+
+export interface Nowhere { kind: "ref" | "cite"; key: string; path: string; line: number; col: number }
+export interface Problem { diag?: Diagnostic; path: string; line: number; col: number; text: string; utf16: boolean; nowhere?: Nowhere } // utf16: compile errors count UTF-16 units, references count characters
+
+// What the page already knows against the document about to be exported. Compile errors count when
+// they belong to this document (it is the one compiled, so errors in files it pulls in break it too);
+// references and citations that point nowhere count in the exported file itself.
+// Errors still being moved along with typing are `pending`: they are said to be possibly outdated.
+export function gatherProblems(path: string, compileMain: string | null, diagnostics: Diagnostic[], pending: boolean, nowhere: Nowhere[]): Problem[] {
+  const seen = new Set<string>()
+  const errors = compileMain === path
+    ? diagnostics.flatMap((d) => {
+        if (!d.path || seen.has(d.path + ":" + d.line)) return []
+        seen.add(d.path + ":" + d.line)
+        return [{ diag: d, path: d.path, line: d.line, col: d.col, utf16: true, text: d.message + (pending ? " (possibly outdated)" : "") }]
+      })
+    : []
+  const missing = nowhere
+    .filter((n) => n.path === path)
+    .map((n) => ({ path: n.path, line: n.line, col: n.col, utf16: false, nowhere: n, text: `${n.kind === "cite" ? "Citation" : "Reference"} ${n.key} points nowhere` }))
+  return [...errors, ...missing]
+}
+
+// One plain line per problem, at most `max`; the others are counted.
+export function problemLines(path: string, problems: Problem[], max = 5): string[] {
+  const lines = problems.slice(0, max).map((p) => `${p.path === path ? "" : p.path + ", "}Line ${p.line + 1}: ${p.text}`)
+  if (problems.length > max) lines.push(`and ${problems.length - max} more`)
+  return lines
+}
+
+// References that point nowhere in other files of the project, when `path` is the compiled main. Only counted, never listed.
+export function elsewhere(path: string, compileMain: string | null, nowhere: Nowhere[]): number {
+  const ext = (f: string) => f.split(".").pop()
+  return compileMain === path ? nowhere.filter((n) => n.path !== path && ext(n.path) === ext(path)).length : 0
+}
+
+// Every problem in the project, not only those of one document: all compile errors (one per line)
+// and all references that point nowhere, ordered by file and then line, so a list and F8 agree.
+export function projectProblems(diagnostics: Diagnostic[], pending: boolean, nowhere: Nowhere[]): Problem[] {
+  const seen = new Set<string>()
+  const errors = diagnostics.flatMap((d) => {
+    if (!d.path || seen.has(d.path + ":" + d.line)) return []
+    seen.add(d.path + ":" + d.line)
+    return [{ diag: d, path: d.path, line: d.line, col: d.col, utf16: true, text: d.message + (pending ? " (possibly outdated)" : "") }]
+  })
+  const missing = nowhere.map((n) => ({ path: n.path, line: n.line, col: n.col, utf16: false, nowhere: n, text: `${n.kind === "cite" ? "Citation" : "Reference"} ${n.key} points nowhere` }))
+  return [...errors, ...missing].sort((a, b) => (a.path < b.path ? -1 : a.path > b.path ? 1 : a.line - b.line || a.col - b.col))
+}
+
+// The problem after (dir 1) or before (dir -1) the caret's line, wrapping at the end. A problem on the
+// caret's own line is not "next", so repeated presses always move. `wrapped` lets the page say so.
+export function stepProblem(list: Problem[], here: { path: string; line: number }, dir: 1 | -1): { problem: Problem; wrapped: boolean } | undefined {
+  if (!list.length) return
+  const order = (p: { path: string; line: number }) => (p.path < here.path ? -1 : p.path > here.path ? 1 : Math.sign(p.line - here.line))
+  const found = dir === 1 ? list.find((p) => order(p) > 0) : [...list].reverse().find((p) => order(p) < 0)
+  return found ? { problem: found, wrapped: false } : { problem: dir === 1 ? list[0] : list[list.length - 1], wrapped: true }
+}

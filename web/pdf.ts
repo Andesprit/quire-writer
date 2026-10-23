@@ -86,7 +86,8 @@ window.addEventListener("message", (e) => {
   } else if (m?.ok) {
     say("")
     load()
-  } else if (m?.log) say(m.log)
+  } else if (m?.structured) say("")
+  else if (m?.log) say(m.log)
 })
 
 let resized = 0
