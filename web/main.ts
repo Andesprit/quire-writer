@@ -5,11 +5,25 @@ import "@fontsource/ia-writer-quattro/700.css"
 import "@fontsource/ia-writer-quattro/700-italic.css"
 import { Chunk } from "@codemirror/merge"
 import { highlightHTML, highlightLine, langOf, startState, sameState, type Lang, type State } from "./highlight"
-import { diagnosticRange, errorCount, isCurrentDiagnostic, type Diagnostic, type DiagnosticBatch } from "./diagnostics"
+import { suggestKeys, keySpan } from "./suggestkeys"
+import { fixFor, planEdit, type Fix as ErrorFix } from "./errorfix"
+import { diagnosticRange, errorCount, missingTool, isCurrentDiagnostic, shiftDiagnostics, type Diagnostic, type DiagnosticBatch } from "./diagnostics"
 import { findMatches, replacementEdit, type Match } from "./find"
+import { fuzzyMatch, rankFiles } from "./palette"
+import { headingTitle, outline, type Heading } from "./outline"
+import { moveSection, sectionWords, shiftSection } from "./sections"
+import { countWords as countWordsIn } from "./words"
+import { refChoices, refTrigger, type RefChoice, type RefTrigger } from "./refcomplete"
 import { diff, minimalChange, rebase, type Diff } from "./merge"
 import { $, ask, esc, fileIcon, icon, toast } from "./ui"
 import { FORMAT_KEYS, buildFormatBar, connectEditor, insertAt, select, setHeading, syntaxOf } from "./format"
+import { figureSnippet } from "./figure"
+import { changeCount, diffLines, whenText, type Line } from "./history"
+import { MAX_GOAL, goalProgress, parseGoal, readGoal, type Goal } from "./goal"
+import { goBack, goForward, leave, newTrail, rename as renameTrail, type Place } from "./places"
+import { HINTS, SHORTCUTS, docShortcut, filterShortcuts, keyCaps, keysForCommand, keyText, placeKey, shortcutFor, type DocShortcutId, type Shortcut } from "./shortcuts"
+import { labelAt, labelProblem, nameProblem } from "./names"
+import { elsewhere, gatherProblems, problemLines, projectProblems, stepProblem, type Problem } from "./preflight"
 import { changes, paragraphs, readFixes, type Fix } from "./suggest"
 import { add, connectChat, onFolderOpened, onPermission, onTurnEnd, onTurnStart, onUpdate, renderChips, running, setAgentReady } from "./chat"
 
@@ -70,22 +84,61 @@ const panels = { sidebar: "no-sidebar", preview: "no-preview", chat: "no-chat" }
 type Panel = keyof typeof panels
 const defaults: Record<Panel, boolean> = { sidebar: true, preview: true, chat: false }
 
+// Focus mode closes the panels without touching the saved layout, so a reload or quit in it
+// comes back normal. Opening a panel by hand ends it.
+let focusSaved: Record<Panel, boolean> | null = null
+let leavingFocus = false
 function setPanel(p: Panel, open: boolean) {
+  if (open && focusSaved && !leavingFocus) toggleFocus()
   app.classList.toggle(panels[p], !open)
-  store.set(`panel.${p}`, open ? "1" : "0")
+  if (!focusSaved) store.set(`panel.${p}`, open ? "1" : "0")
   $(`toggle-${p}`).setAttribute("aria-pressed", String(open))
-  if (p === "sidebar") $("act-explorer").classList.toggle("active", open)
+  if (p === "sidebar") {
+    const searching = sidebar.classList.contains("searching")
+    $("act-explorer").classList.toggle("active", open && !searching)
+    $("act-search").classList.toggle("active", open && searching)
+  }
   if (p === "chat") $("act-chat").classList.toggle("active", open)
   scheduleRender() // the text column may have changed width
 }
 const isOpen = (p: Panel) => !app.classList.contains(panels[p])
 const togglePanel = (p: Panel) => setPanel(p, !isOpen(p))
+function toggleFocus() {
+  const all = Object.keys(panels) as Panel[]
+  if (focusSaved) {
+    const saved = focusSaved
+    leavingFocus = true
+    for (const p of all) setPanel(p, saved[p]) // still in focus mode here: nothing is written
+    leavingFocus = false
+    focusSaved = null
+    app.classList.remove("focus")
+    ta.focus({ preventScroll: true })
+  } else {
+    focusSaved = { sidebar: isOpen("sidebar"), preview: isOpen("preview"), chat: isOpen("chat") }
+    for (const p of all) setPanel(p, false)
+    app.classList.add("focus")
+    if (current && mode === "edit") ta.focus({ preventScroll: true })
+  }
+  paintWords()
+}
 
 function openChat() {
   setPanel("chat", true)
   $("chat-input").focus()
 }
-$("toggle-sidebar").onclick = $("act-explorer").onclick = () => togglePanel("sidebar")
+const sidebar = $("sidebar")
+// The sidebar shows the explorer or the search results; its button leaves the search first.
+function showExplorer() {
+  sidebar.classList.remove("searching")
+  $("pane-name").textContent = "Explorer"
+  $("act-search").classList.remove("active")
+  $("act-explorer").classList.toggle("active", isOpen("sidebar"))
+}
+$("toggle-sidebar").onclick = $("act-explorer").onclick = () => {
+  if (sidebar.classList.contains("searching") && isOpen("sidebar")) showExplorer()
+  else togglePanel("sidebar")
+}
+$("act-search").onclick = () => (sidebar.classList.contains("searching") && isOpen("sidebar") ? setPanel("sidebar", false) : openSearch())
 $("toggle-preview").onclick = $("open-preview-side").onclick = () => togglePanel("preview")
 $("close-preview").onclick = () => setPanel("preview", false)
 $("toggle-chat").onclick = $("act-chat").onclick = $("close-chat").onclick = () => togglePanel("chat")
@@ -102,29 +155,67 @@ function setZoom(z: number) {
 }
 if (zoom !== 1) setZoom(zoom)
 
+const DOC_KEYS: Record<DocShortcutId, (e: KeyboardEvent) => void> = {
+  focus: () => toggleFocus(),
+  "open-file": () => openPalette(),
+  commands: () => openPalette(">"),
+  sections: () => openPalette("@"),
+  save: () => flushSave(true),
+  sidebar: () => {
+    if (sidebar.classList.contains("searching") && isOpen("sidebar")) showExplorer()
+    else togglePanel("sidebar")
+  },
+  search: () => openSearch(),
+  preview: () => togglePanel("preview"),
+  chat: () => {
+    if (isOpen("chat") && document.activeElement === $("chat-input")) {
+      setPanel("chat", false)
+      ta.focus()
+    } else openChat()
+  },
+  "zoom-in": () => setZoom(zoom + 0.1),
+  "zoom-out": () => setZoom(zoom - 0.1),
+  "zoom-reset": () => setZoom(1),
+  shortcuts: () => openShortcuts(),
+}
 document.addEventListener(
   "keydown",
   (e) => {
-    if (!(e.metaKey || e.ctrlKey) || e.altKey) return
-    const key = e.key.toLowerCase()
+    if (e.isComposing || palette.open) return
+    const nav = placeKey(e, mac)
+    if (nav && (e.target === ta || !(e.target as HTMLElement).closest?.("input, textarea"))) {
+      e.preventDefault()
+      e.stopPropagation()
+      return void goPlace(nav)
+    }
+    if (e.key === "F8" && !e.metaKey && !e.ctrlKey && !e.altKey && root && !document.querySelector("dialog[open]")) {
+      e.preventDefault()
+      e.stopPropagation()
+      return stepProblems(e.shiftKey ? -1 : 1)
+    }
+    const id = docShortcut(e)
     // Cmd+B and Cmd+I are bold and italic in the text; Chrome keeps Cmd+L for itself.
-    if (key === "s" && !e.shiftKey) flushSave(true)
-    else if (key === "e" && e.shiftKey) togglePanel("sidebar")
-    else if (key === "\\") togglePanel("preview")
-    else if (key === "j" && !e.shiftKey) {
-      if (isOpen("chat") && document.activeElement === $("chat-input")) {
-        setPanel("chat", false)
-        ta.focus()
-      } else openChat()
-    } else if (key === "=" || key === "+") setZoom(zoom + 0.1)
-    else if (key === "-") setZoom(zoom - 0.1)
-    else if (key === "0") setZoom(1)
-    else return
+    if (!id) return
+    DOC_KEYS[id](e)
     e.preventDefault()
     e.stopPropagation()
   },
   true,
 )
+
+// Escape leaves focus mode only when nothing else wanted it. What is open is read before any
+// other handler runs (capture), because most of them close their thing without preventDefault.
+let escapeFree = false
+const OVERLAYS = ["problems", "find-box", "inline-box", "diagnostic-card", "rewrite-menu", "rewrite-card", "fix-card", "ref-list", "ctx-menu"]
+document.addEventListener("keydown", (e) => {
+  if (e.key === "Escape") escapeFree = !document.querySelector("dialog[open]") && !ghost && !cardMark && OVERLAYS.every((id) => $(id).hidden)
+}, true)
+document.addEventListener("keydown", (e) => {
+  if (e.key === "Escape" && focusSaved && escapeFree && !e.defaultPrevented && !e.isComposing && !e.metaKey && !e.ctrlKey && !e.altKey && !e.shiftKey) {
+    e.preventDefault()
+    toggleFocus()
+  }
+})
 
 for (const sash of document.querySelectorAll<HTMLElement>(".sash")) {
   sash.onpointerdown = (e) => {
@@ -314,11 +405,12 @@ function edit(from: number, to: number, text: string, disk = false) {
 
 ta.addEventListener("input", (e) => {
   docVersion++
-  invalidateDiagnostics()
+  shiftDiagnosticsForTyping()
   ghost = null
   closeCard()
   menu.hidden = true
   scheduleRender()
+  scheduleOutline()
   if (!fromDisk) scheduleSave()
   scheduleFind()
   if (!programmatic) {
@@ -344,8 +436,10 @@ const onCaret = () => {
   if (ghost && (ta.selectionStart !== ghost.pos || ta.selectionEnd !== ghost.pos)) clearGhost()
   const pos = ta.selectionStart
   if (cardMark && !(ta.selectionEnd === pos && cardMark.from <= pos && pos <= cardMark.to)) closeCard()
+  if (refOpen && ta.selectionStart !== refOpen.caret) closeRefs()
   scheduleMenu()
   markActive()
+  markOutlineHere()
   scheduleInfo()
   followCaret()
   showDiagnosticAtCaret()
@@ -354,6 +448,61 @@ document.addEventListener("selectionchange", () => {
   if (document.activeElement === ta) onCaret()
 })
 ta.addEventListener("select", onCaret)
+// ---------- reference completion: labels and citation keys under the caret ----------
+
+const refList = $("ref-list")
+let cites: string[] = [] // every citation key of the project's .bib files
+let refOpen: { t: RefTrigger; items: RefChoice[]; sel: number; caret: number } | null = null
+const closeRefs = () => {
+  refOpen = null
+  refList.hidden = true
+}
+function updateRefs() {
+  const caret = ta.selectionStart
+  const t = mode === "edit" && caret === ta.selectionEnd ? refTrigger(ta.value.slice(0, caret), lang) : null
+  const items = t ? refChoices(t, labels.map((l) => l.name), cites) : []
+  if (!t || !items.length) return closeRefs()
+  refOpen = { t, items, sel: 0, caret }
+  paintRefs()
+}
+function paintRefs() {
+  if (!refOpen) return
+  refList.innerHTML = refOpen.items
+    .map((c, i) => `<div class="ref-row${i === refOpen!.sel ? " sel" : ""}" data-i="${i}"><span class="ref-key">${esc(c.key)}</span><span class="ref-tag">${c.tag}</span></div>`)
+    .join("")
+  refList.hidden = false
+  floatAt(refList, refOpen.caret, refOpen.caret)
+}
+function acceptRef(i: number) {
+  const r = refOpen!
+  const caret = ta.selectionStart
+  closeRefs()
+  // The closing mark goes in only when the writer has not typed it.
+  const close = r.t.close && !"},>".includes(ta.value[caret] ?? " ") ? r.t.close : ""
+  edit(r.t.replaceFrom, caret, r.items[i].key + close)
+}
+// While the list is open it owns these keys; closed, it never sees them.
+ta.addEventListener("keydown", (e) => {
+  if (!refOpen || e.metaKey || e.ctrlKey || e.altKey || e.shiftKey) return
+  const k = e.key
+  if (k === "Tab" || k === "Enter") acceptRef(refOpen.sel)
+  else if (k === "Escape") closeRefs()
+  else if (k === "ArrowDown" || k === "ArrowUp") {
+    refOpen.sel = (refOpen.sel + (k === "ArrowDown" ? 1 : refOpen.items.length - 1)) % refOpen.items.length
+    paintRefs()
+  } else return
+  e.preventDefault()
+  e.stopImmediatePropagation()
+})
+ta.addEventListener("input", () => (programmatic ? closeRefs() : updateRefs()))
+ta.addEventListener("blur", closeRefs)
+ta.addEventListener("scroll", closeRefs)
+refList.onmousedown = (e) => e.preventDefault() // keep the caret in the text
+refList.onclick = (e) => {
+  const row = (e.target as HTMLElement).closest<HTMLElement>(".ref-row")
+  if (row && refOpen) acceptRef(Number(row.dataset.i))
+}
+
 ta.addEventListener("keydown", (e) => {
   const mod = e.metaKey || e.ctrlKey
   const key = e.key.toLowerCase()
@@ -449,7 +598,7 @@ async function leaveCurrent(): Promise<boolean> {
     }
     const error = await flushSave(true)
     answer = error
-      ? await ask(`${name} was not saved`, `${error} Your changes are still here. Save tries again. Don't Save drops them.`)
+      ? (await ask(`${name} was not saved`, `${error} Your changes are still here. Save tries again. Don't Save drops them.`)) || "cancel" // Escape stays
       : autosave && !holdSave ? "save" : ""
   }
   return true
@@ -459,6 +608,8 @@ async function leaveCurrent(): Promise<boolean> {
 // for the app's answer to this request ("done" or an error), not for a timer.
 async function leaveThen(msg: object) {
   const ok = await leaveCurrent()
+  // A fix waits only for the file it asked for: opening anything else drops it.
+  if (ok && pendingFix && (msg as { path?: string }).path !== pendingFix.path) pendingFix = null
   if (ok) send({ ...msg, req: (leaving = ++reqSeq) })
   return ok
 }
@@ -537,8 +688,11 @@ function dropFileState() {
 
 // Only after leaveCurrent: the open text is on disk or dropped by the writer.
 function openFile(path: string, content: string, base: string | null) {
+  const from = current && current !== path ? here() : null
+  savePos()
   dropFileState()
   current = path
+  rememberFile(path)
   lang = langOf(path)
   baseline = base
   ta.value = content // a new file starts a fresh undo history
@@ -548,9 +702,14 @@ function openFile(path: string, content: string, base: string | null) {
   ta.scrollTop = 0
   setMode(base != null ? "review" : "edit")
   render()
+  const jump = pendingJump?.path === path ? pendingJump : null
+  const spot = jump || base != null ? null : loadPos()[path]
+  if (spot) restorePos(spot)
+  if (from && jump?.track !== false) leave(trail, from, { path, line: jump?.line ?? spot?.line ?? 0, col: jump?.col ?? spot?.col ?? 0 })
   renderTree()
   renderTab()
   renderLabels() // its hint is for this file's language
+  renderOutline()
   // Take the keyboard only if the writer is not typing somewhere else (a name box, the chat).
   const busy = document.activeElement?.matches("input, textarea, select") && document.activeElement !== ta
   if (mode === "edit" && !busy) ta.focus({ preventScroll: true })
@@ -560,7 +719,8 @@ function openFile(path: string, content: string, base: string | null) {
     previewing = target
     requestPreview(target)
   }
-  if (pendingJump?.path === path) goTo(path, pendingJump.line, pendingJump.col, pendingJump.utf16)
+  if (jump) goTo(path, jump.line, jump.col, jump.utf16, jump.len, false)
+  if (historyFor === path) openHistory(path)
 }
 
 function closeFile(message?: string) {
@@ -572,6 +732,7 @@ function closeFile(message?: string) {
   setMode("edit")
   render()
   renderTab()
+  renderOutline()
   if (message) toast(message, "info")
 }
 
@@ -683,6 +844,9 @@ function updateReviewUI() {
     $("review-count").textContent = mode === "review" ? `${focusChunk + 1} of ${n}` : `${n} change${n > 1 ? "s" : ""}`
     $("review-toggle").innerHTML = mode === "review" ? `${icon("edit")} Edit text` : `${icon("diff")} Show changes`
   }
+  const undo = $("undo-op")
+  undo.hidden = !(n && lastOp && current && lastOp.paths.includes(current))
+  if (lastOp) undo.textContent = `Undo this ${lastOp.kind} in all files`
   renderReviewStatus()
 }
 
@@ -697,6 +861,54 @@ $("accept-all").onclick = () => {
   scheduleSave()
   ta.focus()
 }
+// The newest rename or replace across files, which one click can undo while it is the latest.
+let lastOp: { id: number; kind: "replace" | "rename"; paths: string[] } | null = null
+let undoing = false
+let opToast: HTMLElement | null = null // the notice with the Undo button: gone once the undo ran
+
+async function undoOperation() {
+  if (!lastOp || undoing) return
+  undoing = true
+  // The open text goes to disk first, and typing waits until the app answers.
+  holdTyping(true)
+  const error = await flushSave(true)
+  if (error) {
+    holdTyping(false)
+    undoing = false
+    toast(`Nothing was undone: ${baseName(current!)} could not be saved first.`)
+    return
+  }
+  send({ type: "undo_operation", req: (leaving = ++reqSeq), op: lastOp.id })
+}
+
+// The app answered (or failed): typing is free again.
+function undone(r: { ok: boolean; restored: string[]; skipped: string[]; error: string }, kind: string) {
+  undoing = false
+  opToast?.remove()
+  if (!r.ok) {
+    lastOp = null // the app forgot it: its answer says why
+    updateReviewUI()
+    return toast(r.error)
+  }
+  lastOp = null
+  updateReviewUI()
+  const restored = r.restored ?? []
+  const skipped = r.skipped ?? []
+  const files = restored.length
+  const left = skipped.length
+  toast(`Undid the ${kind} in ${files} file${files === 1 ? "" : "s"}.${left ? ` ${skipped.join(", ")} ${left === 1 ? "was" : "were"} changed since, so ${left === 1 ? "it was" : "they were"} left as ${left === 1 ? "it is" : "they are"}.` : ""}`, "info")
+  refreshSearch()
+}
+
+// After a rename or replace: the notice and the review bar offer Undo while it is the latest.
+// A reply without an op number offers no Undo.
+function offerUndo(kind: "replace" | "rename", r: { op?: number; paths?: string[] }) {
+  if (typeof r.op !== "number") return []
+  lastOp = { id: r.op, kind, paths: r.paths ?? [] }
+  updateReviewUI()
+  return [{ label: "Undo", run: undoOperation }]
+}
+$("undo-op").onclick = undoOperation
 $("reject-all").onclick = () => {
   const base = baseline
   if (base == null) return
@@ -720,8 +932,12 @@ let previewing: string | null = null
 const collapsed = new Set<string>()
 let selected: string | null = null // the row the explorer actions apply to
 // A name box in the tree: a new file or folder inside `parent`, or a rename of `path`.
-let naming: { kind: "file" | "folder"; parent: string } | { kind: "rename"; path: string } | null = null
+type Naming = { kind: "file" | "folder"; parent: string } | { kind: "rename"; path: string }
+let naming: Naming | null = null
 let rendering = false
+let lastName: { n: Naming; name: string } | null = null // the name just sent, to reopen if the app refuses it
+let nameDraft: string | null = null // what to put in the name box when it reopens after a refusal
+let nameError = "" // why the name box refuses what was typed, shown right under it
 
 const parentOf = (p: string) => (p.includes("/") ? p.slice(0, p.lastIndexOf("/")) : "")
 const baseName = (p: string) => p.slice(p.lastIndexOf("/") + 1)
@@ -763,16 +979,17 @@ function renderTree() {
   const rows: string[] = []
   const nameBox = (depth: number, iconHtml: string, value: string) =>
     `<div class="row naming" style="--depth:${depth}"><span class="twist"></span>${iconHtml}` +
-    `<input class="tree-input" id="tree-input" value="${esc(value)}" spellcheck="false" autocomplete="off" aria-label="Name"></div>`
+    `<input class="tree-input" id="tree-input" value="${esc(value)}" spellcheck="false" autocomplete="off" aria-label="Name"${nameError ? ' aria-invalid="true" aria-describedby="name-msg"' : ""}></div>` +
+    (nameError ? `<div class="name-msg" id="name-msg" role="alert" style="--depth:${depth}">${esc(nameError)}</div>` : "")
   const newBox = (parent: string, depth: number) => {
     if (!naming || naming.kind === "rename" || naming.parent !== parent) return
-    rows.push(nameBox(depth, naming.kind === "folder" ? icon("folder") : icon("file", "ft-other"), ""))
+    rows.push(nameBox(depth, naming.kind === "folder" ? icon("folder") : icon("file", "ft-other"), nameDraft ?? ""))
   }
   const walk = (nodes: TreeNode[], depth: number) => {
     for (const n of nodes) {
       const open = !collapsed.has(n.path)
       const lead = n.dir ? icon(open ? "chevron-down" : "chevron-right") : `<span class="twist"></span>${fileIcon(n.path)}`
-      if (naming?.kind === "rename" && naming.path === n.path) rows.push(nameBox(depth, lead.replace('<span class="twist"></span>', ""), n.name))
+      if (naming?.kind === "rename" && naming.path === n.path) rows.push(nameBox(depth, lead.replace('<span class="twist"></span>', ""), nameDraft ?? n.name))
       else {
         const dirty = n.dir ? [...changed].some((c) => c.startsWith(n.path + "/")) : changed.has(n.path)
         rows.push(
@@ -793,6 +1010,7 @@ function renderTree() {
   tree.innerHTML = rows.join("")
   rendering = false
 
+  nameDraft = null
   const input = document.getElementById("tree-input") as HTMLInputElement | null
   if (!input) return
   input.focus()
@@ -810,41 +1028,75 @@ function startNew(kind: "file" | "folder") {
   const parent = selected ? (isDir(selected) ? selected : parentOf(selected)) : ""
   collapsed.delete(parent)
   naming = { kind, parent }
+  nameError = ""
   setPanel("sidebar", true)
   renderTree()
 }
 
+// The open text goes to disk first (a path in it may change), and typing waits until the app answers.
+async function renameFile(from: string, to: string) {
+  holdTyping(true)
+  const error = await flushSave(true)
+  if (error) {
+    holdTyping(false)
+    return void toast(`Nothing was renamed: ${baseName(current!)} could not be saved first.`)
+  }
+  send({ type: "rename", req: (leaving = ++reqSeq), from, to })
+}
+
+// What the writer is told after a rename: the links that followed, and the ones that did not.
+function renameNotice(msg: { from: string; links: number; files: number; op: number | null; paths: string[]; skipped: string[] }) {
+  const n = (count: number, noun: string) => `${count} ${noun}${count === 1 ? "" : "s"}`
+  const left = msg.skipped?.length ? ` Not updated, check them by hand: ${msg.skipped.join(", ")}.` : ""
+  if (!msg.links && !left) return
+  const done = msg.links ? ` Updated ${n(msg.links, "link")} in ${n(msg.files, "file")}. Review the changes.` : ""
+  opToast = toast(`Renamed ${baseName(msg.from)}.${done}${left}`, left ? "error" : "info", msg.links ? offerUndo("rename", { op: msg.op ?? undefined, paths: msg.paths }) : [])
+}
+
 function startRename(path: string) {
   naming = { kind: "rename", path }
+  nameError = ""
   renderTree()
 }
 
-function commitName() {
+// `leaving`: the box lost focus; a refused name then closes the box instead of pulling focus back.
+function commitName(leaving = false) {
   const input = document.getElementById("tree-input") as HTMLInputElement | null
   const n = naming
-  naming = null
   const name = input?.value.trim().replace(/^\/+|\/+$/g, "") ?? ""
-  if (n && name) {
-    if (n.kind === "rename") {
-      const to = joinPath(parentOf(n.path), name)
-      if (to !== n.path) send({ type: "rename", from: n.path, to })
-      selected = to
-    } else {
-      const path = joinPath(n.parent, name)
+  if (n) {
+    const to = joinPath(n.kind === "rename" ? parentOf(n.path) : n.parent, name)
+    const problem = nameProblem(name, to, [...files, ...dirs], n.kind === "rename" ? n.path : undefined)
+    if (problem && !leaving) {
+      nameError = problem
+      renderTree()
+      return
+    }
+    if (!problem) {
+      if (n.kind === "rename") {
+        if (to !== n.path) renameFile(n.path, to)
+      } else if (n.kind === "folder") send({ type: "create", path: to, folder: true })
       // A new file opens, replacing the open one: ask first when that one has unsaved changes.
-      if (n.kind === "folder") send({ type: "create", path, folder: true })
-      else leaveThen({ type: "create", path, folder: false })
-      selected = path
+      else leaveThen({ type: "create", path: to, folder: false })
+      selected = to
+      lastName = { n, name }
     }
   }
+  naming = null
+  nameError = ""
   renderTree()
 }
 
+let lastTrashed = ""
 function trash(path: string) {
   const what = isDir(path) ? `the folder "${baseName(path)}" and everything in it` : `"${baseName(path)}"`
   // Not confirm(): the desktop app's window answers it with "no" without showing it.
   ask(`Move ${what} to the Trash?`, "You can get it back from the Trash.", "Move to Trash").then(
-    (a) => a === "save" && send({ type: "delete", path }),
+    (a) => {
+      if (a !== "save") return
+      lastTrashed = path
+      send({ type: "delete", path })
+    },
   )
 }
 
@@ -863,6 +1115,103 @@ $("tree").onclick = (e) => {
     leaveThen({ type: "open_file", path }).then((ok) => ok && innerWidth < 640 && setPanel("sidebar", false))
   }
 }
+// Where a file or folder may go: any folder (or "" for the top level) except where it already is,
+// itself, or inside itself.
+const canMoveTo = (from: string, to: string) => to !== parentOf(from) && to !== from && !to.startsWith(from + "/")
+
+// A move is a rename into another folder: it saves first, keeps links working and offers Undo.
+function moveInto(from: string, to: string) {
+  const dest = joinPath(to, baseName(from))
+  lastName = null // a refusal now is about this move, not about a name typed earlier
+  if ([...files, ...dirs].some((p) => p.toLowerCase() === dest.toLowerCase()))
+    return void toast(`Nothing was moved: ${to ? `the folder "${baseName(to)}"` : "the top level of the project"} already has a file or folder called "${baseName(from)}". Rename one of them first.`)
+  renameFile(from, dest)
+}
+
+// Dragging a row onto a folder moves it. Pointer events on the document, not HTML5 drag-and-drop: the
+// desktop window's own drag handler would swallow those, and a plain click must stay a click.
+let dragging = false
+const dropDir = (el: Element | null, from: string): string | null => {
+  const row = el?.closest<HTMLElement>(".row[data-path]")
+  const to = row ? (row.dataset.dir ? row.dataset.path! : null) : el?.closest("#folder-name, #tree") ? "" : null
+  return to === null || !canMoveTo(from, to) ? null : to
+}
+$("tree").addEventListener("pointerdown", (e) => {
+  const row = (e.target as HTMLElement).closest<HTMLElement>(".row[data-path]")
+  if (!row || e.button !== 0) return
+  const from = row.dataset.path!
+  const x = e.clientX, y = e.clientY
+  let target: Element | null = null
+  let ghost: HTMLElement | null = null
+  let expand = 0
+  let at: Element | null = null
+  let px = x, py = y
+  const mark = (to: string | null, el: Element | null) => {
+    target?.classList.remove("drop")
+    target = to === null ? null : (el?.closest(".row[data-dir]") ?? $("tree"))
+    target?.classList.add("drop")
+    document.body.classList.toggle("drag-refused", to === null)
+  }
+  // A collapsed folder under the pointer opens after a short wait, so a file can go into a subfolder.
+  const hover = (el: Element | null) => {
+    const dir = el?.closest<HTMLElement>(".row[data-dir]")
+    const path = dir?.dataset.path
+    clearTimeout(expand)
+    if (!path || !collapsed.has(path) || !canMoveTo(from, path)) return
+    expand = window.setTimeout(() => {
+      collapsed.delete(path)
+      renderTree()
+      at = document.elementFromPoint(px, py) // the rows were redrawn
+      mark(dropDir(at, from), at)
+    }, 600)
+  }
+  const move = (m: PointerEvent) => {
+    if (!dragging && Math.hypot(m.clientX - x, m.clientY - y) < 4) return
+    if (!dragging) {
+      dragging = true
+      ghost = document.createElement("div")
+      ghost.className = "drag-ghost"
+      ghost.textContent = baseName(from)
+      document.body.append(ghost)
+      document.body.classList.add("dragging")
+    }
+    px = m.clientX
+    py = m.clientY
+    ghost!.style.transform = `translate(${m.clientX + 12}px, ${m.clientY + 12}px)`
+    const el = document.elementFromPoint(m.clientX, m.clientY)
+    if (el !== at) hover((at = el))
+    mark(dropDir(el, from), el)
+  }
+  const end = (u: PointerEvent) => {
+    document.removeEventListener("pointermove", move)
+    document.removeEventListener("pointerup", end)
+    document.removeEventListener("keydown", esc, true)
+    const to = u.type === "pointerup" ? dropDir(document.elementFromPoint(u.clientX, u.clientY), from) : null
+    clearTimeout(expand)
+    mark(null, null)
+    ghost?.remove()
+    document.body.classList.remove("dragging", "drag-refused")
+    if (!dragging) return
+    // The click that follows the release must not open or toggle the row.
+    // (No click comes when the release is on another element, so the guard must not outlive this turn.)
+    const stop = (c: Event) => c.stopPropagation()
+    document.addEventListener("click", stop, { capture: true, once: true })
+    setTimeout(() => {
+      document.removeEventListener("click", stop, true)
+      dragging = false
+    })
+    if (to !== null) moveInto(from, to)
+  }
+  const esc = (k: KeyboardEvent) => {
+    if (k.key === "Escape" && dragging) {
+      k.preventDefault()
+      end(new PointerEvent("pointercancel"))
+    }
+  }
+  document.addEventListener("pointermove", move)
+  document.addEventListener("pointerup", end)
+  document.addEventListener("keydown", esc, true)
+})
 $("tree").addEventListener("keydown", (e) => {
   const el = e.target as HTMLElement
   if (el.id === "tree-input") {
@@ -872,6 +1221,7 @@ $("tree").addEventListener("keydown", (e) => {
     } else if (e.key === "Escape") {
       e.preventDefault()
       naming = null
+      nameError = ""
       renderTree()
     }
     return
@@ -888,7 +1238,14 @@ $("tree").addEventListener("keydown", (e) => {
 })
 // Leaving the name box keeps the name, as in VS Code (a redraw is not leaving).
 $("tree").addEventListener("focusout", (e) => {
-  if ((e.target as HTMLElement).id === "tree-input" && naming && !rendering) commitName()
+  if ((e.target as HTMLElement).id === "tree-input" && naming && !rendering) commitName(true)
+})
+$("tree").addEventListener("input", (e) => {
+  if ((e.target as HTMLElement).id === "tree-input" && nameError) {
+    nameError = ""
+    document.getElementById("name-msg")?.remove()
+    ;(e.target as HTMLElement).removeAttribute("aria-invalid")
+  }
 })
 $("tree").addEventListener("focusin", (e) => {
   const path = (e.target as HTMLElement).dataset.path
@@ -897,8 +1254,12 @@ $("tree").addEventListener("focusin", (e) => {
 
 type MenuItem = { label: string; keys?: string; run: () => void } | "-"
 
+let menuFrom: HTMLElement | null = null // where focus goes back to when the menu closes
+let keyMenuRow: HTMLElement | null = null // the row a key opened the menu on (the explorer redraws its rows first)
 function showMenu(x: number, y: number, items: MenuItem[]) {
   const m = $("ctx-menu")
+  if (m.hidden) menuFrom = keyMenuRow ?? (document.activeElement as HTMLElement | null)
+  keyMenuRow = null
   m.replaceChildren(
     ...items.map((it) => {
       if (it === "-") return document.createElement("hr")
@@ -917,7 +1278,25 @@ function showMenu(x: number, y: number, items: MenuItem[]) {
   m.style.top = `${Math.min(y, innerHeight - m.offsetHeight - 4)}px`
   m.querySelector("button")?.focus()
 }
-const hideMenu = () => ($("ctx-menu").hidden = true)
+const hideMenu = () => {
+  const m = $("ctx-menu")
+  const had = m.contains(document.activeElement)
+  m.hidden = true
+  if (!had || !menuFrom) return
+  const path = menuFrom.dataset.path
+  const back = menuFrom.isConnected ? menuFrom : path ? document.querySelector<HTMLElement>(`#tree .row[data-path="${CSS.escape(path)}"]`) : null
+  back?.focus({ preventScroll: true })
+}
+// Shift+F10 or the menu key: the menu a right click would open, at the focused row.
+document.addEventListener("keydown", (e) => {
+  if (!(e.key === "ContextMenu" || (e.key === "F10" && e.shiftKey)) || e.altKey || e.metaKey || e.ctrlKey) return
+  const row = (document.activeElement as HTMLElement | null)?.closest<HTMLElement>("#tree .row, #outline .row, #labels .row")
+  if (!row) return
+  e.preventDefault()
+  keyMenuRow = row
+  const b = row.getBoundingClientRect()
+  row.dispatchEvent(new MouseEvent("contextmenu", { bubbles: true, cancelable: true, clientX: b.left + 24, clientY: b.bottom }))
+})
 document.addEventListener("mousedown", (e) => {
   if (!$("ctx-menu").hidden && !$("ctx-menu").contains(e.target as Node)) hideMenu()
 })
@@ -944,8 +1323,10 @@ $("tree").oncontextmenu = (e) => {
   if (path) {
     items.push(
       "-",
-      { label: "Rename…", keys: "F2", run: () => startRename(path) },
-      { label: "Move to Trash", keys: "⌘⌫", run: () => trash(path) },
+      { label: "Rename…", keys: kc("rename"), run: () => startRename(path) },
+      { label: "Move to Folder…", run: () => openPalette(MOVE, path) },
+      ...(files.includes(path) ? [{ label: "File History…", run: () => openHistory(path) }] : []),
+      { label: "Move to Trash", keys: kc("trash"), run: () => trash(path) },
       "-",
       { label: "Copy Relative Path", run: () => navigator.clipboard?.writeText(path) },
     )
@@ -971,6 +1352,10 @@ $("collapse-all").onclick = () => {
 // ---------- labels: every <label> in the project, and which ones nothing refers to ----------
 
 let labels: { name: string; path: string; line: number; col: number; refs: number }[] = []
+// Uses of a label or citation key that match nothing in the project.
+type Nowhere = { kind: "ref" | "cite"; key: string; path: string; line: number; col: number }
+let nowhere: Nowhere[] = []
+const NOWHERE_HINT = "Citations are judged only when a bibliography (.bib) is found in the project."
 const LABEL_HINT: Record<Lang, string> = {
   typst: "Put <name> after a heading, figure or equation, then refer to it with @name.",
   latex: "Put \\label{name} in a section, figure or equation, then refer to it with \\ref{name}.",
@@ -979,35 +1364,401 @@ const LABEL_HINT: Record<Lang, string> = {
   text: "",
 }
 
+// The keys the writer most likely meant. Typst and Quarto write a citation like a reference (@key), so they offer labels
+// and bibliography keys; LaTeX \ref gets labels only and a citation gets bibliography keys only, so the kinds never mix.
+function keyChoices(n: Nowhere): string[] {
+  const lang = langOf(n.path)
+  const own = labels.filter((l) => langOf(l.path) === lang).map((l) => l.name)
+  return suggestKeys(n.key, n.kind === "cite" ? cites : lang === "typst" || lang === "quarto" ? [...own, ...cites] : own)
+}
+
+// A citation with no similar key can still be added from its DOI, under the key the text already uses.
+// Typst writes a citation like a reference (@key), so its "ref" rows may be citations; LaTeX \ref never is.
+const canAddFromDoi = (n: Nowhere) => n.kind === "cite" || langOf(n.path) === "typst"
+
+function doiButton(n: Nowhere, i: number): string {
+  return canAddFromDoi(n) ? `<button class="fix" data-doi="${i}" title="Look up a paper and add it to the bibliography as ${esc(n.key)}">Add from DOI…</button>` : ""
+}
+
+function fixRow(n: Nowhere, i: number): string {
+  const [top, ...more] = keyChoices(n)
+  if (!top) return `<div class="fixes"><span class="muted">No similar ${n.kind === "cite" ? "citation" : langOf(n.path) === "typst" ? "label or citation" : "label"}</span>${doiButton(n, i)}</div>`
+  return `<div class="fixes"><button class="fix" data-fix="${i}" data-key="${esc(top)}" title="Replace ${esc(n.key)} with ${esc(top)}">Did you mean ${esc(top)}?</button>` +
+    more.map((k) => `<button class="fix alt" data-fix="${i}" data-key="${esc(k)}" title="Replace ${esc(n.key)} with ${esc(k)}">${esc(k)}</button>`).join("") + "</div>"
+}
+
 function renderLabels() {
   const open = store.get("labels") !== "closed"
   const unused = labels.filter((l) => !l.refs).length
   $("labels-head").hidden = $("labels").hidden = !root
   $("labels-head").setAttribute("aria-expanded", String(open))
   $("labels-head").querySelector(".codicon")!.className = `codicon codicon-chevron-${open ? "down" : "right"}`
-  $("labels-count").textContent = unused ? `${unused} unused` : ""
+  $("labels-count").textContent = [
+    nowhere.length && `${nowhere.length} reference${nowhere.length > 1 ? "s point" : " points"} nowhere`,
+    unused && `${unused} unused`,
+  ].filter(Boolean).join(", ")
+  $("labels-count").title = $("labels-count").textContent!
   $("labels").classList.toggle("closed", !open)
-  $("labels").innerHTML = labels.length
+  const prev = document.getElementById("label-input") as HTMLInputElement | null
+  const keep = prev && { value: prev.value, start: prev.selectionStart, end: prev.selectionEnd }
+  const broken = nowhere.length
+    ? `<div class="labels-group" title="${esc(NOWHERE_HINT)}">Points nowhere</div>` +
+      nowhere.map((n, i) =>
+        `<button class="row label broken" data-m="${i}" title="${esc(`${n.path}, line ${n.line + 1}. No ${n.kind === "cite" ? "citation" : "label"} named ${n.key}. ${NOWHERE_HINT}`)}">` +
+        `${icon("warning")}<span class="name">${esc(n.key)}</span>` +
+        `<span class="refs">${n.kind === "cite" ? "citation" : "reference"} · ${esc(n.path.split("/").pop()!)}:${n.line + 1}</span></button>` +
+        fixRow(n, i)).join("")
+    : ""
+  $("labels").innerHTML = broken + (labels.length
     ? labels
         .map(
           (l, i) =>
-            `<button class="row label${l.refs ? "" : " unused"}" data-i="${i}" ` +
+            labelNaming?.name === l.name && labelNaming.path === l.path
+              ? `<div class="row naming label-naming"><span class="twist"></span>${icon("tag")}` +
+                `<input class="tree-input" id="label-input" value="${esc(labelNaming.draft)}" spellcheck="false" autocomplete="off" aria-label="New name for ${esc(l.name)}"${labelNaming.error ? ' aria-invalid="true"' : ""} aria-describedby="label-msg"></div>` +
+                `<div class="name-msg" id="label-msg" role="alert"${labelNaming.error ? "" : " hidden"}>${esc(labelNaming.error)}</div>`
+              : `<button class="row label${l.refs ? "" : " unused"}" data-i="${i}" ` +
             `title="${esc(`${l.path}, line ${l.line + 1}${l.refs ? "" : ". Nothing refers to this label."}`)}">` +
             `${icon("tag")}<span class="name">${esc(l.name)}</span>` +
             `<span class="refs">${l.refs ? `${l.refs} use${l.refs > 1 ? "s" : ""}` : "unused"}</span></button>`,
         )
         .join("")
-    : `<p class="muted labels-empty">No labels yet. ${esc(LABEL_HINT[lang])}</p>`
+    : nowhere.length ? "" : `<p class="muted labels-empty">No labels yet. ${esc(LABEL_HINT[lang])}</p>`)
+  const input = document.getElementById("label-input") as HTMLInputElement | null
+  if (!input) return
+  input.focus()
+  if (keep) {
+    input.value = keep.value
+    input.setSelectionRange(keep.start, keep.end)
+  } else input.select()
 }
+
+// ---------- rename a label everywhere ----------
+
+// The name box in the Labels panel: `name` defined in `path` is being renamed.
+let labelNaming: { name: string; path: string; draft: string; error: string } | null = null
+let pendingRename: { name: string; path: string; to: string } | null = null
+const sameLanguage = (path: string) => labels.filter((l) => langOf(l.path) === langOf(path)).map((l) => l.name)
+
+function startLabelRename(name: string, path: string, draft = name, error = "") {
+  if (!root) return
+  labelNaming = { name, path, draft, error }
+  store.set("labels", "open")
+  if (sidebar.classList.contains("searching")) showExplorer()
+  setPanel("sidebar", true)
+  renderLabels()
+}
+
+// F2 in the editor, or the command: the label under the caret, defined in a file of this language.
+function renameLabelAtCaret(): boolean {
+  const own = labels.filter((l) => langOf(l.path) === lang)
+  const name = current && labelAt(ta.value, ta.selectionStart, own.map((l) => l.name))
+  const l = own.find((l) => l.name === name)
+  if (l) startLabelRename(l.name, l.path)
+  return !!l
+}
+
+function cancelLabelRename() {
+  labelNaming = null
+  renderLabels()
+}
+
+function showLabelProblem(problem: string) {
+  const msg = document.getElementById("label-msg")
+  const input = document.getElementById("label-input")
+  if (!msg || !input) return
+  msg.hidden = !problem
+  msg.textContent = problem
+  if (problem) input.setAttribute("aria-invalid", "true")
+  else input.removeAttribute("aria-invalid")
+}
+
+async function commitLabelRename() {
+  const n = labelNaming
+  const input = document.getElementById("label-input") as HTMLInputElement | null
+  if (!n || !input) return
+  const to = input.value.trim()
+  const problem = labelProblem(to, n.name, langOf(n.path), sameLanguage(n.path))
+  if (problem) return showLabelProblem(problem) // Enter does nothing else
+  labelNaming = null
+  renderLabels()
+  // The open text goes to disk first, and typing waits until the app answers.
+  holdTyping(true)
+  const error = await flushSave(true)
+  if (error) {
+    holdTyping(false)
+    toast(`Nothing was renamed: ${baseName(current!)} could not be saved first.`)
+    return startLabelRename(n.name, n.path, to)
+  }
+  pendingRename = { name: n.name, path: n.path, to }
+  send({ type: "rename_label", req: (leaving = ++reqSeq), path: n.path, from: n.name, to })
+}
+
+$("labels").addEventListener("keydown", (e) => {
+  const el = e.target as HTMLElement
+  if (el.id === "label-input") {
+    if (e.isComposing) return
+    if (e.key === "Enter") commitLabelRename()
+    else if (e.key === "Escape") cancelLabelRename()
+    else return
+    e.preventDefault()
+    e.stopPropagation()
+  } else if (e.key === "F2" && el.dataset.i) {
+    e.preventDefault()
+    const l = labels[Number(el.dataset.i)]
+    if (l) startLabelRename(l.name, l.path)
+  }
+})
+$("labels").addEventListener("input", (e) => {
+  const n = labelNaming
+  if (n && (e.target as HTMLElement).id === "label-input") showLabelProblem(labelProblem((e.target as HTMLInputElement).value.trim(), n.name, langOf(n.path), sameLanguage(n.path)))
+})
+$("labels").addEventListener("focusout", (e) => {
+  if ((e.target as HTMLElement).id === "label-input" && labelNaming && !(e.relatedTarget as HTMLElement | null)?.closest?.("#labels")) cancelLabelRename()
+})
+$("labels").oncontextmenu = (e) => {
+  const l = labels[Number((e.target as HTMLElement).closest<HTMLElement>(".row[data-i]")?.dataset.i)]
+  if (!l) return
+  e.preventDefault()
+  showMenu(e.clientX, e.clientY, [{ label: "Rename…", keys: kc("rename-label"), run: () => startLabelRename(l.name, l.path) }])
+}
+
+$("breadcrumbs").onclick = (e) => { if ((e.target as HTMLElement).closest(".section-crumb")) openPalette("@") }
 
 $("labels-head").onclick = () => {
   store.set("labels", store.get("labels") === "closed" ? "open" : "closed")
   renderLabels()
 }
 $("labels").onclick = (e) => {
-  const l = labels[Number((e.target as HTMLElement).closest<HTMLElement>(".row[data-i]")?.dataset.i)]
+  const fix = (e.target as HTMLElement).closest<HTMLElement>(".fix")
+  if (fix?.dataset.doi) return void addFromDoi(nowhere[Number(fix.dataset.doi)])
+  if (fix) return void applyKeyFix(nowhere[Number(fix.dataset.fix)], fix.dataset.key!)
+  const row = (e.target as HTMLElement).closest<HTMLElement>(".row")
+  const l = row?.dataset.m ? nowhere[Number(row.dataset.m)] : labels[Number(row?.dataset.i)]
   if (l) goTo(l.path, l.line, l.col)
 }
+
+// ---------- outline: the open file's headings, a map that also moves whole sections ----------
+
+const OUTLINE_HINT: Record<Lang, string> = {
+  typst: "Start a line with = and a space, like = Introduction.",
+  latex: "Write \\section{Introduction}.",
+  quarto: "Start a line with # and a space, like # Introduction.",
+  markdown: "Start a line with # and a space, like # Introduction.",
+  text: "",
+}
+let heads: Heading[] = []
+let outlineTimer = 0
+let outlineStale = false // the text changed since the list was drawn
+let outlineHere = -1 // the heading whose section holds the caret
+let sectionCounts: number[] = [] // words per heading's section, same order as heads
+const showCounts = () => store.get("outline-words") !== "off"
+const toggleCounts = () => { store.set("outline-words", showCounts() ? "off" : "on"); renderOutline() }
+
+const scheduleOutline = () => {
+  outlineStale = true
+  clearTimeout(outlineTimer)
+  outlineTimer = window.setTimeout(renderOutline, 200)
+}
+const hereIndex = () => {
+  const caret = lineOf(ta.selectionStart)
+  let n = -1
+  while (n + 1 < heads.length && heads[n + 1].line <= caret) n++
+  return n
+}
+function markOutlineHere() {
+  const n = hereIndex()
+  if (n === outlineHere) return
+  outlineHere = n
+  const box = $("outline")
+  box.querySelector(".here")?.removeAttribute("aria-current")
+  box.querySelector(".here")?.classList.remove("here")
+  const row = box.querySelector<HTMLElement>(`.row[data-i="${n}"]`)
+  row?.classList.add("here")
+  row?.setAttribute("aria-current", "location")
+  // Reach the tab stop for the section the caret is in; above the first heading, the first row.
+  box.querySelectorAll<HTMLElement>(".row[tabindex='0']").forEach((r) => (r.tabIndex = -1))
+  const stop = row ?? box.querySelector<HTMLElement>(".row[data-i]")
+  if (stop) {
+    stop.tabIndex = 0
+    if (row && !box.contains(document.activeElement)) row.scrollIntoView({ block: "nearest" })
+  }
+}
+function renderOutline() {
+  clearTimeout(outlineTimer)
+  outlineStale = false
+  const open = store.get("outline") !== "closed"
+  const refocus = $("outline").contains(document.activeElement) ? (document.activeElement as HTMLElement).dataset.i : undefined
+  heads = current && syntax() ? outline(ta.value, lang, syntax()!.headingOf) : []
+  sectionCounts = sectionWords(ta.value, heads, countWords)
+  outlineHere = -2
+  $("outline-head").hidden = $("outline").hidden = !root
+  $("outline-head").setAttribute("aria-expanded", String(open))
+  $("outline-head").querySelector(".codicon")!.className = `codicon codicon-chevron-${open ? "down" : "right"}`
+  $("outline-count").textContent = heads.length ? String(heads.length) : ""
+  $("outline-count").title = heads.length ? `${heads.length} heading${heads.length === 1 ? "" : "s"}` : ""
+  $("outline").classList.toggle("closed", !open)
+  const top = Math.min(...heads.map((h) => h.level), 9)
+  $("outline").innerHTML = heads.length
+    ? heads.map((h, i) => {
+        const title = headingTitle(lang, h.title)
+        return `<button class="row outline" data-i="${i}" tabindex="-1" style="--depth:${h.level - top + 1}" title="${esc(`${title}, line ${h.line + 1}, ${sectionCounts[i].toLocaleString()} words`)}"><span class="name">${esc(title)}</span>${showCounts() ? `<span class="count">${sectionCounts[i].toLocaleString()}</span>` : ""}</button>`
+      }).join("")
+    : `<p class="muted outline-empty">${!current ? "Open a file to see its sections." : lang === "text" ? "Plain text files have no outline." : `No headings yet. ${esc(OUTLINE_HINT[lang])}`}</p>`
+  markOutlineHere()
+  if (refocus !== undefined) $("outline").querySelector<HTMLElement>(`.row[data-i="${refocus}"]`)?.focus({ preventScroll: true })
+}
+$("outline-head").onclick = () => {
+  store.set("outline", store.get("outline") === "closed" ? "open" : "closed")
+  renderOutline()
+}
+
+// Move heading `from` before heading `to` (to === heads.length: the end). One edit, so one undo step.
+function moveHeading(from: number, to: number): boolean {
+  if (ta.readOnly) return void toast("Wait a moment, then try again."), false
+  if (outlineStale) return void renderOutline(), false // typed a moment ago: the list was out of date
+  const r = moveSection(ta.value, heads, from, to)
+  if (r === "same") return false
+  if (r === "inside") return void toast("A section cannot go inside itself."), false
+  if (mode === "review") setMode("edit")
+  edit(r.at, r.at + r.cut, r.put)
+  let p = 0
+  for (let n = 0; n < r.line; n++) p = ta.value.indexOf("\n", p) + 1
+  ta.setSelectionRange(p, p)
+  const div = hl.children[r.line] as HTMLElement | undefined
+  if (div) ta.scrollTop = Math.max(0, div.offsetTop - ta.clientHeight / 3)
+  renderOutline()
+  const i = heads.findIndex((h) => h.line === r.line)
+  $("outline").querySelector<HTMLElement>(`.row[data-i="${i}"]`)?.focus({ preventScroll: true })
+  return true
+}
+// Shift+Alt+Left / Right: the section and everything inside it one level up or down. One edit, so one undo step.
+function shiftHeading(i: number, delta: -1 | 1) {
+  if (ta.readOnly) return void toast("Wait a moment, then try again.")
+  if (outlineStale) return void renderOutline()
+  const r = shiftSection(ta.value, heads, i, delta, lang as "typst" | "latex" | "markdown" | "quarto")
+  if (typeof r === "string")
+    return void toast(
+      r === "top" ? "This section is already at the top level." : r === "bottom" ? "A section inside it is already at the deepest level, so it cannot go lower." : "This heading is written in a form Quire cannot change here. Edit it by hand.",
+    )
+  if (mode === "review") setMode("edit")
+  edit(r.at, r.at + r.cut, r.put)
+  renderOutline()
+  $("outline").querySelector<HTMLElement>(`.row[data-i="${i}"]`)?.focus({ preventScroll: true })
+}
+// Alt+Up / Alt+Down: before the previous sibling, or after the next one.
+function moveHeadingBy(i: number, step: -1 | 1) {
+  const lvl = heads[i].level
+  let j = i + step
+  while (heads[j] && heads[j].level > lvl) j += step // a deeper heading belongs to the section next door
+  if (!heads[j] || heads[j].level < lvl) return
+  if (step < 0) return void moveHeading(i, j)
+  let to = j + 1
+  while (heads[to] && heads[to].level > lvl) to++
+  moveHeading(i, to)
+}
+
+$("outline").addEventListener("keydown", (e) => {
+  const row = (e.target as HTMLElement).closest<HTMLElement>(".row[data-i]")
+  if (!row) return
+  const i = Number(row.dataset.i)
+  if ((e.metaKey || e.ctrlKey) && !e.altKey && e.key.toLowerCase() === "z") {
+    // A moved section is undone from where the writer is: the outline has no undo of its own.
+    e.preventDefault()
+    ta.focus({ preventScroll: true })
+    document.execCommand(e.shiftKey ? "redo" : "undo")
+  } else if (e.altKey && (e.key === "ArrowUp" || e.key === "ArrowDown") && !e.metaKey && !e.ctrlKey && !e.shiftKey) {
+    e.preventDefault()
+    moveHeadingBy(i, e.key === "ArrowUp" ? -1 : 1)
+  } else if (e.altKey && e.shiftKey && (e.key === "ArrowLeft" || e.key === "ArrowRight") && !e.metaKey && !e.ctrlKey) {
+    e.preventDefault()
+    shiftHeading(i, e.key === "ArrowLeft" ? -1 : 1)
+  } else if (!e.altKey && !e.metaKey && !e.ctrlKey && ["ArrowUp", "ArrowDown", "Home", "End"].includes(e.key)) {
+    e.preventDefault()
+    const n = e.key === "Home" ? 0 : e.key === "End" ? heads.length - 1 : i + (e.key === "ArrowUp" ? -1 : 1)
+    $("outline").querySelector<HTMLElement>(`.row[data-i="${Math.max(0, Math.min(heads.length - 1, n))}"]`)?.focus()
+  }
+})
+$("outline").oncontextmenu = (e) => {
+  const i = Number((e.target as HTMLElement).closest<HTMLElement>(".row[data-i]")?.dataset.i)
+  if (!heads[i]) return
+  e.preventDefault()
+  showMenu(e.clientX, e.clientY, [
+    { label: "Promote Section", keys: kc("outline-promote"), run: () => shiftHeading(i, -1) },
+    { label: "Demote Section", keys: kc("outline-demote"), run: () => shiftHeading(i, 1) },
+    "-",
+    { label: "Move Section Up", keys: mac ? "⌥↑" : "Alt+↑", run: () => moveHeadingBy(i, -1) },
+    { label: "Move Section Down", keys: mac ? "⌥↓" : "Alt+↓", run: () => moveHeadingBy(i, 1) },
+    "-",
+    { label: showCounts() ? "Hide Word Counts" : "Show Word Counts", run: toggleCounts },
+  ])
+}
+$("outline").onclick = (e) => {
+  const row = (e.target as HTMLElement).closest<HTMLElement>(".row[data-i]")
+  const h = row && heads[Number(row.dataset.i)]
+  if (h && current) goTo(current, h.line, 0)
+}
+
+// Dragging a heading onto another place moves its section. The same pointer pattern as the file tree:
+// below 4 px it is still a click.
+$("outline").addEventListener("pointerdown", (e) => {
+  const row = (e.target as HTMLElement).closest<HTMLElement>(".row[data-i]")
+  if (!row || e.button !== 0) return
+  const from = Number(row.dataset.i)
+  const x = e.clientX, y = e.clientY
+  let drag = false
+  let to = -1 // drop before heading `to`; heads.length is after the last row
+  const rows = () => [...$("outline").querySelectorAll<HTMLElement>(".row[data-i]")]
+  const clear = () => {
+    for (const r of rows()) r.classList.remove("drop-before", "drop-after", "dragged")
+    document.body.classList.remove("drag-refused")
+  }
+  const aim = (m: PointerEvent) => {
+    const all = rows()
+    const over = all.find((r) => { const b = r.getBoundingClientRect(); return m.clientY >= b.top && m.clientY < b.bottom })
+    to = -1
+    if (over) {
+      const b = over.getBoundingClientRect()
+      to = Number(over.dataset.i) + (m.clientY < b.top + b.height / 2 ? 0 : 1)
+    } else if (all.length && m.clientY >= all[all.length - 1].getBoundingClientRect().bottom && $("outline").contains(m.target as Node)) to = all.length
+    for (const r of all) r.classList.remove("drop-before", "drop-after")
+    const verdict = to < 0 ? "same" : moveSection(ta.value, heads, from, to)
+    document.body.classList.toggle("drag-refused", verdict === "inside")
+    if (typeof verdict === "object") (to < all.length ? all[to].classList.add("drop-before") : all[all.length - 1].classList.add("drop-after"))
+    else to = -1
+  }
+  const move = (m: PointerEvent) => {
+    if (!drag && Math.hypot(m.clientX - x, m.clientY - y) < 4) return
+    if (!drag) {
+      drag = true
+      row.classList.add("dragged")
+      document.body.classList.add("dragging")
+    }
+    aim(m)
+  }
+  const end = (u: PointerEvent) => {
+    document.removeEventListener("pointermove", move)
+    document.removeEventListener("pointerup", end)
+    document.removeEventListener("keydown", esc, true)
+    document.body.classList.remove("dragging")
+    const go = drag && u.type === "pointerup" ? to : -1
+    clear()
+    if (!drag) return
+    const stop = (c: Event) => c.stopPropagation()
+    document.addEventListener("click", stop, { capture: true, once: true })
+    setTimeout(() => document.removeEventListener("click", stop, true))
+    if (go >= 0) moveHeading(from, go)
+  }
+  const esc = (k: KeyboardEvent) => {
+    if (k.key === "Escape" && drag) {
+      k.preventDefault()
+      end(new PointerEvent("pointercancel"))
+    }
+  }
+  document.addEventListener("pointermove", move)
+  document.addEventListener("pointerup", end)
+  document.addEventListener("keydown", esc, true)
+})
 
 $("open-folder").onclick = $("open-folder-2").onclick = $("start-open").onclick = async () => {
   // Unsaved typing belongs to the folder that is open now.
@@ -1052,10 +1803,15 @@ renderRecent()
 
 // Another folder was opened: nothing from the previous one may stay on screen.
 function resetForFolder(newRoot: string) {
+  lastOp = null
+  trail = newTrail()
+  closePalette(false)
   clearTimeout(saveTimer)
   closeFile()
   invalidateDiagnostics()
   compileMain = null
+  compileTool = ""
+  compiledMains.clear()
   typedSent = ""
   previewing = null
   previewKind = ""
@@ -1064,6 +1820,9 @@ function resetForFolder(newRoot: string) {
   naming = null
   collapsed.clear()
   changed.clear()
+  clearTimeout(refreshTimer)
+  searchQuery.value = ""
+  showSearch(++searchReq, [], false)
   onFolderOpened(baseName(newRoot.replace(/\/$/, "")))
 }
 
@@ -1075,7 +1834,7 @@ function renderTab() {
   // No project yet: the start page in place of the watermark, and no preview next to it.
   app.classList.toggle("starting", !root)
   $("start").hidden = !!root
-  $("welcome-mark").hidden = $("shortcuts").hidden = !root
+  $("welcome-mark").hidden = $("shortcuts").hidden = $("welcome-keys").hidden = !root
   $("breadcrumbs").hidden = !has
   buildFormatBar(lang, mode === "review")
   $("format-bar").hidden = !has || !syntax()
@@ -1104,25 +1863,44 @@ function scheduleInfo() {
   })
 }
 
-// Markup that is not words: comments, math, code and commands.
-const NOT_WORDS: Record<Lang, RegExp[]> = {
-  typst: [/\/\/.*$/gm, /\$[^$]*\$/g, /#[a-zA-Z_][\w.-]*/g],
-  latex: [/(?<!\\)%.*$/gm, /\$[^$]*\$/g, /\\[a-zA-Z@]+\*?/g],
-  quarto: [/<!--[\s\S]*?-->/g, /```[\s\S]*?```/g, /\$[^$]*\$/g, /\{[^}]*\}/g],
-  markdown: [/<!--[\s\S]*?-->/g, /```[\s\S]*?```/g, /\$[^$]*\$/g],
-  text: [],
-}
-const countWords = (s: string) =>
-  (NOT_WORDS[lang].reduce((t, r) => t.replace(r, " "), s).match(/[\p{L}\p{N}][\p{L}\p{N}'’-]*/gu) ?? []).length
+const countWords = (s: string) => countWordsIn(lang, s)
 
 const lineText = (n: number) => ta.value.slice(lineStarts[n], (lineStarts[n + 1] ?? ta.value.length + 1) - 1)
 
 function currentHeading(): string | null {
   for (let n = lineOf(ta.selectionStart); n >= 0; n--) {
     const h = syntax()?.headingOf(lineText(n))
-    if (h) return h[1]
+    if (h) return headingTitle(lang, h[1])
   }
   return null
+}
+
+// A writing goal is kept per file: how many words it had when the goal was set.
+const goals = new Map<string, Goal>() // the same, in memory, for when storage is not available
+const goalKey = () => `goal.${root ?? ""}\n${current}`
+function currentGoal(): Goal | null {
+  if (!current) return null
+  const key = goalKey()
+  if (!goals.has(key)) { const g = readGoal(store.get(key)); if (g) goals.set(key, g) }
+  return goals.get(key) ?? null
+}
+function setGoal(n: number) {
+  if (!current) return
+  const g = { goal: n, start: countWords(ta.value) }
+  goals.set(goalKey(), g)
+  store.set(goalKey(), JSON.stringify(g))
+  paintWords(g.start)
+}
+let words = { total: 0, picked: 0, section: "" }
+function paintWords(total = words.total, picked = words.picked, section = words.section) {
+  words = { total, picked, section }
+  const g = currentGoal()
+  const p = g && goalProgress(g.start, total, g.goal)
+  const el = $("sb-words")
+  const goalText = p ? `${p.done.toLocaleString()} / ${g!.goal.toLocaleString()}` : ""
+  el.textContent = app.classList.contains("focus") && goalText ? goalText : `${total.toLocaleString()} words` + section + (picked ? ` (${picked.toLocaleString()} selected)` : "") + (goalText ? ` · ${goalText}` : "")
+  el.classList.toggle("reached", !!p?.reached)
+  el.title = (p ? (p.reached ? "Writing goal reached" : "Words added to this file since you set the goal") + ": " : "") + el.textContent
 }
 
 let wordsTimer = 0
@@ -1147,13 +1925,15 @@ function updateInfo() {
   wordsTimer = window.setTimeout(() => {
     const total = countWords(ta.value)
     const picked = ta.selectionEnd > ta.selectionStart ? countWords(ta.value.slice(ta.selectionStart, ta.selectionEnd)) : 0
-    $("sb-words").textContent = `${total.toLocaleString()} words` + (picked ? ` (${picked.toLocaleString()} selected)` : "")
+    if (outlineStale) renderOutline()
+    const n = hereIndex()
+    paintWords(total, picked, n >= 0 ? ` · ${sectionCounts[n].toLocaleString()} words in ${headingTitle(lang, heads[n].title)}` : "")
   }, 250)
   const crumbs = [...(root ? [root.split("/").filter(Boolean).pop()!] : []), ...current.split("/")]
   const heading = currentHeading()
   if (heading) crumbs.push(heading)
   $("breadcrumbs").innerHTML = crumbs
-    .map((c, i) => (i ? icon("chevron-right") : "") + `<span class="crumb">${esc(c)}</span>`)
+    .map((c, i) => (i ? icon("chevron-right") : "") + (heading && i === crumbs.length - 1 ? `<button class="crumb section-crumb" title="Go to section">${esc(c)}</button>` : `<span class="crumb">${esc(c)}</span>`))
     .join("")
   renderChips()
 }
@@ -1186,9 +1966,12 @@ function renderAgentStatus(text?: string) {
   const busy = agentState === "starting" || agentState === "working"
   const label =
     text ??
-    { none: root ? `${name} is not running. Click to start it.` : "Open a folder to start the agent", starting: `Starting ${name}…`, ready: name, working: `${name} is working…` }[agentState]
+    { none: root ? `${name} off · click to start` : "Open a folder to start the agent", starting: `Starting ${name}…`, ready: name, working: `${name} is working…` }[agentState]
   $("sb-agent").innerHTML = `${icon(busy ? "loading" : "hubot", busy ? "codicon-modifier-spin" : "")} <span>${esc(label)}</span>`
-  $("sb-agent").title = root && agentState === "none" ? "Start the agent" : "Open chat"
+  const full = root && agentState === "none" ? `${name} is not running. Click to start it.` : agentState === "ready" ? `${name} is ready. Click to open chat.` : label
+  $("sb-agent").classList.toggle("capped", agentState !== "none")
+  $("sb-agent").title = full
+  $("sb-agent").setAttribute("aria-label", full)
   setAgentReady(chApi() ? chReady() : agentState === "ready" || agentState === "working")
   if ($<HTMLDialogElement>("setup").open || !root) renderSetup()
   renderAgentNote(name, label)
@@ -1831,12 +2614,15 @@ const rwCard = $("rewrite-card")
 const rwAsk = $<HTMLTextAreaElement>("rewrite-ask")
 let rw: { from: number; to: number; selected: string; req: number; text: string } | null = null
 let menuTimer = 0
+let jumpSel: [number, number] | null = null // a selection made by goTo: the writer did not ask for the menu
 
 // The menu shows under a selection once it stops changing.
 function scheduleMenu() {
   clearTimeout(menuTimer)
   menu.hidden = true
   if (!findBox.hidden) return
+  if (jumpSel && ta.selectionStart === jumpSel[0] && ta.selectionEnd === jumpSel[1]) return
+  jumpSel = null
   menuTimer = window.setTimeout(placeMenu, 250)
 }
 
@@ -2087,8 +2873,8 @@ function openFind(replace = false) {
   findBox.hidden = false
   if (replace) toggleFindReplace(true)
   refreshFind(true)
-  findQuery.focus()
-  findQuery.select()
+  if (replace && findQuery.value) { findReplacement.focus(); findReplacement.select() } // the query is there: next is the replacement
+  else { findQuery.focus(); findQuery.select() }
 }
 
 function closeFind(focus = true) {
@@ -2144,7 +2930,8 @@ document.addEventListener("keydown", (e) => {
   const mod = e.metaKey || e.ctrlKey, key = e.key.toLowerCase()
   if (mod && (key === "f" || e.code === "KeyF") && !e.shiftKey) openFind(e.altKey)
   else if (mod && key === "g" && !e.altKey) stepFind(e.shiftKey ? -1 : 1)
-  else if (!findBox.hidden && e.key === "Escape") closeFind()
+  else if (!findBox.hidden && !refOpen && e.key === "Escape") closeFind() // an open reference list closes first
+  else if (e.key === "Tab" && !$("find-replace-row").hidden && !findBox.hidden && !e.metaKey && !e.ctrlKey && !e.altKey && e.target === (e.shiftKey ? findReplacement : findQuery)) (e.shiftKey ? findQuery : findReplacement).focus()
   else if (!findBox.hidden && (e.target === findQuery || e.target === findReplacement) && e.key === "Enter") {
     if (e.target === findReplacement && !e.shiftKey) replaceFind(false)
     else stepFind(e.shiftKey ? -1 : 1)
@@ -2187,10 +2974,30 @@ function inlineStatus(text: string, kind: "" | "busy" | "error" = "") {
 
 // The same box asks the agent for an edit, or takes a DOI or arXiv ID to cite.
 let inlineKind: "edit" | "cite" = "edit"
+// Set when the cite box was opened on a citation that points nowhere: the paper is added under that key.
+let citeFor: Nowhere | null = null
+// The existing key the box offers instead of adding the same paper twice.
+let citeSwap: string | null = null
 
-function openInline(kind: "edit" | "cite" = "edit") {
+// Open the cite box at a citation that points nowhere. The jump is a place to come Back to.
+async function addFromDoi(n: Nowhere) {
+  if (!n) return
+  if (n.path !== current) {
+    pendingFix = { path: n.path, run: () => addFromDoi(n) }
+    pendingJump = { path: n.path, line: n.line, col: n.col }
+    leaveThen({ type: "open_file", path: n.path }).then((ok) => { if (!ok) pendingFix = null })
+    return
+  }
+  if (ta.readOnly || leaving) return void toast("Wait a moment, then try again.")
+  if (!(await goTo(n.path, n.line, n.col))) return
+  openInline("cite", n)
+}
+
+function openInline(kind: "edit" | "cite" = "edit", forKey: Nowhere | null = null) {
   if (!current || mode !== "edit") return
   inlineKind = kind
+  citeFor = forKey
+  citeSwap = null
   render() // make sure the colored layer matches before measuring
   const empty = ta.selectionStart === ta.selectionEnd
   const at = coordsAt(ta.selectionStart)
@@ -2200,8 +3007,8 @@ function openInline(kind: "edit" | "cite" = "edit") {
   box.hidden = false
   $("inline-icon").className = `codicon codicon-${kind === "cite" ? "library" : "sparkle"}`
   if (kind === "cite") {
-    inlineInput.placeholder = "DOI or arXiv ID"
-    inlineStatus(`The paper goes into your .bib file, and ${syntax()?.cite ?? "@key"} into the text.`)
+    inlineInput.placeholder = forKey ? `DOI or arXiv ID for ${forKey.key}` : "DOI or arXiv ID"
+    inlineStatus(forKey ? `The paper goes into your .bib file as ${forKey.key}. The text stays as it is.` : `The paper goes into your .bib file, and ${syntax()?.cite ?? "@key"} into the text.`)
   } else {
     inlineInput.placeholder = empty ? "Write at the cursor" : "Edit selection"
     inlineStatus(empty ? "Nothing selected: the text goes in at the cursor." : "")
@@ -2213,6 +3020,7 @@ function openInline(kind: "edit" | "cite" = "edit") {
 function closeInline() {
   box.hidden = true
   inlineWant = null
+  citeFor = citeSwap = null
   ta.focus()
 }
 
@@ -2222,14 +3030,21 @@ inlineInput.oninput = () => {
 }
 inlineInput.onkeydown = (e) => {
   if (e.key === "Escape") return closeInline()
+  if (e.key === "Enter" && citeSwap && citeFor && !e.isComposing) {
+    e.preventDefault() // the box offered the key the paper already has
+    const [n, key] = [citeFor, citeSwap]
+    closeInline()
+    return applyKeyFix(n, key)
+  }
   if (e.key !== "Enter" || e.shiftKey || e.isComposing || !inlineInput.value.trim()) return
   e.preventDefault()
+  citeSwap = null
   const from = ta.selectionStart
   const to = ta.selectionEnd
   const doc = ta.value
   inlineWant = { req: ++reqSeq, from, to, selected: doc.slice(from, to) }
   if (inlineKind === "cite") {
-    send({ type: "cite", req: inlineWant.req, id: inlineInput.value.trim(), path: current })
+    send({ type: "cite", req: inlineWant.req, id: inlineInput.value.trim(), path: current, ...(citeFor && { key: citeFor.key }) })
     return inlineStatus("Looking it up…", "busy")
   }
   const why = edWhy()
@@ -2266,8 +3081,32 @@ function applyInline(req: number, text: string) {
   goToChunk(0)
 }
 
-function applyCite(msg: { req: number; key: string; bib: string; linked: boolean; added: boolean }) {
+// Opens the bib on the entry line for the key (the top when the key is not found). In another file the entry is
+// searched once the file is open, through pendingFix.
+const showBib = (bib: string, key = "") => [{
+  label: "Show",
+  run: () => {
+    const entry = () => {
+      const at = key ? ta.value.indexOf("{" + key + ",") : -1
+      void goTo(bib, at < 0 ? 0 : ta.value.slice(0, at).split("\n").length - 1, 0)
+    }
+    if (bib === current) return entry()
+    pendingFix = { path: bib, run: entry }
+    void goTo(bib, 0, 0).then((ok) => { if (!ok) pendingFix = null })
+  },
+}]
+
+function applyCite(msg: { req: number; key: string; bib: string; linked: boolean; added: boolean; wanted?: string }) {
   if (inlineWant?.req !== msg.req) return
+  if (citeFor) {
+    if (!msg.added && msg.wanted && msg.key !== msg.wanted) { // already in the bibliography under another key
+      citeSwap = msg.key
+      inlineStatus(`${msg.bib} already has this paper as ${msg.key}. Press Enter to use ${msg.key} in the text instead of ${msg.wanted}, or Escape to keep it.`)
+      return
+    }
+    closeInline()
+    return void toast(msg.added ? `Added ${msg.key} to ${msg.bib}.` : `${msg.key} is already in ${msg.bib}.`, "info", showBib(msg.bib, msg.key))
+  }
   box.hidden = true
   inlineWant = null
   insertAt((syntax()?.cite ?? "@key").replace("key", msg.key), msg.key)
@@ -2280,7 +3119,7 @@ function applyCite(msg: { req: number; key: string; bib: string; linked: boolean
     markdown: `Add "bibliography: ${msg.bib}" to the YAML header.`,
     text: "",
   }[lang]
-  toast((msg.added ? `Added ${msg.key} to ${msg.bib}.` : `${msg.key} is already in ${msg.bib}.`) + (msg.linked ? "" : ` ${link}`), "info")
+  toast((msg.added ? `Added ${msg.key} to ${msg.bib}.` : `${msg.key} is already in ${msg.bib}.`) + (msg.linked ? "" : ` ${link}`), "info", showBib(msg.bib, msg.key))
 }
 
 // ---------- export: the whole document as PDF, Word or another format ----------
@@ -2317,9 +3156,27 @@ async function exportAs(to: string) {
   }
   // A failed save exports nothing: its notice says why, and the old text is not exported as new.
   if (isDirty() && (await flushSave())) return
+  // Problems the page already knows: the writer can fix them first or export anyway.
+  const problems = gatherProblems(path, compileMain, compileDiagnostics, document.body.classList.contains("errors-pending"), nowhere)
+  if (problems.length) {
+    const lines = problemLines(path, problems)
+    const choice = problems.map((p) => p.nowhere && keyChoices(p.nowhere)[0])
+    choice.slice(0, lines.length).forEach((k, i) => { if (k) lines[i] += `. Did you mean ${k}?` })
+    const errFixes = problems.map((p) => (p.diag ? errorFix(p.diag) : null))
+    errFixes.slice(0, lines.length).forEach((f, i) => { if (f) lines[i] += ` ${f.label}${f.label.endsWith("?") ? "" : "."}` })
+    const more = elsewhere(path, compileMain, nowhere)
+    if (more) lines.push(`${more} more reference${more > 1 ? "s" : ""} point${more > 1 ? "" : "s"} nowhere in other files (see Labels).`)
+    const n = problems.length
+    const fix = choice[0] // the first problem is a broken key with a likely fix: offer it where "Go to first problem" would be
+    const errFix = errFixes[0]
+    const answer = await ask(`${baseName(path)} has ${n} problem${n > 1 ? "s" : ""}`, lines.join("\n"), "Export anyway", undefined, fix ? `Fix ${problems[0].nowhere!.key} to ${fix}` : errFix ? errFix.label : "Go to first problem")
+    if (answer === "extra") fix ? applyKeyFix(problems[0].nowhere!, fix) : errFix ? applyErrorFix(errFix) : goTo(problems[0].path, problems[0].line, problems[0].col, problems[0].utf16)
+    if (answer !== "save") return
+  }
   send({ type: "export", req: ++reqSeq, path, to })
 }
 
+const toolErrors = new Map<string, HTMLElement>() // missing-tool notices still on screen, by tool
 let exporting: HTMLElement | null = null // the "Exporting…" notice
 
 function exported(path: string | null) {
@@ -2358,6 +3215,451 @@ for (const b of document.querySelectorAll<HTMLElement>("[data-as]")) {
 // The document in the format the preview shows, made again by the export.
 $("export-preview").onclick = () => exportAs(previewAs(langOf(previewing ?? current ?? "")))
 renderPreviewAs()
+// ---------- quick input: files and existing commands, with the keyboard kept in one place ----------
+
+const palette = $<HTMLDialogElement>("quick-input")
+const paletteQuery = $<HTMLInputElement>("quick-query")
+const paletteList = $("quick-list")
+type QuickItem = { id: string; label: string; dir?: string; indent?: number; score?: number; here?: boolean; detail?: string; keys?: string; positions?: number[]; run: () => void }
+let quickItems: QuickItem[] = []
+let quickIndex = 0
+// ---------- search in the project ----------
+
+type SearchHit = { path: string; line: number; col: number; len: number; before: string; hit: string; after: string }
+const searchQuery = $("search-query") as HTMLInputElement
+const searchCase = $("search-case"), searchWord = $("search-word")
+let searchReq = 0 // the newest search: an older answer that comes later is dropped
+let searchHits: SearchHit[] = []
+let searchMore = false
+let searchSel = 0
+let searchTimer = 0
+let searchKeep = "" // path:line:col of the row to stay on when a refreshed search answers
+let refreshTimer = 0
+
+// The project changed under an open Search view: ask again, so a row never points at a moved line.
+function refreshSearch() {
+  clearTimeout(refreshTimer)
+  if (!sidebar.classList.contains("searching") || !isOpen("sidebar") || !searchQuery.value) return
+  refreshTimer = window.setTimeout(() => {
+    const h = searchHits[searchSel]
+    searchKeep = h ? `${h.path}:${h.line}:${h.col}` : ""
+    runSearch()
+  }, 300)
+}
+
+function openSearch() {
+  if (!root) return
+  setPanel("sidebar", true)
+  sidebar.classList.add("searching")
+  $("pane-name").textContent = "Search"
+  $("act-explorer").classList.remove("active")
+  $("act-search").classList.add("active")
+  const picked = ta.value.slice(ta.selectionStart, ta.selectionEnd)
+  if (picked && !picked.includes("\n") && document.activeElement === ta) searchQuery.value = picked
+  searchQuery.focus()
+  searchQuery.select()
+  runSearch()
+}
+
+function runSearch() {
+  clearTimeout(searchTimer)
+  if (!searchQuery.value) return showSearch(++searchReq, [], false)
+  if (!searchQuery.value) searchKeep = ""
+  const msg: Record<string, unknown> = { type: "search", req: ++searchReq, query: searchQuery.value, case: searchCase.getAttribute("aria-pressed") === "true", word: searchWord.getAttribute("aria-pressed") === "true" }
+  if (current) { msg.path = current; msg.content = ta.value } // the text as typed, not as last sent
+  searchAsked = { query: searchQuery.value, case: msg.case as boolean, word: msg.word as boolean }
+  send(msg)
+}
+
+function showSearch(req: number, hits: SearchHit[], more: boolean) {
+  if (req !== searchReq) return
+  searchHits = hits
+  searchMore = more
+  searchShown = searchAsked
+  searchSel = Math.max(0, hits.findIndex((h) => `${h.path}:${h.line}:${h.col}` === searchKeep))
+  searchKeep = ""
+  const files = new Set(hits.map((h) => h.path)).size
+  const q = searchQuery.value
+  $("search-count").textContent = !q ? "" : !hits.length ? `No results for "${q}"`
+    : more ? `${hits.length}+ results: refine the search`
+    : `${hits.length} result${hits.length === 1 ? "" : "s"} in ${files} file${files === 1 ? "" : "s"}`
+  let html = "", last = ""
+  hits.forEach((h, i) => {
+    if (h.path !== last) {
+      last = h.path
+      const n = hits.filter((x) => x.path === h.path).length
+      html += `<div class="search-file" title="${esc(h.path)}"><span>${esc(h.path)}</span><em>${n}</em><button data-replace="${esc(h.path)}" title="Replace in this file only" aria-label="Replace in ${esc(h.path)}">Replace</button></div>`
+    }
+    html += `<button class="search-hit" role="option" tabindex="-1" data-i="${i}" aria-selected="${i === searchSel}">${esc(h.before.length > 24 ? "…" + h.before.slice(-24) : h.before.trimStart())}<mark>${esc(h.hit)}</mark>${esc(h.after)}</button>`
+  })
+  $("search-results").innerHTML = html
+  renderReplace()
+}
+
+// Replace across the project: the file counts the view shows go to the app as `expected`, and
+// the app writes nothing unless the text still gives those counts.
+const searchReplace = $("search-replace") as HTMLInputElement
+const replaceAll = $<HTMLButtonElement>("search-replace-all")
+let searchShown = { query: "", case: false, word: false } // what the rows on screen were searched with
+let searchAsked = searchShown // what the newest search asked
+let replacing = false
+
+function renderReplace() {
+  replaceAll.disabled = !searchHits.length || searchMore || replacing
+  replaceAll.title = `Replace all${searchHits.length ? ` ${searchHits.length}` : ""} (Cmd+Enter in the Replace box)`
+}
+
+async function replaceInProject(only?: string) {
+  if (replacing || !searchHits.length || searchMore) return
+  const counts = new Map<string, number>()
+  for (const h of searchHits) if (!only || h.path === only) counts.set(h.path, (counts.get(h.path) ?? 0) + 1)
+  const shown = { ...searchShown }
+  replacing = true
+  renderReplace()
+  // The open text goes to disk first, and typing waits until the app answers.
+  holdTyping(true)
+  const error = await flushSave(true)
+  if (error) {
+    holdTyping(false)
+    replacing = false
+    renderReplace()
+    toast(`Nothing was replaced: ${baseName(current!)} could not be saved first.`)
+    return
+  }
+  send({ type: "replace_in_project", req: (leaving = ++reqSeq), query: shown.query, case: shown.case, word: shown.word, replacement: searchReplace.value, expected: [...counts].map(([path, count]) => ({ path, count })) })
+}
+
+// The app answered (or failed): typing is free again and the results are asked for afresh.
+function replaced(r: { ok: boolean; files: number; places: number; error: string; op: number; paths: string[] }) {
+  replacing = false
+  const n = (count: number, noun: string) => `${count} ${noun}${count === 1 ? "" : "s"}`
+  if (r.ok) opToast = toast(`Replaced ${n(r.places, "place")} in ${n(r.files, "file")}. Review the changes.`, "info", offerUndo("replace", r))
+  else toast(r.error)
+  runSearch()
+}
+
+replaceAll.onclick = () => replaceInProject()
+searchReplace.addEventListener("keydown", (e) => {
+  if (e.isComposing) return
+  if (e.key === "Enter") { if (e.metaKey || e.ctrlKey) replaceInProject(); e.preventDefault() } // plain Enter does nothing
+  else if (e.key === "Escape") { if (current) ta.focus({ preventScroll: true }); e.preventDefault() }
+})
+// Tab from the query goes straight to the Replace box.
+searchQuery.addEventListener("keydown", (e) => {
+  if (e.key === "Tab" && !e.shiftKey && !e.isComposing) { searchReplace.focus(); e.preventDefault() }
+})
+
+function selectHit(i: number) {
+  if (!searchHits.length) return
+  searchSel = (i + searchHits.length) % searchHits.length
+  for (const el of $("search-results").querySelectorAll<HTMLElement>(".search-hit")) {
+    const on = Number(el.dataset.i) === searchSel
+    el.setAttribute("aria-selected", String(on))
+    if (on) el.scrollIntoView({ block: "nearest" })
+  }
+}
+
+function openHit(i = searchSel) {
+  const h = searchHits[i]
+  if (h) goTo(h.path, h.line, h.col, true, h.len)
+}
+
+searchQuery.oninput = () => { clearTimeout(searchTimer); searchTimer = window.setTimeout(runSearch, 150) }
+for (const b of [searchCase, searchWord]) b.onclick = () => { b.setAttribute("aria-pressed", String(b.getAttribute("aria-pressed") !== "true")); runSearch(); searchQuery.focus() }
+searchQuery.addEventListener("keydown", (e) => {
+  if (e.isComposing) return
+  if (e.key === "ArrowDown" || e.key === "ArrowUp") { selectHit(searchSel + (e.key === "ArrowDown" ? 1 : -1)); e.preventDefault() }
+  else if (e.key === "Enter") { clearTimeout(searchTimer); if (searchReq && searchHits.length) openHit(); e.preventDefault() }
+  else if (e.key === "Escape") { if (current) ta.focus({ preventScroll: true }); e.preventDefault() }
+})
+$("search-results").onmousedown = (e) => e.preventDefault()
+$("search-results").onclick = (e) => {
+  const file = (e.target as HTMLElement).closest<HTMLElement>("[data-replace]")
+  if (file) return void replaceInProject(file.dataset.replace)
+  const row = (e.target as HTMLElement).closest<HTMLElement>("[data-i]")
+  if (row) { selectHit(Number(row.dataset.i)); openHit() }
+}
+
+let quickOpener: HTMLElement | null = null
+let quickOpenerPath: string | undefined
+const mac = /Mac/i.test(navigator.platform)
+const kc = (id: string) => { const s = shortcutFor(id); return s ? keyText(s, mac) : keysForCommand(id, mac) ?? "" }
+
+function recentFiles(): string[] {
+  try {
+    const list: unknown = JSON.parse(store.get(`file-recent.${root}`) ?? "[]")
+    return Array.isArray(list) ? list.filter((p): p is string => typeof p === "string") : []
+  } catch { return [] }
+}
+function rememberFile(path: string) {
+  if (root) store.set(`file-recent.${root}`, JSON.stringify([path, ...recentFiles().filter((p) => p !== path)].slice(0, 30)))
+}
+
+function quickCommands(): QuickItem[] {
+  const click = (id: string) => () => $(id).click()
+  const commands: QuickItem[] = [
+    { id: "shortcuts", label: "Keyboard shortcuts", keys: kc("shortcuts"), run: openShortcuts },
+    { id: "open-project", label: "Open project…", run: click("open-folder") },
+    { id: "new-project", label: "New project…", run: click("new-project") },
+    { id: "sidebar", label: "Toggle explorer", keys: kc("sidebar"), run: click("toggle-sidebar") },
+    { id: "focus", label: "Toggle focus mode", keys: kc("focus"), run: toggleFocus },
+    { id: "chat", label: "Toggle chat", keys: kc("chat"), run: () => { if (isOpen("chat")) setPanel("chat", false); else openChat() } },
+    { id: "setup", label: "Check Setup…", run: () => send({ type: "check_setup" }) },
+    { id: "autocomplete", label: "Turn autocomplete " + (acToggle.checked ? "off" : "on"), run: () => acToggle.click() },
+    { id: "ac-settings", label: "Autocomplete settings…", run: click("sb-ac") },
+    { id: "ck-settings", label: "Suggestions settings…", run: click("sb-ck") },
+    { id: "ed-settings", label: "Edits settings…", run: click("sb-ed") },
+    { id: "ch-settings", label: "Chat settings…", run: click("chat-source") },
+    { id: "autosave", label: "Turn auto save " + (autosave ? "off" : "on"), run: click("sb-autosave") },
+    { id: "zoom-in", label: "Zoom in", keys: kc("zoom-in"), run: () => setZoom(zoom + 0.1) },
+    { id: "zoom-out", label: "Zoom out", keys: kc("zoom-out"), run: () => setZoom(zoom - 0.1) },
+    { id: "zoom-reset", label: "Reset zoom", keys: kc("zoom-reset"), run: () => setZoom(1) },
+    { id: "theme-system", label: "Color theme: Follow system", run: () => { store.del("theme"); applyTheme() } },
+    ...THEMES.flatMap((t) => t === "-" ? [] : [{ id: "theme-" + t[0], label: "Color theme: " + t[1], run: () => { store.set("theme", t[0]); applyTheme() } }]),
+  ]
+  if (root) commands.push(
+    { id: "search", label: "Search in project…", keys: kc("search"), run: openSearch },
+    { id: "preview", label: "Toggle preview", keys: kc("preview"), run: click("toggle-preview") },
+    { id: "new-file", label: "New file…", run: click("new-file") },
+    { id: "new-folder", label: "New folder…", run: click("new-folder") },
+  )
+  if (selected && [...files, ...dirs].includes(selected)) {
+    const path = selected
+    commands.push({ id: "move", label: `Move ${baseName(path)} to a folder…`, run: () => openPalette(MOVE, path) })
+  }
+  if (current) commands.push(
+    { id: "goal", label: "Set writing goal…", run: () => { goalAsk = true; openPalette() } },
+    { id: "back", label: "Go back", keys: kc("back"), run: () => goPlace("back") },
+    { id: "forward", label: "Go forward", keys: kc("forward"), run: () => goPlace("forward") },
+    { id: "find", label: "Find in file", keys: kc("find"), run: click("open-find") },
+    { id: "save", label: "Save file", keys: kc("save"), run: () => flushSave(true) },
+    { id: "history", label: "File history…", run: () => openHistory() },
+  )
+  if (current && syntax()) commands.push({ id: "word-counts", label: showCounts() ? "Hide word counts in Outline" : "Show word counts in Outline", run: toggleCounts })
+  if (current && syntax()) commands.push({ id: "sections", label: "Go to section…", keys: kc("sections"), run: () => openPalette("@") })
+  if (root) commands.push({ id: "labels", label: "Go to label…", run: () => openPalette("#") })
+  if (root && labels.length) commands.push({ id: "rename-label", label: "Rename label…", keys: kc("rename-label"), run: () => { if (!renameLabelAtCaret()) { renamePick = true; openPalette("#") } } })
+  if (current && syntax()) commands.push({ id: "export", label: "Export document…", run: click("export") })
+  if (previewing && files.includes(previewing)) for (const [as, label] of Object.entries(PREVIEW_AS)) commands.push({
+    id: "preview-" + as, label: "Preview as " + label,
+    run: () => { setPanel("preview", true); document.querySelector<HTMLElement>('[data-as="' + as + '"]')!.click() },
+  })
+  if (compileDiagnostics[0]?.path && files.includes(compileDiagnostics[0].path)) commands.push({ id: "first-error", label: "Go to first error", run: () => jumpToDiagnostic() })
+  if (root) commands.push( // last, so "Go to" still lists sections and labels first
+    { id: "problems", label: "Show problems", run: openProblems },
+    { id: "next-problem", label: "Go to next problem", keys: kc("next-problem"), run: () => stepProblems(1) },
+    { id: "prev-problem", label: "Go to previous problem", keys: kc("prev-problem"), run: () => stepProblems(-1) },
+  )
+  return commands
+}
+
+function markedText(text: string, positions: number[], offset = 0) {
+  const matched = new Set(positions)
+  let at = offset
+  return Array.from(text, (c) => { const mark = matched.has(at); at += c.length; return mark ? "<mark>" + esc(c) + "</mark>" : esc(c) }).join("")
+}
+
+type QuickKind = "files" | "commands" | "sections" | "labels" | "goal" | "folders"
+let quickKind: QuickKind = "files"
+let moveAsk: string | null = null // the list picks the folder this path moves into
+const MOVE = ""
+let goalAsk = false // the list asks for a word goal instead of listing files
+let renamePick = false // the "#" list picks the label to rename instead of going to it
+const QUICK = {
+  files: { title: "Open a file", aria: "Search project files", noun: "file", icon: (id: string) => fileIcon(id) },
+  commands: { title: "Run a command", aria: "Search commands", noun: "command", icon: () => icon("chevron-right") },
+  sections: { title: "Go to a section", aria: "Search sections of this file", noun: "section", icon: () => icon("list-tree") },
+  folders: { title: "Move to a folder", aria: "Search folders", noun: "folder", icon: () => icon("folder") },
+  goal: { title: "Set a writing goal", aria: "Words to write in this file", noun: "goal", icon: () => icon("target") },
+  labels: { title: "Go to a label", aria: "Search labels in the project", noun: "label", icon: () => icon("tag") },
+}
+const QUICK_EMPTY: Record<QuickKind, () => string> = {
+  files: () => !root ? "Open a project to find its files. Type > for commands." : "No matching files. Try a file name or folder name.",
+  commands: () => "No matching commands. Try a different word.",
+  sections: () => !current || !syntax() ? "Open a Typst, LaTeX or Markdown file to see its sections." : "No matching sections. Try a word from the heading.",
+  folders: () => "No other folder to move it to. Create a folder first, or try another name.",
+  goal: () => paletteQuery.value.trim() ? `Type a whole number from 1 to ${MAX_GOAL.toLocaleString()}, for example 500.` : "Type how many words you want to add to this file, for example 500.",
+  labels: () => !root ? "Open a project to see its labels." : labels.length ? "No matching labels. Try a different word." : "No labels in this project yet. " + LABEL_HINT[lang],
+}
+
+// The text up to the first character picks the list: > commands, @ sections of this file,
+// # labels of the project, anything else files.
+function quickMode(raw: string): [QuickKind, string] {
+  if (goalAsk) return ["goal", raw]
+  if (moveAsk !== null) return ["folders", raw]
+  const q = raw.trimStart()
+  const kind = ({ ">": "commands", "@": "sections", "#": "labels" } as Record<string, QuickKind>)[q[0]] ?? "files"
+  return [kind, kind === "files" ? raw : q.slice(1).trimStart()]
+}
+
+function renderPalette() {
+  if (!palette.open) return
+  const [kind, query] = quickMode(paletteQuery.value)
+  quickKind = kind
+  const q = QUICK[kind]
+  $("quick-title").textContent = kind === "labels" && renamePick ? "Rename a label" : q.title
+  paletteQuery.setAttribute("aria-label", q.aria)
+  if (kind === "goal") {
+    const n = parseGoal(query)
+    quickItems = n ? [{ id: "goal-" + n, label: `Add ${n.toLocaleString()} words to this file`, run: () => setGoal(n) }] : []
+  } else if (kind === "folders") {
+    const from = moveAsk!
+    quickItems = ["", ...dirs].filter((d) => canMoveTo(from, d)).flatMap((d) => {
+      const label = d || "Top level of the project"
+      const match = fuzzyMatch(label, query)
+      return match ? [{ id: "folder-" + d, label, positions: match.positions, score: match.score, run: () => moveInto(from, d) }] : []
+    })
+  } else if (kind === "commands") quickItems = quickCommands().flatMap((c) => {
+    const match = fuzzyMatch(c.label, query)
+    return match ? [{ ...c, ...match }] : []
+  }).sort((a, b) => b.score - a.score)
+  else if (kind === "sections") {
+    const heads = current && syntax() ? outline(ta.value, lang, syntax()!.headingOf) : []
+    const caret = lineOf(ta.selectionStart)
+    const here = heads.filter((h) => h.line <= caret).length - 1
+    const items = heads.flatMap((h, i) => {
+      const title = headingTitle(lang, h.title)
+      const match = fuzzyMatch(title, query)
+      return match ? [{ id: "section-" + h.line, label: title, indent: h.level - 1, detail: i === here ? "Current" : "Line " + (h.line + 1), score: match.score, positions: match.positions, run: () => goTo(current!, h.line, 0), here: i === here }] : []
+    })
+    quickItems = query.trim() ? items.sort((a, b) => b.score - a.score) : items // document order when nothing is typed
+    if (!query.trim() && quickIndex === 0) quickIndex = Math.max(0, items.findIndex((i) => i.here))
+  } else if (kind === "labels") {
+    const broken = renamePick ? [] : nowhere.flatMap((n) => {
+      const match = fuzzyMatch(n.key, query)
+      return match ? [{ id: "missing-" + n.path + ":" + n.line + ":" + n.col, label: n.key, dir: n.path, detail: "points nowhere", score: match.score, positions: match.positions, run: () => goTo(n.path, n.line, n.col) }] : []
+    })
+    const pick = renamePick
+    quickItems = labels.flatMap((l) => {
+      const match = fuzzyMatch(l.name, query)
+      return match ? [{ id: "label-" + l.path + ":" + l.line + ":" + l.name, label: l.name, dir: l.path, detail: l.refs ? `${l.refs} use${l.refs > 1 ? "s" : ""}` : "unused", score: match.score, positions: match.positions, run: () => pick ? startLabelRename(l.name, l.path) : goTo(l.path, l.line, l.col) }] : []
+    })
+    if (query.trim()) {
+      quickItems.push(...broken)
+      quickItems.sort((a, b) => b.score! - a.score!)
+    } else quickItems.unshift(...broken) // broken keys first when nothing is typed
+  } else {
+    const recent = recentFiles()
+    const folder = root
+    quickItems = rankFiles(files, query, recent).map((m) => ({
+      id: m.path, label: m.path, positions: m.positions,
+      detail: m.path === current ? "Open" : recent.includes(m.path) ? "Recent" : "",
+      run: async () => {
+        if (m.path === current) { if (mode === "edit") ta.focus(); return }
+        if (root !== folder || !files.includes(m.path)) return
+        ta.focus({ preventScroll: true })
+        leaveThen({ type: "open_file", path: m.path })
+      },
+    }))
+  }
+  quickIndex = Math.min(quickIndex, Math.max(0, quickItems.length - 1))
+  paletteList.innerHTML = quickItems.map((item, i) => {
+    const isFile = kind === "files"
+    const start = isFile ? item.label.lastIndexOf("/") + 1 : 0
+    const name = markedText(item.label.slice(start), item.positions ?? [], start)
+    const directory = isFile ? (start ? markedText(item.label.slice(0, start - 1), item.positions ?? []) : "") : esc(item.dir ?? "")
+    return '<div id="quick-option-' + i + '" role="option" aria-selected="' + (i === quickIndex) + '" data-index="' + i + '" class="quick-row" title="' + esc(item.dir ? item.label + " in " + item.dir : item.label) + '"' +
+      (item.indent ? ' style="padding-left:' + (8 + item.indent * 14) + 'px"' : "") + '>' +
+      q.icon(item.id) + '<span class="quick-name">' + name + '</span>' +
+      (directory ? '<span class="quick-path">' + directory + '</span>' : "") + '<span class="quick-detail">' + esc(item.keys ?? item.detail ?? "") + '</span></div>'
+  }).join("")
+  $("quick-empty").hidden = !!quickItems.length
+  $("quick-empty").textContent = QUICK_EMPTY[kind]()
+  $("quick-count").textContent = `${quickItems.length} ${q.noun}${quickItems.length === 1 ? "" : "s"}`
+  selectQuickItem(quickIndex)
+}
+
+function selectQuickItem(index: number) {
+  quickIndex = index
+  for (const row of paletteList.children) row.setAttribute("aria-selected", String(Number((row as HTMLElement).dataset.index) === index))
+  const active = paletteList.children[index] as HTMLElement | undefined
+  if (active) {
+    paletteQuery.setAttribute("aria-activedescendant", active.id)
+    active.scrollIntoView({ block: "nearest" })
+  } else paletteQuery.removeAttribute("aria-activedescendant")
+}
+
+function placePalette() {
+  if (!palette.open) return
+  const editor = $("editor-group").getBoundingClientRect()
+  const width = Math.min(560, innerWidth - 16, editor.width > 320 ? editor.width - 24 : innerWidth - 16)
+  const centre = editor.width > 320 ? editor.left + editor.width / 2 : innerWidth / 2
+  palette.style.width = width + "px"
+  palette.style.left = Math.max(8, Math.min(centre - width / 2, innerWidth - width - 8)) + "px"
+  palette.style.top = $("titlebar").getBoundingClientRect().bottom + 8 + "px"
+  placePreview()
+}
+
+function openPalette(prefix = "", moving: string | null = null) {
+  moveAsk = moving
+  if (document.querySelector("dialog[open]") && !palette.open) return
+  if (!palette.open) {
+    quickOpener = document.activeElement as HTMLElement | null
+    quickOpenerPath = quickOpener?.dataset.path
+    clearTimeout(menuTimer)
+    menu.hidden = true
+    hideMenu()
+    $("diagnostic-card").hidden = true
+    palette.showModal()
+  }
+  paletteQuery.value = prefix
+  quickIndex = 0
+  renderPalette()
+  placePalette()
+  paletteQuery.focus()
+}
+
+function closePalette(restore = true) {
+  if (!palette.open) return
+  renamePick = false // the list's rows already know whether they rename
+  goalAsk = false
+  moveAsk = null
+  palette.close()
+  if (restore) {
+    const opener = quickOpener?.isConnected ? quickOpener : [...$("tree").querySelectorAll<HTMLElement>("[data-path]")].find((el) => el.dataset.path === quickOpenerPath)
+    const target = opener ?? ta
+    target.focus({ preventScroll: true })
+  }
+  placePreview()
+}
+function runQuickItem(index = quickIndex) {
+  const item = quickItems[index]
+  if (!item) return
+  const commands = quickKind === "commands"
+  closePalette()
+  // Recheck availability: a file or build result may have changed while the list was open.
+  if (commands) quickCommands().find((c) => c.id === item.id)?.run()
+  else item.run()
+}
+paletteQuery.oninput = () => { quickIndex = 0; renderPalette() }
+palette.addEventListener("cancel", (e) => { e.preventDefault(); closePalette() })
+palette.addEventListener("click", (e) => {
+  const r = palette.getBoundingClientRect()
+  if (e.target === palette && (e.clientX < r.left || e.clientX > r.right || e.clientY < r.top || e.clientY > r.bottom)) closePalette()
+})
+paletteList.onmousedown = (e) => e.preventDefault()
+paletteList.onclick = (e) => {
+  const row = (e.target as HTMLElement).closest<HTMLElement>("[data-index]")
+  if (row) runQuickItem(Number(row.dataset.index))
+}
+$("quick-close").onclick = () => closePalette()
+$("open-quick").onclick = () => openPalette()
+palette.addEventListener("keydown", (e) => {
+  if (e.isComposing) return
+  if ((e.metaKey || e.ctrlKey) && e.key.toLowerCase() === "p") openPalette(e.shiftKey ? ">" : "")
+  else if ((e.metaKey || e.ctrlKey) && e.shiftKey && e.key.toLowerCase() === "o") openPalette("@")
+  else if (e.key === "ArrowDown" || e.key === "ArrowUp") {
+    if (quickItems.length) selectQuickItem((quickIndex + (e.key === "ArrowDown" ? 1 : -1) + quickItems.length) % quickItems.length)
+  } else if (e.key === "Enter" && e.target === paletteQuery) runQuickItem()
+  else if (e.key === "Tab") (document.activeElement === paletteQuery ? $("quick-close") : paletteQuery).focus()
+  else return
+  e.preventDefault()
+  e.stopPropagation()
+})
+new ResizeObserver(placePalette).observe($("editor-group"))
+addEventListener("resize", placePalette)
+addEventListener("blur", () => closePalette(false))
+
 // ---------- the preview's own web view (preview.ts): a long document drawing there never holds up typing here ----------
 
 const toPreview = (msg: object) => tauri.event.emit("to-preview", msg)
@@ -2369,9 +3671,170 @@ function showPreview(url: string) {
   else delete $("preview").dataset.url
   toPreview({ src: url })
 }
+// ---------- the shortcut sheet: every key in one searchable list, built from shortcuts.ts ----------
+
+const sheet = $<HTMLDialogElement>("keys-sheet"), sheetQuery = $<HTMLInputElement>("keys-query")
+let sheetOpener: HTMLElement | null = null
+const capsHtml = (s: Shortcut) => keyCaps(s, mac).map((c) => `<kbd>${esc(c)}</kbd>`).join("")
+function renderSheet() {
+  const rows = filterShortcuts(sheetQuery.value, mac)
+  let group = ""
+  $("keys-list").innerHTML = rows.map((s) => {
+    const head = s.group === group ? "" : `<h3>${esc((group = s.group))}</h3>`
+    return `${head}<div class="keys-row"><span>${esc(s.action)}</span><span class="keys-caps">${capsHtml(s)}</span></div>`
+  }).join("")
+  $("keys-empty").hidden = rows.length > 0
+}
+function openShortcuts() {
+  if (sheet.open) return sheetQuery.focus()
+  if (document.querySelector("dialog[open]")) return
+  sheetOpener = document.activeElement as HTMLElement | null
+  hideMenu()
+  sheetQuery.value = ""
+  renderSheet()
+  sheet.showModal()
+  const editor = $("editor-group").getBoundingClientRect()
+  const width = Math.min(520, innerWidth - 16)
+  const centre = editor.width > 320 ? editor.left + editor.width / 2 : innerWidth / 2
+  sheet.style.width = width + "px"
+  sheet.style.left = Math.max(8, Math.min(centre - width / 2, innerWidth - width - 8)) + "px"
+  sheet.style.top = $("titlebar").getBoundingClientRect().bottom + 8 + "px"
+  sheetQuery.focus()
+  placePreview()
+}
+function closeShortcuts() {
+  if (!sheet.open) return
+  sheet.close()
+  ;(sheetOpener?.isConnected ? sheetOpener : ta).focus({ preventScroll: true })
+  placePreview()
+}
+sheetQuery.oninput = renderSheet
+sheet.addEventListener("cancel", (e) => { e.preventDefault(); closeShortcuts() })
+$("keys-close").onclick = closeShortcuts
+$("sb-keys").onclick = openShortcuts
+
+// ---------- file history: earlier versions of the open file, and restoring one ----------
+const hist = $<HTMLDialogElement>("history-sheet")
+let historyFor: string | null = null // a file to show the history of once it is open
+let historyReq = 0
+let historyRows: { at: number; text: string; lines?: Line[]; coarse?: boolean }[] = []
+let historyAt = 0
+let historyOpener: HTMLElement | null = null
+
+function openHistory(path = current) {
+  if (!root || !path) return
+  if (document.querySelector("dialog[open]")) return
+  if (path !== current) {
+    historyFor = path
+    leaveThen({ type: "open_file", path }).then((ok) => { if (!ok) historyFor = null })
+    return
+  }
+  historyFor = null
+  historyOpener = document.activeElement as HTMLElement | null
+  send({ type: "list_history", req: (historyReq = ++reqSeq), path })
+}
+function showHistory(req: number, path: string, versions: { at: number; text: string }[]) {
+  if (req !== historyReq || path !== current) return
+  const now = Date.now()
+  historyRows = versions.map((v) => ({ ...v })) // compared with the text now only when needed
+  historyAt = 0
+  $("history-title").textContent = `File history: ${baseName(path)}`
+  $("history-empty").hidden = historyRows.length > 0
+  $("history-body").hidden = historyRows.length === 0
+  $("history-list").innerHTML = historyRows.map((r, i) => `<button class="history-row" role="option" tabindex="-1" data-i="${i}"><span>${esc(whenText(r.at, now))}</span><span class="history-count"></span></button>`).join("")
+  hist.showModal()
+  const editor = $("editor-group").getBoundingClientRect()
+  const width = Math.min(620, innerWidth - 16)
+  const centre = editor.width > 320 ? editor.left + editor.width / 2 : innerWidth / 2
+  hist.style.width = width + "px"
+  hist.style.left = Math.max(8, Math.min(centre - width / 2, innerWidth - width - 8)) + "px"
+  hist.style.top = $("titlebar").getBoundingClientRect().bottom + 8 + "px"
+  if (historyRows.length) pickVersion(0)
+  else $("history-close").focus()
+  placePreview()
+  fillCounts(req)
+}
+// The first version is compared at once; the other rows get their +/- counts one at a time while the writer reads,
+// so a long file with many versions opens without waiting for all of them.
+function compared(i: number) {
+  const r = historyRows[i]
+  if (!r.lines) Object.assign(r, diffLines(ta.value, r.text))
+  return r as typeof r & { lines: Line[]; coarse: boolean }
+}
+function countCell(i: number) {
+  const c = changeCount(compared(i).lines)
+  $("history-list").children[i].querySelector(".history-count")!.innerHTML = `<b class="add">+${c.added}</b> <b class="del">\u2212${c.removed}</b>`
+}
+async function fillCounts(req: number) {
+  for (let i = 0; i < historyRows.length; i++) {
+    await new Promise((r) => setTimeout(r, 0))
+    if (req !== historyReq || !hist.open) return
+    countCell(i)
+  }
+}
+function pickVersion(i: number) {
+  historyAt = Math.max(0, Math.min(i, historyRows.length - 1))
+  const r = compared(historyAt)
+  countCell(historyAt)
+  const rows = [...$("history-list").children] as HTMLElement[]
+  rows.forEach((el, n) => { el.classList.toggle("on", n === historyAt); el.setAttribute("aria-selected", String(n === historyAt)); el.tabIndex = n === historyAt ? 0 : -1 })
+  rows[historyAt].scrollIntoView({ block: "nearest" })
+  rows[historyAt].focus({ preventScroll: true })
+  // Only the lines that differ, with two lines around each change.
+  const show = r.lines.map((l, n) => l.op !== " " || r.lines.slice(Math.max(0, n - 2), n + 3).some((m) => m.op !== " "))
+  let html = "", gap = false
+  r.lines.forEach((l, n) => {
+    if (!show[n]) return void (gap = true)
+    if (gap && html) html += `<div class="dl gap">\u2026</div>`
+    gap = false
+    html += `<div class="dl ${l.op === "+" ? "add" : l.op === "-" ? "del" : ""}"><i>${l.op === " " ? "" : l.op === "+" ? "+" : "\u2212"}</i>${esc(l.text) || " "}</div>`
+  })
+  const same = r.lines.every((l) => l.op === " ")
+  $("history-diff").innerHTML = same ? `<p class="history-same">This version is the same as the text now.</p>` : html
+  $("history-note").textContent = r.coarse
+    ? "This file changed too much to compare line by line: the text now is shown removed and this version added."
+    : "Restoring adds the green lines and removes the red ones. One Undo brings the text now back."
+  $<HTMLButtonElement>("history-restore").disabled = same
+}
+function closeHistory() {
+  if (!hist.open) return
+  hist.close()
+  ;(historyOpener?.isConnected ? historyOpener : ta).focus({ preventScroll: true })
+  placePreview()
+}
+function restoreVersion() {
+  const r = historyRows[historyAt]
+  if (!r || !current) return
+  if (ta.readOnly) return void toast("Quire is still saving. Wait a moment, then try again.", "info")
+  send({ type: "snapshot", path: current, content: ta.value }) // the text now stays in the history
+  const when = whenText(r.at, Date.now())
+  closeHistory() // first: the editor is out of reach while the dialog is open, and its undo would not see the edit
+  edit(0, ta.value.length, r.text)
+  flushSave(true)
+  toast(`Restored the version from ${when}. Press Undo to bring back the text from before.`, "info")
+}
+$("history-list").onclick = (e) => {
+  const row = (e.target as HTMLElement).closest<HTMLElement>(".history-row")
+  if (row) pickVersion(Number(row.dataset.i))
+}
+$("history-list").onkeydown = (e) => {
+  if (e.key !== "ArrowDown" && e.key !== "ArrowUp") return
+  e.preventDefault()
+  pickVersion(historyAt + (e.key === "ArrowDown" ? 1 : -1))
+}
+$("history-restore").onclick = restoreVersion
+$("history-close").onclick = closeHistory
+hist.addEventListener("cancel", (e) => { e.preventDefault(); closeHistory() })
+$("welcome-keys").onclick = openShortcuts
+$("shortcuts").innerHTML = HINTS.map((id) => {
+  const s = shortcutFor(id)!
+  return `<dt>${esc(s.action)}</dt><dd>${capsHtml(s)}</dd>`
+}).join("")
+
+
 // The web view sits over #preview. A native view covers whatever the page floats over it, so
 // it steps aside while a dialog or menu would sit under it, and notices go to its left.
-const floating = ["ask", "new-project-ask", "setup", "ac-settings", "ck-settings", "ed-settings", "ch-settings", "inline-box", "fix-card", "diagnostic-card", "rewrite-menu", "rewrite-card", "ctx-menu", "toasts", "sidebar", "chat"].map((id) => $(id))
+const floating = ["quick-input", "keys-sheet", "history-sheet", "ask", "new-project-ask", "setup", "ac-settings", "ck-settings", "ed-settings", "ch-settings", "inline-box", "fix-card", "diagnostic-card", "rewrite-menu", "rewrite-card", "ref-list", "ctx-menu", "problems", "toasts", "sidebar", "chat"].map((id) => $(id))
 let placing = 0
 let placed = "" // the place last sent
 let bgSent = "" // the theme's preview background last sent: the web view shows it while a preview loads
@@ -2382,7 +3845,7 @@ function placePreview() {
     const r = el.getBoundingClientRect()
     const right = r.width && r.left > 240 ? `${innerWidth - r.left + 12}px` : ""
     if ($("toasts").style.getPropertyValue("--toasts-right") !== right) $("toasts").style.setProperty("--toasts-right", right)
-    const over = (o: DOMRect) => o.left < r.right - 1 && o.right > r.left + 1 && o.top < r.bottom - 1 && o.bottom > r.top + 1
+    const over = (o: DOMRect) => o.width > 0 && o.height > 0 && o.left < r.right - 1 && o.right > r.left + 1 && o.top < r.bottom - 1 && o.bottom > r.top + 1
     const shown = r.width > 0 && r.height > 0 && !floating.some((f) => over(f.getBoundingClientRect()))
     // In window points: the page's pixels are zoomed.
     const frame = shown ? { x: r.left * zoom, y: r.top * zoom, w: r.width * zoom, h: r.height * zoom, shown: innerHeight * zoom, zoom } : {}
@@ -2428,6 +3891,8 @@ let diagnosticGeneration = 0
 let compileMain: string | null = null
 let compileDiagnostics: Diagnostic[] = []
 let compileLog = ""
+let compileTool = "" // the message of a build that could not run because a program is missing
+const compiledMains = new Set<string>() // previews that have shown a good version since this folder opened
 const compileMarks = typeof Highlight === "function" ? new Highlight() : null
 if (compileMarks) CSS.highlights.set("compile-error", compileMarks)
 
@@ -2438,9 +3903,24 @@ function invalidateDiagnostics() {
   renderDiagnostics()
 }
 
-function receiveDiagnostics(batch: DiagnosticBatch, log = "") {
+// While the writer types, the errors stay (moved along with the edit, dimmed) until the next result:
+// hiding them on every key made the banner blink and the preview jump by its height.
+let diagnosticAt: { path: string; text: string } | null = null // the file and text the errors were placed on
+function shiftDiagnosticsForTyping() {
+  if (!compileDiagnostics.length || !current || diagnosticAt?.path !== current) return invalidateDiagnostics()
+  diagnosticGeneration++
+  compileDiagnostics = shiftDiagnostics(diagnosticAt.text, minimalChange(diagnosticAt.text, ta.value), current, compileDiagnostics)
+  diagnosticAt.text = ta.value
+  if (!compileDiagnostics.length) compileLog = ""
+  renderDiagnostics(true)
+}
+
+function receiveDiagnostics(batch: DiagnosticBatch, log = "", tool = "") {
   if (!isCurrentDiagnostic(batch, root, previewing, diagnosticGeneration, current, ta.value)) return false
+  diagnosticAt = current ? { path: current, text: ta.value } : null
   compileMain = batch.main
+  compileTool = tool
+  if (!batch.diagnostics.length && !tool) compiledMains.add(batch.main)
   compileDiagnostics = batch.diagnostics
   compileLog = log
   renderDiagnostics()
@@ -2450,30 +3930,125 @@ function receiveDiagnostics(batch: DiagnosticBatch, log = "") {
 function jumpToDiagnostic(d = compileDiagnostics[0]) {
   if (d?.path) goTo(d.path, d.line, d.col, true)
 }
-$("sb-errors").onclick = () => jumpToDiagnostic()
+$("sb-errors").onclick = () => {
+  const list = problemList() // one problem: go straight to it
+  if (list.length === 1 && $("problems").hidden) return goTo(list[0].path, list[0].line, list[0].col, list[0].utf16)
+  $("problems").hidden ? openProblems() : closeProblems()
+}
 $("compile-jump").onclick = () => jumpToDiagnostic()
+$("compile-setup").onclick = () => send({ type: "check_setup" })
 
-function renderDiagnostics() {
+function renderDiagnostics(pending = false) {
+  document.body.classList.toggle("errors-pending", pending)
   const first = compileDiagnostics[0]
-  const n = errorCount(compileDiagnostics)
-  const status = $("sb-errors") as HTMLButtonElement
-  status.hidden = !n
-  status.disabled = !first?.path
-  status.innerHTML = `${icon("error")} <span>${n} error${n === 1 ? "" : "s"}</span>`
-  status.title = first ? `${first.message} — Go to the first error` : ""
-  $("compile-banner").hidden = !first
-  if (first) {
+  renderProblems()
+  $("compile-banner").hidden = !first && !compileTool
+  $("compile-setup").hidden = !compileTool
+  $("compile-note").textContent = compileMain && compiledMains.has(compileMain)
+    ? "The preview shows the last version that compiled."
+    : "Nothing has compiled yet, so there is no preview."
+  if (first || compileTool) {
     const jump = $("compile-jump") as HTMLButtonElement
-    jump.textContent = first.path
+    jump.textContent = compileTool ? compileTool : first.path
       ? `The document has an error in ${first.path} on line ${first.line + 1}: ${first.message}`
       : first.message
-    jump.disabled = !first.path
-    jump.title = first.path ? "Go to this error" : ""
+    jump.disabled = !first?.path
+    jump.title = first?.path ? "Go to this error" : ""
   }
   $("compile-log").hidden = !compileLog
   $("compile-log-text").textContent = compileLog
   if (!compileLog) $("compile-log").removeAttribute("open")
   paintDiagnostics()
+}
+
+// Every problem in the project: compile errors and keys that point nowhere. The status bar counts them, the
+// list under it shows them, and F8 steps through them in the same order.
+function problemList(): Problem[] {
+  return projectProblems(compileDiagnostics, document.body.classList.contains("errors-pending"), nowhere)
+}
+
+function renderProblems() {
+  const list = problemList()
+  const n = list.length, errors = errorCount(compileDiagnostics)
+  const status = $("sb-errors") as HTMLButtonElement
+  const open = !$("problems").hidden
+  status.hidden = !n && !open
+  const noun = n === errors ? "error" : "problem"
+  status.innerHTML = `${icon("error")} <span>${n} ${noun}${n === 1 ? "" : "s"}</span>`
+  status.title = n ? "Show the problems" : "No problems"
+  status.setAttribute("aria-expanded", String(open))
+  if (!open) return
+  const box = $("problems")
+  const had = box.contains(document.activeElement) ? [...box.querySelectorAll("button")].indexOf(document.activeElement as HTMLButtonElement) : -1
+  let html = n ? "" : `<p class="muted problems-empty">No problems.</p>`
+  let file = ""
+  list.forEach((p, i) => {
+    if (p.path !== file) html += `<div class="problems-file">${esc(p.path)}</div>`
+    file = p.path
+    const fix = p.diag ? errorFix(p.diag) : null
+    const key = p.nowhere ? keyChoices(p.nowhere)[0] : undefined
+    html += `<div class="problems-item"><button type="button" class="problems-row" data-i="${i}" title="Go to this problem"><span class="problems-line">Line ${p.line + 1}</span> ${esc(p.text)}</button>` +
+      (fix ? `<button type="button" class="fix" data-i="${i}" data-fix="1">${esc(fix.label)}</button>` : key ? `<button type="button" class="fix" data-i="${i}" data-fix="1">Did you mean ${esc(key)}?</button>` : p.nowhere && canAddFromDoi(p.nowhere) ? `<button type="button" class="fix" data-i="${i}" data-doi="1">Add from DOI…</button>` : "") + "</div>"
+  })
+  box.innerHTML = html
+  if (had >= 0) (box.querySelectorAll("button")[Math.min(had, box.querySelectorAll("button").length - 1)] as HTMLElement | undefined)?.focus()
+  placeProblems()
+}
+
+// Above the status bar, under the item that opened it.
+function placeProblems() {
+  const box = $("problems"), r = $("sb-errors").getBoundingClientRect()
+  box.style.left = `${Math.max(4, Math.min(r.left, innerWidth - box.offsetWidth - 4))}px`
+  box.style.bottom = `${innerHeight - r.top + 4}px`
+}
+
+function openProblems() {
+  $("problems").hidden = false
+  renderProblems()
+  ;($("problems").querySelector(".problems-row") as HTMLElement | null)?.focus()
+}
+
+function closeProblems(focusEditor = true) {
+  if ($("problems").hidden) return
+  $("problems").hidden = true
+  renderProblems()
+  if (!focusEditor) return
+  if (current) ta.focus({ preventScroll: true })
+  else if (!$("sb-errors").hidden) $("sb-errors").focus()
+}
+
+$("problems").addEventListener("click", (e) => {
+  const b = (e.target as HTMLElement).closest<HTMLElement>("button")
+  const p = b && problemList()[Number(b.dataset.i)]
+  if (!p) return
+  closeProblems(false)
+  if (b.dataset.doi) return void addFromDoi(p.nowhere!)
+  if (!b.dataset.fix) return void goTo(p.path, p.line, p.col, p.utf16)
+  const fix = p.diag && errorFix(p.diag)
+  const key = p.nowhere && keyChoices(p.nowhere)[0]
+  if (fix) applyErrorFix(fix)
+  else if (p.nowhere && key) applyKeyFix(p.nowhere, key)
+})
+$("problems").addEventListener("keydown", (e) => {
+  if (e.key === "Escape") { e.preventDefault(); closeProblems(); return }
+  if (e.key !== "ArrowDown" && e.key !== "ArrowUp") return
+  const rows = [...$("problems").querySelectorAll<HTMLElement>(".problems-row")]
+  const i = rows.indexOf((document.activeElement as HTMLElement).closest(".problems-item")?.querySelector(".problems-row") as HTMLElement)
+  e.preventDefault()
+  rows[(i + (e.key === "ArrowDown" ? 1 : -1) + rows.length) % rows.length]?.focus()
+})
+document.addEventListener("mousedown", (e) => {
+  if (!$("problems").hidden && !$("problems").contains(e.target as Node) && !$("sb-errors").contains(e.target as Node)) closeProblems(false)
+})
+
+// F8 and Shift+F8: the next or previous problem after the caret, across files. At the end it wraps and says so.
+function stepProblems(dir: 1 | -1) {
+  const list = problemList()
+  if (!list.length) return void toast("No problems.", "info")
+  const r = stepProblem(list, { path: current ?? "", line: current ? lineOf(ta.selectionStart) : -1 }, dir)!
+  closeProblems(false)
+  if (r.wrapped) toast(dir === 1 ? "Back to the first problem." : "Back to the last problem.", "info")
+  goTo(r.problem.path, r.problem.line, r.problem.col, r.problem.utf16)
 }
 
 function paintDiagnostics() {
@@ -2501,37 +4076,178 @@ function showDiagnosticAtCaret() {
     ta.removeAttribute("aria-describedby")
     return
   }
-  const html = `<strong>${esc(d.message)}</strong>${d.hints.map((h) => `<p>${esc(h)}</p>`).join("")}`
+  const fix = errorFix(d)
+  const html = `<strong>${esc(d.message)}</strong>${(fix ? [] : d.hints).map((h) => `<p>${esc(h)}</p>`).join("")}` +
+    (fix ? `<button type="button" class="btn secondary sm errfix" title="Alt+Enter">${esc(fix.label)}</button>` : "")
   if (card.innerHTML !== html) card.innerHTML = html
   ta.setAttribute("aria-describedby", "diagnostic-card")
   floatAt(card, ta.selectionStart, ta.selectionStart)
 }
 ta.addEventListener("blur", () => { $("diagnostic-card").hidden = true })
+// The card floats over the text: a press on its button must not take the caret out of the field, or the card would close first.
+$("diagnostic-card").addEventListener("mousedown", (e) => e.preventDefault())
+$("diagnostic-card").addEventListener("click", (e) => {
+  if (!(e.target as HTMLElement).closest(".errfix")) return
+  const d = compileDiagnostics.find((d) => d.path === current && d.line === lineOf(ta.selectionStart))
+  const fix = d && errorFix(d)
+  if (fix) applyErrorFix(fix)
+})
+ta.addEventListener("keydown", (e) => {
+  if (e.key !== "Enter" || !e.altKey || e.metaKey || e.ctrlKey || e.shiftKey || e.isComposing || mode !== "edit") return
+  const d = compileDiagnostics.find((d) => d.path === current && d.line === lineOf(ta.selectionStart))
+  const fix = d && errorFix(d)
+  if (!fix) return
+  e.preventDefault()
+  applyErrorFix(fix)
+})
 ta.addEventListener("keydown", (e) => { if (e.key === "Escape") $("diagnostic-card").hidden = true })
+ta.addEventListener("keydown", (e) => { if (e.key === "F2" && !e.isComposing && renameLabelAtCaret()) e.preventDefault() })
 
 // ---------- preview sync: a click in the preview shows that text; the preview follows the caret ----------
 
-let pendingJump: { path: string; line: number; col: number; utf16?: boolean } | null = null
+let pendingJump: { path: string; line: number; col: number; utf16?: boolean; len?: number; track?: boolean } | null = null
 let followed = "" // the caret line the preview last scrolled to
 let followTimer = 0
 
+// ---------- places: where the caret was in each file, and Back / Forward between jumps ----------
+
+let trail = newTrail()
+type Spot = { line: number; col: number; top: number } // top: the first line in view
+const here = (): Place => {
+  const line = lineOf(ta.selectionStart)
+  return { path: current!, line, col: ta.selectionStart - lineStarts[line] }
+}
+const posKey = () => `pos.${root}`
+function loadPos(): Record<string, Spot> {
+  try {
+    const o: unknown = JSON.parse(store.get(posKey()) ?? "{}")
+    return o && typeof o === "object" && !Array.isArray(o) ? (o as Record<string, Spot>) : {}
+  } catch { return {} }
+}
+function savePosAll(all: Record<string, Spot>) {
+  const keys = Object.keys(all)
+  for (const k of keys.slice(0, Math.max(0, keys.length - 30))) delete all[k]
+  store.set(posKey(), JSON.stringify(all))
+}
+function topLine() {
+  let lo = 0
+  let hi = hl.children.length - 1
+  while (lo < hi) {
+    const mid = (lo + hi + 1) >> 1
+    if ((hl.children[mid] as HTMLElement).offsetTop <= ta.scrollTop) lo = mid
+    else hi = mid - 1
+  }
+  return lo
+}
+// The 30 most recent files are kept. Called when the caret settles and when the file is left. Most recent last.
+function savePos() {
+  if (!root || !current || mode !== "edit" || !files.includes(current)) return
+  const all = loadPos()
+  delete all[current]
+  all[current] = { ...here(), top: topLine() }
+  savePosAll(all)
+}
+let posTimer = 0
+const settle = () => { clearTimeout(posTimer); posTimer = window.setTimeout(savePos, 400) }
+document.addEventListener("selectionchange", () => { if (document.activeElement === ta) settle() })
+ta.addEventListener("scroll", settle)
+addEventListener("pagehide", savePos)
+// Put the caret and the view back, clamped to a text that may have changed since.
+function restorePos(s: Spot) {
+  const num = (n: unknown) => (Number.isFinite(n) ? Math.max(0, Math.floor(n as number)) : 0)
+  const line = Math.min(num(s.line), lineStarts.length - 1)
+  const end = (l: number) => (l + 1 < lineStarts.length ? lineStarts[l + 1] - 1 : ta.value.length)
+  const pos = Math.min(lineStarts[line] + num(s.col), end(line))
+  ta.setSelectionRange(pos, pos)
+  const top = hl.children[Math.min(num(s.top), hl.children.length - 1)] as HTMLElement | undefined
+  ta.scrollTop = top ? top.offsetTop : 0
+  hl.scrollTop = ta.scrollTop
+}
+function goPlace(dir: "back" | "forward") {
+  if (!current) return void toast("Open a file first.")
+  const before = { back: [...trail.back], fwd: [...trail.fwd] }
+  const p = (dir === "back" ? goBack : goForward)(trail, here(), (path) => files.includes(path))
+  if (!p) return void toast(dir === "back" ? "Nothing to go back to." : "Nothing to go forward to.")
+  goTo(p.path, p.line, p.col, true, 0, false).then((ok) => {
+    if (!ok) { trail.back = before.back; trail.fwd = before.fwd } // the save question was cancelled: the stop stays
+  })
+}
+
 // tinymist counts columns in characters; the text field counts UTF-16 units.
-function goTo(path: string, line: number, col: number, utf16 = false) {
+// track: the jump is a place to come Back to (false for Back and Forward themselves, and for the second half
+// of a jump that opened its file, which openFile has already recorded).
+async function goTo(path: string, line: number, col: number, utf16 = false, len = 0, track = true): Promise<boolean> {
   if (path !== current) {
-    pendingJump = { path, line, col, utf16 }
-    leaveThen({ type: "open_file", path })
-    return
+    pendingJump = { path, line, col, utf16, len, track }
+    const ok = await leaveThen({ type: "open_file", path })
+    if (!ok && pendingJump?.path === path) pendingJump = null
+    return ok
   }
   pendingJump = null
+  if (track) leave(trail, here(), { path, line, col })
   if (mode === "review") setMode("edit")
   const l = Math.min(line, lineStarts.length - 1)
   const text = lineText(l)
   const pos = lineStarts[l] + (utf16 ? Math.min(col, text.length) : [...text].slice(0, col).join("").length)
   ta.focus({ preventScroll: true })
-  ta.setSelectionRange(pos, pos)
+  jumpSel = len ? [pos, pos + len] : null
+  ta.setSelectionRange(pos, pos + len) // a search result selects the match
   const div = hl.children[l] as HTMLElement | undefined
   if (div) ta.scrollTop = Math.max(0, div.offsetTop - ta.clientHeight / 3)
   showDiagnosticAtCaret()
+  return true
+}
+
+// Replace a key that points nowhere with the one the writer picked, as one undo step. In another file the file
+// opens first (the same save question as any file change) and the key is replaced once it is open; the page never
+// writes to a file it has not opened.
+let pendingFix: { path: string; run: () => void } | null = null
+function applyKeyFix(n: Nowhere, key: string) {
+  if (!n) return
+  if (n.path !== current) {
+    pendingFix = { path: n.path, run: () => applyKeyFix(n, key) }
+    pendingJump = { path: n.path, line: n.line, col: n.col }
+    leaveThen({ type: "open_file", path: n.path }).then((ok) => { if (!ok) pendingFix = null })
+    return
+  }
+  if (ta.readOnly) return void toast("Wait a moment, then try again.")
+  if (mode === "review") setMode("edit")
+  const span = n.line < lineStarts.length ? keySpan(lineText(n.line), n.col, n.key) : null
+  if (!span) return void toast(`${n.key} has moved. Open it to fix by hand.`)
+  const at = lineStarts[n.line] + span.from
+  edit(at, lineStarts[n.line] + span.to, key)
+  ta.setSelectionRange(at, at + key.length)
+}
+
+// The fix for a compile error, if one is certain. Command names the project defines come from the open file only.
+function errorFix(d: Diagnostic): ErrorFix | null {
+  const custom = d.path === current ? [...ta.value.matchAll(/\\(?:re)?newcommand\*?\s*\{?\\([A-Za-z@]+)|\\def\\([A-Za-z@]+)/g)].map((m) => m[1] ?? m[2]) : []
+  return fixFor(d, { main: compileMain, files, custom, suggest: suggestKeys })
+}
+
+// Apply a fix as one undo step. The file it belongs to opens first (the same save question as any file change) and the
+// text is read only once it is open; a stale position edits nothing.
+async function applyErrorFix(fix: ErrorFix) {
+  const target = fix.kind === "package" ? compileMain : fix.at.path
+  if (!target) return
+  if (target !== current) {
+    pendingFix = { path: target, run: () => applyErrorFix(fix) }
+    leaveThen({ type: "open_file", path: target }).then((ok) => { if (!ok) pendingFix = null })
+    return
+  }
+  if (ta.readOnly || leaving) return void toast("Wait a moment, then try again.")
+  if (mode === "review") setMode("edit")
+  if (fix.kind === "path" && fix.to === undefined) {
+    const r = await askPicture({ type: "pick_image" })
+    if (r.cancelled) return
+    if (r.error) return void toast(r.error)
+    if (current !== target || ta.readOnly) return void toast("You changed file, so the path was not replaced.")
+    fix = { ...fix, to: r.rel }
+  }
+  const c = planEdit(fix, ta.value)
+  if (!c) return void toast(fix.kind === "package" ? `${fix.pkg} is already loaded, or the preamble is not in ${baseName(target)}. Add it by hand.` : "That line has changed. Open it to fix by hand.")
+  edit(c.from, c.to, c.insert)
+  ta.setSelectionRange(c.from, c.from + c.insert.length)
 }
 
 function followCaret() {
@@ -2553,7 +4269,12 @@ function followCaret() {
 
 // ---------- start ----------
 
-connectEditor(edit, () => openInline("cite"))
+// The Figure button asks for the picture when a project is open; without one it keeps the placeholder.
+connectEditor(edit, () => openInline("cite"), () => {
+  if (!root || !current || !syntax()) return false
+  addPictures([{ type: "pick_image" }], ta.selectionEnd)
+  return true
+})
 connectChat({
   send: (msg: any) => send(msg.type === "prompt" ? { ...msg, ...chApi() } : msg),
   context: () => ({ path: current, selection: ta.selectionEnd > ta.selectionStart ? ta.value.slice(ta.selectionStart, ta.selectionEnd) : null }),
@@ -2614,12 +4335,115 @@ tauri.window.getCurrentWindow().onCloseRequested(async (e: Event) => {
 render()
 renderTree()
 renderLabels()
+renderOutline()
 renderTab()
 renderAgentStatus()
 renderAcSource()
 renderCkSource()
 renderEdSource()
 renderChSource()
+
+// ---------- pictures: drop or paste to add a figure ----------
+
+const PICTURE = /\.(png|jpe?g|gif|svg|webp|pdf)$/i
+const MAX_PICTURE = 20_000_000
+const pictureReplies = new Map<number, (reply: any) => void>()
+let addingPicture = false
+
+// The app copies the picture into figures/ (or finds it in the project) and says how this file writes its path.
+const askPicture = (msg: object) =>
+  new Promise<any>((done) => {
+    const req = ++reqSeq
+    pictureReplies.set(req, done)
+    tauri.core.invoke("message", { msg: { ...msg, req, path: current, root } }).catch((e: unknown) => {
+      pictureReplies.delete(req)
+      done({ error: String(e) })
+    })
+  })
+
+// The text position under a screen point, read from the highlight copy of the text behind the field.
+function posAtPoint(x: number, y: number): number {
+  ta.style.pointerEvents = "none"
+  const range = document.caretRangeFromPoint?.(x, y)
+  ta.style.pointerEvents = ""
+  const div = range && hl.contains(range.startContainer) ? ([...hl.children].find((d) => d.contains(range.startContainer)) as Element | undefined) : undefined
+  if (!range || !div) return ta.selectionEnd
+  const before = document.createRange()
+  before.setStart(div, 0)
+  before.setEnd(range.startContainer, range.startOffset)
+  return Math.min(lineStarts[[...hl.children].indexOf(div)] + before.toString().length, ta.value.length)
+}
+
+// One figure block per picture, after the line at `at`, as one undoable edit. Typing waits meanwhile,
+// so no reply lands in the middle of new typing.
+async function addPictures(adds: object[], at: number) {
+  if (!current || !syntax() || addingPicture || leaving) {
+    toast(!current || !syntax() ? "Open a Typst, LaTeX, Markdown or Quarto file to add a picture." : "Wait a moment, then try again.")
+    return
+  }
+  const path = current
+  addingPicture = true
+  ta.readOnly = true
+  const blocks: string[] = []
+  const said: string[] = []
+  for (const add of adds) {
+    const r = await askPicture(add)
+    if (r.cancelled) continue // Cancel: nothing to say, nothing to insert
+    if (r.error) toast(r.error)
+    else {
+      blocks.push(figureSnippet(syntax()!.figure, r.rel, lang))
+      said.push(r.copied ? `${r.path}` : `${r.path} (already in the project)`)
+    }
+  }
+  addingPicture = false
+  if (!leaving) ta.readOnly = false
+  if (!blocks.length) return
+  if (current !== path || ta.readOnly) {
+    toast(`${said.join(", ")} was added, but the figure was not inserted because you changed file. Use the Figure button to insert it.`)
+    return
+  }
+  const t = ta.value
+  const nl = t.indexOf("\n", Math.min(at, t.length))
+  const end = nl < 0 ? t.length : nl
+  const lineStart = t.lastIndexOf("\n", end - 1) + 1
+  const text = (t.slice(lineStart, end).trim() ? "\n\n" : "") + blocks.join("\n\n")
+  edit(end, end, text)
+  const i = end + text.indexOf("Caption")
+  select(i, i + "Caption".length)
+  toast(`Added ${said.join(", ")}. Undo removes the figure from the text; the picture stays in the project.`, "info")
+}
+
+ta.addEventListener("paste", (e) => {
+  const file = [...(e.clipboardData?.files ?? [])].find((f) => f.type.startsWith("image/") || f.type === "application/pdf")
+  if (!file) return // plain text pastes as always
+  e.preventDefault()
+  if (file.size > MAX_PICTURE) return void toast("That picture is larger than 20 MB, so it was not added. Shrink it and try again.")
+  const reader = new FileReader()
+  reader.onload = () => addPictures([{ type: "paste_image", name: file.name, mime: file.type, data: String(reader.result).split(",")[1] ?? "" }], ta.selectionEnd)
+  reader.readAsDataURL(file)
+})
+
+// Files dragged in from Finder reach the page as Tauri events with paths, not as HTML drop events.
+const overEditor = (p: { x: number; y: number }) => {
+  const b = ta.getBoundingClientRect()
+  const [x, y] = [p.x / devicePixelRatio, p.y / devicePixelRatio]
+  return x >= b.left && x <= b.right && y >= b.top && y <= b.bottom ? [x, y] : null
+}
+const dropCue = (on: boolean) => $("editor").classList.toggle("dropping", on)
+tauri.event.listen("tauri://drag-over", ({ payload }: { payload: any }) => dropCue(!!overEditor(payload.position)))
+tauri.event.listen("tauri://drag-leave", () => dropCue(false))
+tauri.event.listen("tauri://drag-drop", ({ payload }: { payload: any }) => {
+  dropCue(false)
+  const at = overEditor(payload.position)
+  if (!at) return
+  const paths: string[] = payload.paths ?? []
+  const pictures = paths.filter((p) => PICTURE.test(p))
+  if (pictures.length < paths.length) {
+    const n = paths.length - pictures.length
+    toast(`${n === 1 ? "That file is" : `${n} files are`} not a picture Quire can add. Use PNG, JPG, GIF, SVG, WebP or PDF.`)
+  }
+  if (pictures.length) addPictures(pictures.map((from) => ({ type: "import_image", from })), posAtPoint(at[0], at[1]))
+})
 
 // ---------- messages from the app ----------
 
@@ -2649,12 +4473,17 @@ function onMessage(msg: any) {
       root = msg.root
       checkForStart()
       files = msg.files
+      renderPalette()
       dirs = msg.dirs ?? []
       changed = new Set(msg.changed)
       labels = msg.labels ?? []
+      cites = msg.cites ?? []
+      nowhere = msg.missing ?? []
+      renderProblems()
       if (selected && !files.includes(selected) && !dirs.includes(selected)) selected = null
       renderTree()
       renderLabels()
+      refreshSearch()
       renderTab()
       renderReviewStatus()
       renderAgentStatus()
@@ -2690,6 +4519,7 @@ function onMessage(msg: any) {
       if (compileMain !== msg.path) {
         compileDiagnostics = []
         compileLog = ""
+        compileTool = ""
         compileMain = msg.path
         renderDiagnostics()
       }
@@ -2710,9 +4540,10 @@ function onMessage(msg: any) {
     case "build": {
       if (msg.main && (msg.root !== root || msg.main !== previewing)) break
       if (Array.isArray(msg.diagnostics)) {
-        if (!msg.ok && !msg.diagnostics.length) msg.diagnostics = [{ path: null, line: 0, col: 0, end_line: 0, end_col: 0,
+        const tool = msg.ok ? "" : missingTool(msg.log)
+        if (!msg.ok && !tool && !msg.diagnostics.length) msg.diagnostics = [{ path: null, line: 0, col: 0, end_line: 0, end_col: 0,
           message: "LaTeX could not compile this document. Show log has the details; Check Setup can check your TeX installation.", hints: [] }]
-        if (!receiveDiagnostics(msg, msg.log ?? "")) break
+        if (!receiveDiagnostics(msg, tool ? "" : msg.log ?? "", tool)) break
         // The main page shows the readable error and offers the log on request.
         if (previewKind === "pdf") toPreview({ ...msg, log: "", structured: true })
         else toPreview(msg)
@@ -2739,12 +4570,44 @@ function onMessage(msg: any) {
       s.done("")
       break
     }
+    case "image_added":
+      pictureReplies.get(msg.req)?.(msg)
+      pictureReplies.delete(msg.req)
+      break
     case "done":
       if (msg.req === leaving) holdTyping(false)
+      if (pendingFix && !ta.readOnly) { // the file a fix waits for is open and typing is free again
+        const fix = pendingFix
+        pendingFix = null
+        if (fix.path === current) fix.run()
+      }
+      break
+    case "label_renamed": {
+      if (msg.req === leaving) holdTyping(false)
+      const p = pendingRename
+      pendingRename = null
+      const r = msg.result
+      const n = (count: number, noun: string) => `${count} ${noun}${count === 1 ? "" : "s"}`
+      if (r.ok) opToast = toast(`Renamed ${msg.from} to ${msg.to} in ${n(r.files, "file")} (${n(r.places, "place")}). Review the changes.`, "info", offerUndo("rename", r))
+      else if (p) startLabelRename(p.name, p.path, p.to, r.error)
+      else toast(r.error)
+      break
+    }
+    case "operation_undone":
+      if (msg.req === leaving) holdTyping(false)
+      undone(msg.result, lastOp?.kind ?? "change")
+      break
+    case "replace_result":
+      if (msg.req === leaving) holdTyping(false)
+      replaced(msg.result)
       break
     case "renamed": {
+      lastName = null
+      if (msg.req && msg.req === leaving) holdTyping(false)
       invalidateDiagnostics()
       const move = (p: string) => (within(p, msg.from) ? msg.to + p.slice(msg.from.length) : p)
+      renameTrail(trail, msg.from, msg.to)
+      savePosAll(Object.fromEntries(Object.entries(loadPos()).map(([p, v]) => [move(p), v])))
       if (current && within(current, msg.from)) {
         current = move(current)
         lang = langOf(current) // x.txt renamed to x.md is Markdown now
@@ -2766,6 +4629,7 @@ function onMessage(msg: any) {
       }
       sendTyped()
       renderTree()
+      renameNotice(msg)
       break
     }
     case "deleted":
@@ -2875,17 +4739,65 @@ function onMessage(msg: any) {
     case "cite_result":
       applyCite(msg)
       break
+    case "history":
+      showHistory(msg.req, msg.path, msg.versions ?? [])
+      break
+    case "search_result":
+      showSearch(msg.req, msg.hits ?? [], !!msg.more)
+      break
     case "jump":
       followed = `${msg.path}:${msg.line}` // the preview is already there
       goTo(msg.path, msg.line, msg.col)
       break
     case "error":
-      if (msg.req && msg.req === leaving) holdTyping(false) // the open text stays, and the writer can type again
+      if (pictureReplies.has(msg.req)) {
+        // A picture import that failed: addPictures releases the editor and says it once.
+        pictureReplies.get(msg.req)!({ error: msg.message })
+        pictureReplies.delete(msg.req)
+        return
+      }
+      if (msg.req && msg.req === leaving) {
+        holdTyping(false) // the open text stays, and the writer can type again
+        pendingFix = null // the file a fix waited for did not open: nothing is applied later without a click
+      }
+      if (msg.op === "replace_in_project") {
+        replaced({ ok: false, files: 0, places: 0, error: msg.message, op: 0, paths: [] })
+        return
+      }
+      if (msg.op === "undo_operation") {
+        undoing = false
+        toast(`Nothing was undone. ${msg.message}`)
+        return
+      }
       if (msg.op === "export") exporting?.remove()
       if (msg.op === "open_folder" && opening) {
         // A recent project that is gone or cannot be read: do not offer it again.
-        renderRecent(recent().filter((p) => p !== opening))
+        const gone = opening
+        renderRecent(recent().filter((p) => p !== gone))
         opening = ""
+        toast(
+          /^Not a folder/.test(msg.message)
+            ? `This project folder was moved or deleted: ${gone}. It was removed from Recent projects.`
+            : `Could not open the project ${baseName(gone.replace(/\/$/, ""))}: ${msg.message} It was removed from Recent projects.`,
+        )
+        return
+      }
+      if ((msg.op === "create" || msg.op === "rename") && lastName) {
+        // The app refused a name the page accepted: the box comes back with what was typed.
+        naming = lastName.n
+        nameDraft = lastName.name
+        nameError = msg.message
+        lastName = null
+        renderTree()
+        return
+      }
+      const tool = msg.op === "preview" || msg.op === "export" ? /\b(tinymist|TeX|LaTeX|Quarto|Pandoc|tectonic|latexmk)\b/.exec(String(msg.message).split("\n")[0]) : null
+      if (tool && /needs|not found|not installed|install|could not show a preview/i.test(msg.message)) {
+        // One notice per missing tool, however often the writer tries again.
+        const old = toolErrors.get(tool[1])
+        if (!old?.isConnected)
+          toolErrors.set(tool[1], toast(msg.message, "error", [{ label: "Check Setup", run: () => send({ type: "check_setup" }) }]))
+        return
       }
       if (msg.op === "save") {
         const s = saving.get(msg.req)
@@ -2926,7 +4838,13 @@ function onMessage(msg: any) {
         const agent = !["open_file", "typed", "review", "create", "rename", "delete", "preview", "restore", "cite", "export", "reveal"].includes(msg.op)
         // The agent's own errors (no op) go to the chat too, as when it stopped and starts again.
         if (agent && (running || !msg.op)) add("chat-error", `${icon("error")}<span>${esc(msg.message)}</span>`)
-        toast(msg.message)
+        const what: Record<string, string> = {
+          delete: `Could not move ${baseName(lastTrashed)} to the Trash: `,
+          export: `Could not export ${baseName(current ?? "the file")}: `,
+          reveal: "Could not show the exported file: ",
+          rename: "Nothing was moved. ",
+        }
+        toast((what[msg.op] ?? "") + msg.message)
         if (agent && agentState === "starting") {
           agentState = "none"
           agentError = msg.message

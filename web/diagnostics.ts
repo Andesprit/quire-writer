@@ -7,6 +7,8 @@ export interface Diagnostic {
   end_col: number
   message: string
   hints: string[]
+  command?: string // LaTeX: the command an "Unknown command" error stopped at
+  file?: string | null // a missing file: the path as the compiler names it
 }
 export interface DiagnosticBatch {
   root: string
@@ -36,4 +38,27 @@ export function diagnosticRange(text: string, d: Diagnostic): { from: number; to
     else if (lines[d.line].length) from--
   }
   return { from, to }
+}
+
+// A build that failed because a program is missing says so in its first log line. These are the
+// words project.rs uses (run_latex, quarto_preview); diagnostics.test.ts checks they still are.
+export const missingTool = (log = "") => /^(LaTeX preview needs TeX|Quarto preview needs Quarto)/.test(log) ? log.split("\n")[0] : ""
+
+// Where the errors of `path` sit after the change `c` (as minimalChange gives it) is made to `before`: shifted by the edit,
+// or dropped when the edit touched them. Errors in other files stay as they were.
+export function shiftDiagnostics(before: string, c: { from: number; to: number; insert: string }, path: string | null, errors: Diagnostic[]): Diagnostic[] {
+  const after = before.slice(0, c.from) + c.insert + before.slice(c.to)
+  const delta = c.insert.length - (c.to - c.from)
+  const starts = (t: string) => { const s = [0]; for (let i = t.indexOf("\n"); i >= 0; i = t.indexOf("\n", i + 1)) s.push(i + 1); return s }
+  const old = starts(before), now = starts(after)
+  const at = (s: number[], t: string, line: number, col: number) => Math.min((s[Math.min(line, s.length - 1)] ?? 0) + col, t.length)
+  const place = (o: number) => { let line = now.length - 1; while (now[line] > o) line--; return [line, o - now[line]] }
+  return errors.flatMap((d) => {
+    if (d.path !== path) return [d]
+    const from = at(old, before, d.line, d.col), to = at(old, before, d.end_line, d.end_col)
+    if (c.to <= from) { /* before the error: shift */ } else if (c.from >= to) return [d]
+    else return []
+    const [line, col] = place(from + delta), [end_line, end_col] = place(to + delta)
+    return [{ ...d, line, col, end_line, end_col }]
+  })
 }
