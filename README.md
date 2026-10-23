@@ -50,9 +50,17 @@ autocomplete, your own agent, Grammarly, themes, and how Quire compares with VS 
     and LaTeX start as PDF, Quarto and Markdown as HTML; each kind remembers its choice. The
     other views are the export, made again on every save. Quarto and Markdown as PDF need Quarto.
   - The export button next to them saves the document in the format the preview shows.
+- Outline: the open file's headings under the explorer, indented by level, with the section
+  the caret is in highlighted. Click one to go there. Drag a heading, or press Alt+Up / Alt+Down
+  on it, to move the whole section with its subsections; one Cmd+Z undoes the move.
 - Labels: a list under the explorer of every label in the project (Typst `<name>`, LaTeX
   `\label{name}`, Quarto `{#sec-name}`), how often it is used, and which ones nothing refers
-  to. Click one to go to it.
+  to. Click one to go to it. Uses that match no label (or, when a `.bib` file is found, no
+  citation key) are listed at the top as "Points nowhere"; citations are judged only when a
+  bibliography is found.
+  To rename a label everywhere, press F2 on its row (or with the caret on it in the text, or run
+  "Rename label..." from the quick input): every definition and use in the files of that language
+  changes at once and shows as changes to review. Nothing is written if a file changed on disk.
 - Cite by DOI or arXiv ID (formatting bar): adds the paper to your `.bib` file and the
   citation at the cursor (`@key`, `\cite{key}` or `[@key]`). Needs the internet (doi.org).
 - Export (button at the right of the file tab): the whole document as PDF or Word, or as
@@ -64,6 +72,11 @@ autocomplete, your own agent, Grammarly, themes, and how Quire compares with VS 
   Markdown preview, set the text in a book face with clean headings, tinted tables, quotes
   and code. Quarto documents keep Quarto's look and their own settings.
 - Explorer: new file, new folder, rename (F2), delete (moves to the macOS Trash), right-click menu.
+- Quick open: Cmd+P finds project files by name or path; Cmd+Shift+P (or `>`) finds commands, settings and preview formats.
+- Search in the project: Cmd+Shift+F (or the search button) finds a word, phrase, citation key or label in every file, grouped by file; Enter or a click opens the result with the match selected.
+- Find in the open file: Cmd+F (or the search button), Enter / Shift+Enter and Cmd+G /
+  Cmd+Shift+G to move between matches. Match case or whole words; Cmd+Option+F opens
+  Replace and Replace All. Escape returns to the text.
 - Saving: auto save (default) or manual with Cmd+S; switch in the status bar. With auto save
   off, a dot marks unsaved changes and the app asks before closing them.
 - Formatting bar: headings, bold, italic, math, lists, links, citations, footnotes, figures,

@@ -27,6 +27,7 @@ use crate::agent::{
     apple_problem, chat_plain, check_plain, check_prompt, complete_plain, complete_prompt, find_agent, inline_plain, inline_prompt, registry, stop_chat_plain, Agent, Plain, BRIDGE,
 };
 use crate::engine;
+use crate::history;
 #[cfg(windows)]
 use crate::ProcessGroup;
 use crate::{killpg, lock, NoWindow, SIGKILL, SIGTERM};
@@ -44,8 +45,13 @@ fn ws() -> MutexGuard<'static, Workspace> {
     lock(&WS)
 }
 
+#[cfg(test)]
+static SENT: Mutex<Vec<Value>> = Mutex::new(Vec::new()); // what the page would hear
+
 /// A message to the page.
 pub fn send(msg: Value) {
+    #[cfg(test)]
+    lock(&SENT).push(msg.clone());
     if let Some(app) = APP.get() {
         let _ = app.emit("message", msg);
     }
@@ -56,7 +62,43 @@ fn re(pattern: &str) -> Regex {
 }
 
 fn err(e: std::io::Error) -> String {
-    e.to_string()
+    // The writer sees this: plain words for the usual cause, not the system's error number.
+    match e.kind() {
+        ErrorKind::PermissionDenied | ErrorKind::ReadOnlyFilesystem => "Permission denied: it may be read-only, or Quire is not allowed to use it.".into(),
+        ErrorKind::NotFound => "It was not found: it may have been moved or deleted.".into(),
+        _ => {
+            // No "(os error 2)" tail: the number means nothing to a writer.
+            let text = e.to_string();
+            text.split(" (os error ").next().unwrap_or(&text).to_string()
+        }
+    }
+}
+
+const MAX_IMAGE: u64 = 20_000_000;
+
+/// The picture type of a file name, lower case, or None for anything Quire does not add.
+fn image_ext(p: &Path) -> Option<&'static str> {
+    let e = p.extension()?.to_str()?.to_ascii_lowercase();
+    ["png", "jpg", "jpeg", "gif", "svg", "webp", "pdf"].into_iter().find(|k| *k == e)
+}
+
+/// A file name stem with only a-z, 0-9 and "-": accents lose their mark, spaces and the rest become "-".
+fn safe_stem(s: &str) -> String {
+    let ascii: String = s.nfd().filter(|c| c.is_ascii()).map(|c| if c.is_ascii_alphanumeric() { c.to_ascii_lowercase() } else { '-' }).collect();
+    let stem = ascii.split('-').filter(|p| !p.is_empty()).collect::<Vec<_>>().join("-");
+    if stem.is_empty() { "image".into() } else { stem }
+}
+
+/// `target` as written in the document `base` (both project paths): relative to its folder.
+fn relative_to(base: &str, target: &str) -> String {
+    let mut from: Vec<&str> = base.split('/').collect();
+    from.pop();
+    let mut to: Vec<&str> = target.split('/').collect();
+    while !from.is_empty() && to.len() > 1 && from[0] == to[0] {
+        from.remove(0);
+        to.remove(0);
+    }
+    from.iter().map(|_| "..").chain(to).collect::<Vec<_>>().join("/")
 }
 
 fn is_text_ext(p: &Path) -> bool {
@@ -134,6 +176,9 @@ static HIDDEN: LazyLock<Regex> =
 static TEX_LABEL: LazyLock<Regex> = LazyLock::new(|| re(r"\\label\{([^}]+)\}"));
 static TEX_REF: LazyLock<Regex> =
     LazyLock::new(|| re(r"\\(?:[cCvV]ref|ref|eqref|pageref|autoref|nameref|[cC]pageref|labelcref)\*?\{([^}]+)\}"));
+static TEX_CITE: LazyLock<Regex> = LazyLock::new(|| re(r"\\(?:[cC]ite\w*|parencite\w*|textcite\w*|autocite\w*|footcite\w*|nocite)\*?(?:\[[^\]]*\]){0,2}\{([^}*]+)\}"));
+static TEX_BIBITEM: LazyLock<Regex> = LazyLock::new(|| re(r"\\bibitem(?:\[[^\]]*\])?\{([^}]+)\}"));
+static QMD_CROSS: LazyLock<Regex> = LazyLock::new(|| re(r"^(?:fig|tbl|sec|eq|lst|thm|lem|cor|prp|cnj|def|exm|exr)-"));
 static TEX_HIDDEN: LazyLock<Regex> = LazyLock::new(|| {
     re(r"(?s)\\begin\{(?:verbatim|lstlisting|minted|comment)\*?\}.*?\\end\{(?:verbatim|lstlisting|minted|comment)\*?\}|%[^\n]*")
 });
@@ -177,9 +222,85 @@ fn blank_hidden(text: &str, lang: Lang) -> String {
     out + &text[at..]
 }
 
-/// Every label defined in the Typst, LaTeX and Quarto files, and how many times it is used.
-fn labels(texts: &BTreeMap<String, String>) -> Vec<Value> {
-    let (mut found, mut uses) = (vec![], HashMap::<String, u64>::new());
+fn literal(query: &str, case: bool) -> Regex {
+    Regex::new(&format!("(?{}u){}", if case { "" } else { "i" }, regex::escape(query))).unwrap()
+}
+
+/// The match has no letter, digit or underscore right before or after it.
+fn whole_word(content: &str, m: &regex::Match) -> bool {
+    let is_word = |c: char| c.is_alphanumeric() || c == '_';
+    !(content[..m.start()].chars().next_back().is_some_and(is_word) || content[m.end()..].chars().next().is_some_and(is_word))
+}
+
+/// `text` with every match `search` would find replaced by `with`, and how many there were.
+/// Line endings stay as they are.
+fn replace_all(text: &str, query: &str, case: bool, word: bool, with: &str) -> (String, usize) {
+    if query.is_empty() {
+        return (text.to_string(), 0);
+    }
+    let (found, mut count) = (literal(query, case), 0);
+    let lines: Vec<String> = text
+        .split('\n')
+        .map(|line| {
+            let (content, end) = line.strip_suffix('\r').map_or((line, ""), |c| (c, "\r"));
+            let (mut out, mut at) = (String::new(), 0);
+            for m in found.find_iter(content).filter(|m| !word || whole_word(content, m)) {
+                out.push_str(&content[at..m.start()]);
+                out.push_str(with);
+                at = m.end();
+                count += 1;
+            }
+            out + &content[at..] + end
+        })
+        .collect();
+    (lines.join("\n"), count)
+}
+
+/// Where `query` appears in the project's text, one literal match at a time: the file, the
+/// 0-based line, the UTF-16 column and length (as the editor counts), and the line around it.
+/// `texts` is the editor's text where there is one, so unsaved typing is searched.
+fn search(texts: &BTreeMap<String, String>, query: &str, case: bool, word: bool, cap: usize) -> (Vec<Value>, bool) {
+    let mut hits = Vec::new();
+    if query.is_empty() {
+        return (hits, false);
+    }
+    let found = literal(query, case);
+    for (path, text) in texts {
+        for (line, content) in text.split('\n').enumerate() {
+            let content = content.strip_suffix('\r').unwrap_or(content);
+            for m in found.find_iter(content) {
+                if word && !whole_word(content, &m) {
+                    continue;
+                }
+                if hits.len() == cap {
+                    return (hits, true);
+                }
+                let before: Vec<char> = content[..m.start()].chars().rev().take(40).collect();
+                hits.push(json!({
+                    "path": path, "line": line, "col": content[..m.start()].encode_utf16().count(),
+                    "len": m.as_str().encode_utf16().count(),
+                    "before": before.into_iter().rev().collect::<String>(),
+                    "hit": m.as_str(), "after": content[m.end()..].chars().take(100).collect::<String>(),
+                }));
+            }
+        }
+    }
+    (hits, false)
+}
+
+/// A reference in the text: a label use, or (in LaTeX) a citation.
+struct Use {
+    key: String,
+    path: String,
+    line: usize,
+    col: usize,
+    cite: bool,
+    prefixed: bool, // Quarto: @fig-x, @sec-x and the like are cross-references, never citations
+}
+
+/// Every label defined in the Typst, LaTeX and Quarto files, and every use of a key.
+fn scan(texts: &BTreeMap<String, String>) -> (Vec<(String, String, usize, usize)>, Vec<Use>) {
+    let (mut found, mut uses) = (vec![], vec![]);
     for (rel, text) in texts {
         let lang = lang_of(rel);
         if !matches!(lang, Lang::Typst | Lang::Latex | Lang::Quarto) {
@@ -188,15 +309,27 @@ fn labels(texts: &BTreeMap<String, String>) -> Vec<Value> {
         let blanked = blank_hidden(text, lang);
         for (n, (line, raw)) in blanked.split('\n').zip(text.split('\n')).enumerate() {
             let mut define = |name: &str, at: usize| found.push((name.to_string(), rel.clone(), n, line[..at].chars().count()));
-            let mut refs = |name: &str| *uses.entry(name.trim().to_string()).or_default() += 1;
+            // `at` is where `names` starts in the line; a comma-separated list is one use per key.
+            let mut refs = |names: &str, at: usize, cite: bool| {
+                let mut start = at;
+                for name in names.split(',') {
+                    let key = name.trim();
+                    let col = line[..start + name.len() - name.trim_start().len()].chars().count();
+                    let prefixed = QMD_CROSS.is_match(key);
+                    uses.push(Use { key: key.to_string(), path: rel.clone(), line: n, col, cite, prefixed });
+                    start += name.len() + 1;
+                }
+            };
             if lang == Lang::Latex {
                 TEX_LABEL.captures_iter(line).for_each(|c| define(&c[1], c.get(0).unwrap().start()));
-                TEX_REF.captures_iter(line).for_each(|c| c[1].split(',').for_each(&mut refs));
+                TEX_REF.captures_iter(line).for_each(|c| refs(&c[1], c.get(1).unwrap().start(), false));
+                TEX_CITE.captures_iter(line).for_each(|c| refs(&c[1], c.get(1).unwrap().start(), true));
                 continue;
             }
-            // Not after a letter or a backslash: me@site.org and \@ are not references.
-            for c in find_not_after(&REF, line, 0, |b, _| b.is_alphanumeric() || b == '_' || b == '\\') {
-                refs(&c[1]);
+            // Not after a letter or a backslash: me@site.org and \@ are not references. In Typst
+            // a quote too: "@preview/pkg:1.0" is a package.
+            for c in find_not_after(&REF, line, 0, |b, _| b.is_alphanumeric() || b == '_' || b == '\\' || (lang == Lang::Typst && b == '"')) {
+                refs(&c[1], c.get(1).unwrap().start(), false);
             }
             if lang == Lang::Quarto {
                 QMD_LABEL.captures_iter(line).for_each(|c| define(&c[1], c.get(0).unwrap().start()));
@@ -207,19 +340,268 @@ fn labels(texts: &BTreeMap<String, String>) -> Vec<Value> {
             }
             for c in LABEL.captures_iter(line) {
                 if c.get(1).is_some() {
-                    refs(&c[2]);
+                    refs(&c[2], c.get(2).unwrap().start(), false);
                 } else {
                     define(&c[2], c.get(0).unwrap().start());
                 }
             }
         }
     }
-    found
+    (found, uses)
+}
+
+/// The new text of every file that `edits` (from `rename_edits`) changes.
+fn apply_rename(texts: &BTreeMap<String, String>, edits: &[(String, usize, usize)], from: &str, to: &str) -> BTreeMap<String, String> {
+    let mut out = BTreeMap::new();
+    for (path, line, col) in edits.iter().rev() {
+        let text = out.entry(path.clone()).or_insert_with(|| texts[path].split('\n').map(String::from).collect::<Vec<_>>());
+        let at = text[*line].char_indices().nth(*col).unwrap().0;
+        text[*line].replace_range(at..at + from.len(), to);
+    }
+    out.into_iter().map(|(path, lines)| (path, lines.join("\n"))).collect()
+}
+
+// Paths in documents. Typst: #include/#import "x", image("x"), bibliography("x"), read("x") and the
+// data loaders. LaTeX: \input, \include, \includegraphics, \bibliography, \addbibresource. Markdown
+// and Quarto: ![](x), [](x) and the {{< include x >}} shortcode.
+static TYPST_PATH: LazyLock<Regex> =
+    LazyLock::new(|| re(r#"\b(?:include|import|image|bibliography|read|csv|json|yaml|toml|xml|cbor)\b\s*\(?\s*"([^"\n]+)""#));
+static TEX_PATH: LazyLock<Regex> =
+    LazyLock::new(|| re(r"\\(include|input|includegraphics|bibliography|addbibresource)\*?(?:\[[^\]]*\])?\{([^}\n]+)\}"));
+static MD_PATH: LazyLock<Regex> = LazyLock::new(|| re(r"\]\(\s*<?([^)\s>]+)|\{\{<\s*include\s+([^\s>]+)"));
+
+/// One rewritten path: the file (as named now), the 0-based line, the byte range of the old path in
+/// that file's text, and what replaces it.
+#[derive(Debug, PartialEq)]
+#[cfg_attr(not(test), allow(dead_code))]
+struct LinkEdit {
+    file: String,
+    line: usize,
+    range: (usize, usize),
+    text: String,
+    manual: bool, // the writer has to change it: the path is percent-encoded, so `text` is the old one
+}
+
+/// `p` after moving `old` (a file or folder) to `new`.
+fn moved(p: &str, old: &str, new: &str) -> String {
+    match p.strip_prefix(old) {
+        Some("") => new.into(),
+        Some(rest) if rest.starts_with('/') => format!("{new}{rest}"),
+        _ => p.into(),
+    }
+}
+
+/// `dir`/`path` without `.` and `..`; None when it climbs out of the project.
+fn join_path(dir: &str, path: &str) -> Option<String> {
+    let mut out: Vec<&str> = dir.split('/').filter(|s| !s.is_empty()).collect();
+    for s in path.split('/') {
+        match s {
+            "" | "." => {}
+            ".." => {
+                out.pop()?;
+            }
+            s => out.push(s),
+        }
+    }
+    Some(out.join("/"))
+}
+
+fn ext_of(p: &str) -> &str {
+    Path::new(p).extension().and_then(|e| e.to_str()).unwrap_or("")
+}
+
+/// Where moving `old` to `new` changes a path written in a document, without writing anything. A path
+/// is judged where its file is now (`latex_main` gives the file LaTeX resolves from), and the edit
+/// keeps its style: the extension or not, a leading "./", "/" from the project root. A document that
+/// moves with the file is covered too: its own paths to files that stay are rewritten. Comments, raw
+/// and code are skipped, and paths that match no file in `files` are left alone.
+#[cfg_attr(not(test), allow(dead_code))]
+fn link_edits(texts: &BTreeMap<String, String>, files: &[String], latex_main: impl Fn(&str) -> String, old: &str, new: &str) -> Vec<LinkEdit> {
+    let mut out = vec![];
+    for (file, text) in texts {
+        let lang = lang_of(file);
+        let (re, base) = match lang {
+            Lang::Typst => (&*TYPST_PATH, file.clone()),
+            Lang::Latex => (&*TEX_PATH, latex_main(file)),
+            Lang::Quarto | Lang::Markdown => (&*MD_PATH, file.clone()),
+            Lang::Text => continue,
+        };
+        // Every path in the text: where it starts, what it is, which extension it must have, and the
+        // file its folder is counted from.
+        let mut found: Vec<(usize, &str, Option<&str>, &str)> = vec![];
+        let blank = blank_hidden(text, lang);
+        for c in re.captures_iter(&blank) {
+            let g = c.iter().skip(1).flatten().last().unwrap(); // the path is the last group that matched
+            let (parts, want) = if lang == Lang::Latex {
+                let cmd = &c[1];
+                (if cmd == "bibliography" { g.as_str().split(',').collect() } else { vec![g.as_str()] }, match cmd { "bibliography" | "addbibresource" => Some("bib"), "input" | "include" => Some("tex"), _ => None })
+            } else {
+                (vec![g.as_str()], None)
+            };
+            for part in parts {
+                let at = g.start() + (part.as_ptr() as usize - g.as_str().as_ptr() as usize);
+                found.push((at + part.len() - part.trim_start().len(), part.trim(), want, &base));
+            }
+        }
+        // "% !TEX root = ../main.tex" is counted from the chapter itself, and is a comment to the above.
+        if lang == Lang::Latex {
+            if let Some(m) = TEX_ROOT.captures(text) {
+                found.push((m.get(1).unwrap().start(), m.get(1).unwrap().as_str(), Some("tex"), file));
+            }
+        }
+        for (start, path, want, base) in found {
+            let path = path.split('#').next().unwrap();
+            if path.is_empty() || path.contains("://") || path.starts_with("mailto:") {
+                continue;
+            }
+            let (dir, new_dir) = (base.rsplit_once('/').map_or("", |d| d.0), moved(base, old, new));
+            let new_dir = new_dir.rsplit_once('/').map_or("", |d| d.0);
+            // Markdown writes spaces as %20: the name is looked up as it is on disk, and left for the writer.
+            let encoded = lang != Lang::Typst && lang != Lang::Latex && path.contains('%');
+            let name = if encoded { unpercent(path) } else { path.to_string() };
+            let rooted = name.starts_with('/') && lang == Lang::Typst;
+            let Some(target) = join_path(if rooted { "" } else { dir }, &name) else { continue };
+            // The file it names: as written, or (LaTeX \input{chapter}) with the extension left off.
+            let bare = ext_of(&name).is_empty() || (lang == Lang::Latex && !matches!(ext_of(&name), "tex" | "bib" | "png" | "jpg" | "jpeg" | "pdf" | "eps" | "svg"));
+            let real = files.iter().find(|f| **f == target).or_else(|| if bare { files.iter().find(|f| f.rsplit_once('.').is_some_and(|(s, e)| s == target && want.is_none_or(|w| w == e))) } else { None });
+            let Some(real) = real else { continue };
+            let after = moved(real, old, new);
+            if after == *real && new_dir == dir {
+                continue;
+            }
+            let shown = if *real != target && ext_of(&after) == ext_of(real) { after.strip_suffix(&format!(".{}", ext_of(&after))).unwrap_or(&after) } else { &after };
+            let mut written = if rooted { format!("/{shown}") } else { relative_to(&join_path(new_dir, "x").unwrap(), shown) };
+            if name.starts_with("./") && !written.starts_with("../") && !rooted {
+                written.insert_str(0, "./");
+            }
+            if written != name {
+                let line = text[..start].matches('\n').count();
+                let manual = encoded;
+                out.push(LinkEdit { file: file.clone(), line, range: (start, start + path.len()), text: if manual { path.to_string() } else { written }, manual });
+            }
+        }
+    }
+    out
+}
+
+static TEX_ROOT: LazyLock<Regex> = LazyLock::new(|| re(r"(?im)^\s*%\s*!TEX\s+root\s*=\s*(\S.*?)\s*$"));
+
+/// `%20` and the like turned back into the characters they stand for.
+fn unpercent(s: &str) -> String {
+    let b = s.as_bytes();
+    let (mut out, mut i) = (vec![], 0);
+    while i < b.len() {
+        match (b[i], s.get(i + 1..i + 3).and_then(|h| u8::from_str_radix(h, 16).ok())) {
+            (b'%', Some(v)) => (out.push(v), i += 3),
+            (c, _) => (out.push(c), i += 1),
+        };
+    }
+    String::from_utf8_lossy(&out).into_owned()
+}
+
+static TYPST_NAME: LazyLock<Regex> = LazyLock::new(|| re(r"^[\w:.-]+$"));
+static TEX_NAME: LazyLock<Regex> = LazyLock::new(|| re(r"^[^\s{}%,\\]+$"));
+static QMD_NAME: LazyLock<Regex> = LazyLock::new(|| re(r"^[A-Za-z][\w:.-]*$"));
+
+/// Where renaming the label `from` to `to` changes text: the file, the 0-based line and the
+/// UTF-16-free character column of each definition and use (citations are not touched), or a
+/// plain reason it cannot be done. Only files of `home`'s language are edited.
+fn rename_edits(texts: &BTreeMap<String, String>, home: &str, from: &str, to: &str) -> Result<Vec<(String, usize, usize)>, String> {
+    let (defs, uses) = scan(texts);
+    let lang = lang_of(home);
+    if !defs.iter().any(|d| d.0 == from && lang_of(&d.1) == lang) {
+        return Err(format!("There is no label called {from}."));
+    }
+    let valid = match lang {
+        Lang::Latex => &TEX_NAME,
+        Lang::Quarto => &QMD_NAME,
+        _ => &TYPST_NAME,
+    };
+    if to == from {
+        return Err("That is already its name.".into());
+    }
+    if !valid.is_match(to) {
+        return Err(format!("{to} is not a valid label name here. Use letters, digits, - _ : and . without spaces."));
+    }
+    if defs.iter().any(|d| d.0 == to && lang_of(&d.1) == lang) {
+        return Err(format!("A label called {to} already exists."));
+    }
+    let name_char = |c: char| c.is_alphanumeric() || matches!(c, '_' | ':' | '.' | '-');
+    let mut edits = vec![];
+    for (name, path, line, col) in &defs {
+        if name != from || lang_of(path) != lang {
+            continue;
+        }
+        // The definition's column is where its marker starts (\label{, <, {#): find the name after it.
+        let raw: Vec<char> = texts[path].split('\n').nth(*line).unwrap_or("").trim_end_matches('\r').chars().collect();
+        let n = from.chars().count();
+        let at = (*col..raw.len().saturating_sub(n - 1)).find(|&i| {
+            raw[i..i + n].iter().copied().eq(from.chars())
+                && i > 0
+                && (matches!(raw[i - 1], '{' | '<' | '#' | '"' | '\'') || raw[i - 1].is_whitespace())
+                && !raw.get(i + n).is_some_and(|&c| name_char(c))
+        });
+        edits.extend(at.map(|i| (path.clone(), *line, i)));
+    }
+    edits.extend(uses.iter().filter(|u| !u.cite && u.key == from && lang_of(&u.path) == lang).map(|u| (u.path.clone(), u.line, u.col)));
+    edits.sort();
+    edits.dedup();
+    Ok(edits)
+}
+
+#[cfg(test)]
+fn labels(texts: &BTreeMap<String, String>) -> Vec<Value> {
+    references(texts).0
+}
+
+#[cfg(test)]
+fn missing(texts: &BTreeMap<String, String>) -> Vec<Value> {
+    references(texts).1
+}
+
+/// Every label defined in the Typst, LaTeX and Quarto files with how many times it is used,
+/// and the uses that point nowhere.
+fn references(texts: &BTreeMap<String, String>) -> (Vec<Value>, Vec<Value>, Vec<String>) {
+    let (found, uses) = scan(texts);
+    let bib = bib_keys(texts);
+    let nowhere = missing_of(texts, &found, &uses, &bib);
+    let mut count = HashMap::<&str, u64>::new();
+    uses.iter().filter(|u| !u.cite).for_each(|u| *count.entry(&u.key).or_default() += 1);
+    let labels = found
         .into_iter()
         .map(|(name, path, line, col)| {
-            let refs = uses.get(&name).copied().unwrap_or(0);
+            let refs = count.get(name.as_str()).copied().unwrap_or(0);
             json!({"name": name, "path": path, "line": line, "col": col, "refs": refs})
         })
+        .collect();
+    (labels, nowhere, bib.into_iter().map(String::from).collect())
+}
+
+/// Every citation key the project defines, in a .bib file or a \bibitem, sorted and without repeats.
+fn bib_keys(texts: &BTreeMap<String, String>) -> BTreeSet<&str> {
+    texts
+        .iter()
+        .filter(|(rel, _)| rel.ends_with(".bib"))
+        .flat_map(|(_, t)| BIB_KEY.captures_iter(t).map(|c| c.get(1).unwrap().as_str()))
+        .chain(texts.values().flat_map(|t| TEX_BIBITEM.captures_iter(t).map(|c| c.get(1).unwrap().as_str())))
+        .collect()
+}
+
+/// Uses that match no label and no bibliography entry, each with its file, line and column.
+/// A citation is judged only when a .bib file (or \bibitem) gives keys to judge it by, and a
+/// Typst or Quarto @key that could be a citation only when no bibliography is declared that
+/// this cannot read (a .yml, a .json), so a miss is never a guess.
+fn missing_of(texts: &BTreeMap<String, String>, defs: &[(String, String, usize, usize)], uses: &[Use], bib: &BTreeSet<&str>) -> Vec<Value> {
+    let defs: HashSet<&str> = defs.iter().map(|d| d.0.as_str()).collect();
+    let unreadable = bib.is_empty() && texts.iter().any(|(rel, t)| !rel.ends_with(".bib") && t.contains("bibliography"));
+    uses.iter()
+        .filter(|u| !defs.contains(u.key.as_str()) && !bib.contains(u.key.as_str()))
+        .filter(|u| match lang_of(&u.path) {
+            Lang::Latex => !u.cite || !bib.is_empty(),
+            Lang::Quarto => u.prefixed || !bib.is_empty(),
+            _ => !unreadable,
+        })
+        .map(|u| json!({"kind": if u.cite || (lang_of(&u.path) == Lang::Quarto && !u.prefixed) { "cite" } else { "ref" }, "key": u.key, "path": u.path, "line": u.line, "col": u.col}))
         .collect()
 }
 
@@ -297,6 +679,8 @@ pub struct Workspace {
     root: Option<PathBuf>,
     known: BTreeMap<String, String>,    // last content the editor and disk agreed on
     baseline: BTreeMap<String, String>, // content before unreviewed changes
+    operations: Vec<Operation>,         // the last few multi-file changes the writer can undo
+    next_operation: u64,
     turn: u64,
     checkpoints: BTreeMap<u64, BTreeMap<String, Option<String>>>, // turn -> {path: content before it}
     watcher: Option<(RecommendedWatcher, JoinHandle<()>)>,
@@ -307,6 +691,60 @@ pub struct Workspace {
     preview_id: u64, // which preview is the current one
     asked: u64,      // the newest preview the page asked for: an older request that finishes later must not replace it
     built: Option<Built>,
+    typed_text: BTreeMap<String, String>,
+    typed_generation: u64,
+    diagnostic_tx: Option<tokio::sync::watch::Sender<DiagnosticInput>>,
+    history: Option<PathBuf>, // where earlier versions of files are kept: the app's data folder, never the project
+}
+
+/// A rename or replace across files: per file the text before and after, and the review baseline
+/// it had before, so one undo can put every untouched file back.
+struct Operation {
+    id: u64,
+    renamed: Option<(String, String)>, // a rename this operation includes: the files are named as after it
+    files: BTreeMap<String, (String, String, Option<String>)>,
+}
+
+const UNDOABLE: usize = 5;
+
+#[derive(Clone)]
+struct DiagnosticInput {
+    root: PathBuf,
+    main: PathBuf,
+    text: BTreeMap<String, String>,
+    generation: u64,
+}
+
+/// One compile at a time; changes during a compile replace the pending text, not queue it.
+async fn diagnose(mut rx: tokio::sync::watch::Receiver<DiagnosticInput>) {
+    loop {
+        let input = rx.borrow_and_update().clone();
+        tokio::select! {
+            _ = tokio::time::sleep(Duration::from_millis(300)) => {},
+            changed = rx.changed() => { if changed.is_err() { break } else { continue } },
+        }
+        if rx.has_changed().unwrap_or(true) { continue }
+        let snapshot = input.clone();
+        let result = tokio::task::spawn_blocking(move || {
+            // Match exports' stack allowance for deeply nested Typst documents.
+            std::thread::Builder::new().stack_size(32 << 20).spawn(move || {
+                engine::diagnostics(&snapshot.main, &snapshot.root, &snapshot.text)
+            }).map_err(|e| e.to_string())?.join().map_err(|_| "Typst stopped while checking this document.".to_string())?
+        }).await;
+        if !rx.has_changed().unwrap_or(true) {
+            let errors = result.ok().and_then(Result::ok).unwrap_or_else(|| vec![json!({
+                "path": null, "line": 0, "col": 0, "end_line": 0, "end_col": 0,
+                "message": "Quire could not check this document. Try reopening the project.", "hints": []
+            })]);
+            let w = ws();
+            if w.root.as_ref() == Some(&input.root) && !rx.has_changed().unwrap_or(true) {
+                send(json!({"type": "diagnostics", "root": page(&input.root),
+                    "main": page(input.main.strip_prefix(&input.root).unwrap()),
+                    "generation": input.generation, "diagnostics": errors}));
+            }
+        }
+        if rx.changed().await.is_err() { break }
+    }
 }
 
 /// A preview the app builds itself on every change: the document as the export makes it,
@@ -363,6 +801,37 @@ fn walk(root: &Path, dir: &Path, files: &mut Vec<String>, dirs: &mut Vec<String>
 }
 
 impl Workspace {
+    /// Keeps `old`, the text a write is about to replace, as an earlier version of `rel`. `force`:
+    /// not routine typing, so it is kept even right after another version.
+    fn keep(&self, rel: &str, old: &str, force: bool) {
+        self.keep_as(rel, old, force, false)
+    }
+
+    /// `outside`: an agent or another program wrote the text, so it counts against a separate, smaller allowance.
+    fn keep_as(&self, rel: &str, old: &str, force: bool, outside: bool) {
+        if let (Some(base), Some(root)) = (&self.history, &self.root) {
+            let now = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map_or(0, |d| d.as_millis() as u64);
+            history::record(base, &page(root), rel, old, now, force, outside);
+        }
+    }
+
+    /// The history of `rel` (a file, or a folder and all in it) follows it to `to`.
+    fn keep_moved(&self, rel: &str, to: &str) {
+        let under = format!("{rel}/");
+        if let (Some(base), Some(root)) = (&self.history, &self.root) {
+            for k in self.known.keys().filter(|k| *k == rel || k.starts_with(&under)) {
+                history::moved(base, &page(root), k, &moved(k, rel, to));
+            }
+        }
+    }
+
+    /// Earlier versions of `rel`, newest first, with their text.
+    fn versions(&self, rel: &str) -> Vec<Value> {
+        let (Some(base), Some(root)) = (&self.history, &self.root) else { return vec![] };
+        let root = page(root);
+        history::list(base, &root, rel).into_iter().filter_map(|at| Some(json!({"at": at, "text": history::read(base, &root, rel, at)?}))).collect()
+    }
+
     fn root(&self) -> Result<&Path, String> {
         self.root.as_deref().ok_or_else(|| "No folder is open.".into())
     }
@@ -408,6 +877,7 @@ impl Workspace {
         for k in moved {
             self.unshadow(&k);
         }
+        self.typed_text.retain(|path, _| path != rel && !path.starts_with(&under));
         move_keys(&mut self.known, rel, to);
         move_keys(&mut self.baseline, rel, to);
         for d in self.checkpoints.values_mut() {
@@ -435,7 +905,98 @@ impl Workspace {
         Ok(())
     }
 
-    fn rename(&mut self, old: &str, new: &str) -> Result<(), String> {
+    /// A picture the writer dropped (an absolute path) or pasted (bytes) becomes a file in
+    /// figures/ under a name that is safe and new; a picture already in the project is only
+    /// referenced. Returns the project-relative path and whether a file was written.
+    fn import_image(&mut self, from: &str) -> Result<(String, bool), String> {
+        let src = Path::new(from);
+        let name = src.file_name().and_then(|n| n.to_str()).unwrap_or("that file");
+        let ext = image_ext(src).ok_or_else(|| format!("{name} is not a picture Quire can add. Use PNG, JPG, GIF, SVG, WebP or PDF."))?;
+        let src = src.canonicalize().map_err(|e| format!("{name} could not be added. {}", err(e)))?;
+        if !src.is_file() {
+            return Err(format!("{name} is not a file."));
+        }
+        if let Ok(rel) = src.strip_prefix(self.root()?) {
+            return Ok((page(rel), false));
+        }
+        if fs::metadata(&src).map_err(err)?.len() > MAX_IMAGE {
+            return Err(format!("{name} is larger than 20 MB, so it was not added. Shrink it and try again."));
+        }
+        let bytes = fs::read(&src).map_err(|e| format!("{name} could not be read. {}", err(e)))?;
+        let stem = src.file_stem().and_then(|n| n.to_str()).unwrap_or("");
+        Ok((self.store_image(stem, ext, &bytes)?, true))
+    }
+
+    fn paste_image(&mut self, name: &str, mime: &str, bytes: &[u8]) -> Result<String, String> {
+        let ext = match mime {
+            "image/png" => "png",
+            "image/jpeg" => "jpg",
+            "image/gif" => "gif",
+            "image/svg+xml" => "svg",
+            "image/webp" => "webp",
+            "application/pdf" => "pdf",
+            _ => return Err("That is not a picture Quire can add. Use PNG, JPG, GIF, SVG, WebP or PDF.".into()),
+        };
+        if bytes.len() as u64 > MAX_IMAGE {
+            return Err("That picture is larger than 20 MB, so it was not added. Shrink it and try again.".into());
+        }
+        let stem = Path::new(name).file_stem().and_then(|n| n.to_str()).unwrap_or("");
+        self.store_image(stem, ext, bytes)
+    }
+
+    /// Writes figures/<stem>.<ext>, or <stem>-2 and so on; never over an existing file.
+    fn store_image(&mut self, stem: &str, ext: &str, bytes: &[u8]) -> Result<String, String> {
+        let dir = self.path("figures")?;
+        fs::create_dir_all(&dir).map_err(|e| format!("The figures folder could not be made. {}", err(e)))?;
+        let stem = safe_stem(stem);
+        for n in 1.. {
+            let file = if n == 1 { format!("{stem}.{ext}") } else { format!("{stem}-{n}.{ext}") };
+            let path = dir.join(&file);
+            match fs::File::create_new(&path) {
+                Ok(mut f) => {
+                    if let Err(e) = std::io::Write::write_all(&mut f, bytes) {
+                        let _ = fs::remove_file(&path);
+                        return Err(format!("{file} could not be saved. {}", err(e)));
+                    }
+                    send(self.state());
+                    return Ok(format!("figures/{file}"));
+                }
+                Err(e) if e.kind() == ErrorKind::AlreadyExists => {}
+                Err(e) => return Err(format!("{file} could not be saved. {}", err(e))),
+            }
+        }
+        unreachable!()
+    }
+
+    /// The page's answer to a dropped or pasted picture. `rel` is the path as the open document
+    /// writes it: Typst, Markdown and Quarto read paths from their own folder, LaTeX from the
+    /// folder of the main file the build starts at.
+    fn image_reply(&self, req: &Value, open: &str, added: Result<(String, bool), String>) -> Value {
+        match added {
+            Ok((path, copied)) => {
+                let base = if lang_of(open) == Lang::Latex { self.latex_main(open) } else { open.to_string() };
+                json!({"type": "image_added", "req": req, "path": path, "rel": relative_to(&base, &path), "copied": copied})
+            }
+            Err(error) => json!({"type": "image_added", "req": req, "error": error}),
+        }
+    }
+
+    /// The answer to the Figure button once the chooser closed: no choice is a Cancel, which
+    /// changes nothing and is not an error; a choice is imported like a dropped picture.
+    fn picked_image(&mut self, req: &Value, open: &str, choice: Option<String>) -> Value {
+        match choice {
+            None => json!({"type": "image_added", "req": req, "cancelled": true}),
+            Some(from) => {
+                let added = self.import_image(&from);
+                self.image_reply(req, open, added)
+            }
+        }
+    }
+
+    /// Moves `old` to `new` and the paths in documents that pointed at it along (see `link_edits`),
+    /// as one operation `undo_operation` reverses. A document that cannot be updated (typed text, or
+    /// changed on disk) is left as it is, and listed in the answer. Returns the answer for the page.
+    fn rename(&mut self, old: &str, new: &str, req: &Value) -> Result<(), String> {
         let (old, new) = (self.norm(old)?, self.norm(new)?);
         let (src, dst) = (self.path(&old)?, self.path(&new)?);
         if !src.exists() {
@@ -447,10 +1008,44 @@ impl Workspace {
         if dst.starts_with(&src) {
             return Err("A folder cannot be moved inside itself.".into());
         }
-        fs::create_dir_all(dst.parent().unwrap()).map_err(err)?;
-        fs::rename(&src, &dst).map_err(err)?;
+        let edits = link_edits(&self.known, &self.entries()?.0, |f| self.latex_main(f), &old, &new);
+        let (mut texts, mut left, mut links) = (BTreeMap::<String, String>::new(), vec![], 0);
+        for e in edits.iter().rev() {
+            let busy = self.read(&e.file).as_ref() != self.known.get(&e.file) || self.typed_text.get(&e.file).is_some_and(|t| Some(t) != self.known.get(&e.file));
+            if e.manual || busy {
+                left.push((e.file.clone(), e.line));
+                continue;
+            }
+            texts.entry(e.file.clone()).or_insert_with(|| self.known[&e.file].clone()).replace_range(e.range.0..e.range.1, &e.text);
+            links += 1;
+        }
+        let mut written: Vec<&String> = vec![];
+        for (path, text) in &texts {
+            if let Err(e) = fs::write(self.path(path)?, text) {
+                for p in written {
+                    let _ = fs::write(self.path(p)?, &self.known[p]);
+                }
+                return Err(format!("{path} was not changed: {} Nothing was renamed.", err(e)));
+            }
+            written.push(path);
+        }
+        let moved_on = fs::create_dir_all(dst.parent().unwrap()).and_then(|()| fs::rename(&src, &dst));
+        if let Err(e) = moved_on {
+            for p in written {
+                let _ = fs::write(self.path(p)?, &self.known[p]);
+            }
+            return Err(err(e));
+        }
+        self.keep_moved(&old, &new);
         self.forget(&old, Some(&new));
-        send(json!({"type": "renamed", "from": old, "to": new}));
+        let texts: BTreeMap<String, String> = texts.into_iter().map(|(p, t)| (moved(&p, &old, &new), t)).collect();
+        let op = if texts.is_empty() { None } else { Some(self.record(&texts, Some((old.clone(), new.clone())))) };
+        let mut left: Vec<String> = left.into_iter().rev().map(|(f, line)| format!("{}:{}", moved(&f, &old, &new), line + 1)).collect();
+        left.dedup();
+        send(json!({"type": "renamed", "req": req, "from": old, "to": new, "links": links, "files": texts.len(), "op": op, "paths": texts.keys().collect::<Vec<_>>(), "skipped": left}));
+        for (path, text) in texts {
+            self.external(&path, text);
+        }
         send(self.state());
         Ok(())
     }
@@ -466,6 +1061,17 @@ impl Workspace {
         send(json!({"type": "deleted", "path": rel}));
         send(self.state());
         Ok(())
+    }
+
+    /// `search` over the editor's text where it has one, else what editor and disk agree on;
+/// `open` is the file open in the editor with its text right now.
+    fn find(&self, query: &str, case: bool, word: bool, cap: usize, open: Option<(&str, &str)>) -> (Vec<Value>, bool) {
+        let mut texts = self.known.clone();
+        texts.extend(self.typed_text.clone());
+        if let Some((path, text)) = open.filter(|(path, _)| texts.contains_key(*path)) {
+            texts.insert(path.into(), text.into()); // the page's buffer, which may be newer than the last "typed"
+        }
+        search(&texts, query, case, word, cap)
     }
 
     fn read(&self, rel: &str) -> Option<String> {
@@ -486,6 +1092,10 @@ impl Workspace {
             return Err(format!("Not a folder: {root}"));
         }
         self.root = Some(dir.clone());
+        if self.history.is_none() {
+            self.history = APP.get().and_then(|a| a.path().app_data_dir().ok()).map(|d| d.join("history"));
+        }
+        self.typed_text.clear();
         self.known = self.files()?.into_iter().filter_map(|rel| Some((rel.clone(), self.read(&rel)?))).collect();
         self.baseline.clear();
         self.checkpoints.clear(); // `turn` goes on counting: the chat keeps the old folder's turns
@@ -493,24 +1103,32 @@ impl Workspace {
         if let Some((_, task)) = self.watcher.take() {
             task.abort();
         }
-        self.watcher = Some(watch(dir)?);
+        self.watcher = Some(watch(dir.clone())?);
+        if let Some(main) = self.known.keys().find(|p| p.ends_with(".typ")) {
+            let main = dir.join(main);
+            tokio::task::spawn_blocking(move || engine::warm(&main, &dir));
+        }
         send(self.state());
         Ok(())
     }
 
     fn state(&self) -> Value {
         let (files, dirs) = self.entries().unwrap_or_default();
+        let (labels, missing, cites) = references(&self.known);
         json!({
             "type": "folder",
             "root": self.root.as_ref().map(|r| page(r)),
             "files": files,
             "dirs": dirs,
             "changed": self.baseline.keys().collect::<Vec<_>>(),
-            "labels": labels(&self.known),
+            "labels": labels,
+            "missing": missing,
+            "cites": cites,
         })
     }
 
-    fn save(&mut self, rel: &str, content: &str, baseline: Option<String>) -> Result<(), String> {
+    /// Whether the disk now has `content`.
+    fn save(&mut self, rel: &str, content: &str, baseline: Option<String>) -> Result<bool, String> {
         let p = self.path(rel)?;
         let disk = self.read(rel);
         if let Some(disk) = &disk {
@@ -518,17 +1136,19 @@ impl Workspace {
                 // Someone else wrote the file since we last looked: keep their
                 // version and show it as a change instead of overwriting it.
                 self.external(rel, disk.clone());
-                return Ok(());
+                return Ok(false);
             }
         }
         // The same text: no write, so the watcher and the LaTeX preview stay quiet.
         if disk.as_deref() != Some(content) {
+            if let Some(old) = &disk {
+                self.keep(rel, old, false);
+            }
             fs::write(&p, content).map_err(err)?;
         }
         self.known.insert(rel.into(), content.into());
         self.set_baseline(rel, Some(content), baseline);
-        send(json!({"type": "saved", "path": rel}));
-        Ok(())
+        Ok(true)
     }
 
     fn set_baseline(&mut self, rel: &str, content: Option<&str>, baseline: Option<String>) {
@@ -548,6 +1168,9 @@ impl Workspace {
             return;
         }
         self.unshadow(rel);
+        if let Some(old) = &old {
+            self.keep_as(rel, old, true, true);
+        }
         self.known.insert(rel.into(), new.clone());
         let base = self.baseline.entry(rel.into()).or_insert_with(|| old.clone().unwrap_or_default()).clone();
         if self.turn > 0 {
@@ -565,12 +1188,187 @@ impl Workspace {
         for f in files {
             self.unshadow(&f);
             let old = self.known.remove(&f);
+            if let Some(old) = &old {
+                self.keep(&f, old, true);
+            }
             self.baseline.remove(&f);
             if self.turn > 0 {
                 self.checkpoints.entry(self.turn).or_default().entry(f.clone()).or_insert(old);
             }
             send(json!({"type": "file_changed", "path": f, "content": "", "baseline": null, "deleted": true}));
         }
+    }
+
+    /// Renames the label `from` to `to` in the files of `home`'s language. All or nothing:
+    /// a file whose disk text is not what the editor knows stops the whole rename.
+    fn rename_label(&mut self, home: &str, from: &str, to: &str) -> Result<(usize, usize), String> {
+        let edits = rename_edits(&self.known, home, from, to)?;
+        let new = apply_rename(&self.known, &edits, from, to);
+        for path in new.keys() {
+            if self.read(path).as_ref() != self.known.get(path) {
+                return Err(format!("{path} changed on disk; open it and try again."));
+            }
+            if self.typed_text.get(path).is_some_and(|t| Some(t) != self.known.get(path)) {
+                return Err(format!("{path} has changes that are not saved yet; save it and try again."));
+            }
+        }
+        let files = self.write_all(new, "renamed")?;
+        Ok((files, edits.len()))
+    }
+
+    /// Writes `new` to disk, all or nothing, shows the changes for review and remembers them
+    /// as an operation `undo_operation` can reverse. Returns the number of files.
+    fn write_all(&mut self, new: BTreeMap<String, String>, verb: &str) -> Result<usize, String> {
+        let mut done: Vec<String> = vec![];
+        for (path, text) in &new {
+            if let Err(e) = fs::write(self.path(path)?, text) {
+                for p in &done {
+                    let _ = fs::write(self.path(p)?, &self.known[p]);
+                }
+                return Err(format!("{path} was not changed: {} Nothing was {verb}.", err(e)));
+            }
+            done.push(path.clone());
+        }
+        self.record(&new, None);
+        for (path, text) in new {
+            self.external(&path, text);
+        }
+        send(self.state());
+        Ok(done.len())
+    }
+
+    /// Remembers that `new` (path to text) is about to replace what the files hold now, and returns
+    /// the operation's number.
+    fn record(&mut self, new: &BTreeMap<String, String>, renamed: Option<(String, String)>) -> u64 {
+        let files = new.iter().map(|(path, text)| (path.clone(), (self.known[path].clone(), text.clone(), self.baseline.get(path).cloned()))).collect();
+        self.next_operation += 1;
+        self.operations.push(Operation { id: self.next_operation, renamed, files });
+        if self.operations.len() > UNDOABLE {
+            self.operations.remove(0);
+        }
+        self.next_operation
+    }
+
+    /// Puts back the files `id` changed that nobody has changed since (on disk, in the editor or
+    /// by typing). Returns the files restored and the files left as they are. If none can be
+    /// restored nothing is written. Each operation can be undone once.
+    fn undo_operation(&mut self, id: u64) -> Result<(Vec<String>, Vec<String>), String> {
+        let Some(at) = self.operations.iter().position(|o| o.id == id) else {
+            return Err("That change was already undone, or is too old to undo.".into());
+        };
+        if let Some((old, new)) = self.operations[at].renamed.clone() {
+            return self.undo_rename(at, &old, &new);
+        }
+        let files = &self.operations[at].files;
+        let (mut back, mut skipped) = (vec![], vec![]);
+        for (path, (_, after, _)) in files {
+            let same = self.known.get(path) == Some(after) && self.read(path).as_ref() == Some(after) && self.typed_text.get(path).is_none_or(|t| t == after);
+            if same { back.push(path.clone()) } else { skipped.push(path.clone()) }
+        }
+        if back.is_empty() {
+            return Err(format!("Nothing was undone: {} changed since. Your text is as you left it.", skipped.join(", ")));
+        }
+        let mut done: Vec<&String> = vec![];
+        for path in &back {
+            if let Err(e) = fs::write(self.path(path)?, &files[path].0) {
+                for p in done {
+                    let _ = fs::write(self.path(p)?, &files[p].1);
+                }
+                return Err(format!("{path} was not restored: {} Nothing was undone.", err(e)));
+            }
+            done.push(path);
+        }
+        let op = self.operations.remove(at);
+        for path in &back {
+            let (before, _, prior) = &op.files[path];
+            self.unshadow(path);
+            if let Some(now) = self.known.get(path) {
+                self.keep(path, now, true);
+            }
+            self.known.insert(path.clone(), before.clone());
+            self.set_baseline(path, Some(before), prior.clone());
+            let base = self.baseline.get(path);
+            send(json!({"type": "file_changed", "path": path, "content": before, "baseline": base}));
+        }
+        send(self.state());
+        Ok((back, skipped))
+    }
+
+    /// Undoes a rename and its path updates together, or nothing: the old name must be free, and no
+    /// file the operation changed may differ from what it left.
+    fn undo_rename(&mut self, at: usize, old: &str, new: &str) -> Result<(Vec<String>, Vec<String>), String> {
+        let files = self.operations[at].files.clone();
+        let changed: Vec<&String> = files.iter().filter(|(p, (_, after, _))| !(self.known.get(*p) == Some(after) && self.read(p).as_ref() == Some(after) && self.typed_text.get(*p).is_none_or(|t| t == after))).map(|f| f.0).collect();
+        if !changed.is_empty() {
+            return Err(format!("Nothing was undone: {} changed since. Your text is as you left it.", changed.into_iter().cloned().collect::<Vec<_>>().join(", ")));
+        }
+        let (src, dst) = (self.path(new)?, self.path(old)?);
+        if !src.exists() || dst.exists() {
+            return Err(format!("Nothing was undone: {new} was moved again, or {old} exists now."));
+        }
+        let mut done: Vec<&String> = vec![];
+        for (path, (before, _, _)) in &files {
+            if let Err(e) = fs::write(self.path(path)?, before) {
+                for p in done {
+                    let _ = fs::write(self.path(p)?, &files[p].1);
+                }
+                return Err(format!("{path} was not restored: {} Nothing was undone.", err(e)));
+            }
+            done.push(path);
+        }
+        let moved_back = fs::create_dir_all(dst.parent().unwrap()).and_then(|()| fs::rename(&src, &dst));
+        if let Err(e) = moved_back {
+            for p in done {
+                let _ = fs::write(self.path(p)?, &files[p].1);
+            }
+            return Err(err(e));
+        }
+        self.operations.remove(at);
+        self.keep_moved(new, old);
+        self.forget(new, Some(old));
+        send(json!({"type": "renamed", "from": new, "to": old}));
+        let mut back = vec![];
+        for (path, (before, _, prior)) in files {
+            let path = moved(&path, new, old);
+            self.unshadow(&path);
+            if let Some(now) = self.known.get(&path) {
+                self.keep(&path, now, true);
+            }
+            self.known.insert(path.clone(), before.clone());
+            self.set_baseline(&path, Some(&before), prior);
+            let base = self.baseline.get(&path);
+            send(json!({"type": "file_changed", "path": path, "content": before, "baseline": base}));
+            back.push(path);
+        }
+        send(self.state());
+        Ok((back, vec![]))
+    }
+
+    /// Replaces `query` by `with` in the files of `expected`, the matches per file the writer was
+    /// shown: if a file no longer gives exactly that many, nothing is written. All or nothing,
+    /// like `rename_label`. Returns the files and places changed.
+    fn replace_in_project(&mut self, query: &str, case: bool, word: bool, with: &str, expected: &[(String, usize)]) -> Result<(usize, usize), String> {
+        if expected.is_empty() {
+            return Err(format!("\"{query}\" was not found. Nothing was replaced."));
+        }
+        let mut new = BTreeMap::new();
+        for (path, count) in expected {
+            let (replaced, n) = replace_all(self.known.get(path).map_or("", String::as_str), query, case, word, with);
+            if n == 0 || n != *count {
+                return Err(format!("{path} changed since you searched. Search again, then replace. Nothing was replaced."));
+            }
+            new.insert(path.clone(), replaced);
+        }
+        for path in new.keys() {
+            if self.read(path).as_ref() != self.known.get(path) {
+                return Err(format!("{path} changed on disk; open it and try again. Nothing was replaced."));
+            }
+            if self.typed_text.get(path).is_some_and(|t| Some(t) != self.known.get(path)) {
+                return Err(format!("{path} has changes that are not saved yet; save it and try again. Nothing was replaced."));
+            }
+        }
+        let files = self.write_all(new, "replaced")?;
+        Ok((files, expected.iter().map(|c| c.1).sum()))
     }
 
     /// Returns whether the built preview (LaTeX's PDF, Word) should build again.
@@ -596,6 +1394,10 @@ impl Workspace {
                 }
             }
         }
+        if let Some(tx) = &self.diagnostic_tx {
+            let main = page(tx.borrow().main.strip_prefix(root).unwrap());
+            let _ = self.queue_diagnostics(&main, self.typed_generation);
+        }
         send(self.state());
         build
     }
@@ -615,6 +1417,7 @@ impl Workspace {
         }
         (self.control, self.preview_shown, self.built) = (None, false, None);
         self.shadowed.clear();
+        self.diagnostic_tx = None;
         self.preview_id += 1;
         self.preview_id
     }
@@ -658,6 +1461,9 @@ impl Workspace {
             match &old {
                 None => {
                     // The agent created it.
+                    if let Some(now) = self.known.get(&rel) {
+                        self.keep(&rel, now, true);
+                    }
                     self.known.remove(&rel);
                     self.baseline.remove(&rel);
                     match fs::remove_file(&p) {
@@ -667,6 +1473,9 @@ impl Workspace {
                 }
                 Some(text) => {
                     fs::create_dir_all(p.parent().unwrap()).map_err(err)?; // moved away with its folder
+                    if let Some(now) = self.known.get(&rel) {
+                        self.keep(&rel, now, true);
+                    }
                     fs::write(&p, text).map_err(err)?;
                     self.known.insert(rel.clone(), text.clone());
                     // Changes from earlier turns that wait for review still do.
@@ -695,16 +1504,32 @@ impl Workspace {
     /// The editor's text of a Typst file: the live preview shows it as typed, before auto save
     /// writes it, and keeps showing it until the file changes on disk some other way.
     fn typed(&mut self, rel: &str, content: &str) -> Result<(), String> {
+        let file = self.path(rel)?.to_string_lossy().into_owned();
+        self.typed_text.insert(rel.into(), content.into());
         if let Some(control) = &self.control {
-            let file = self.path(rel)?.to_string_lossy().into_owned();
             let _ = control.send(json!({"event": "updateMemoryFiles", "files": {file: content}}).to_string());
             self.shadowed.insert(rel.into());
         }
         Ok(())
     }
 
+    fn queue_diagnostics(&mut self, main: &str, generation: u64) -> Result<(), String> {
+        self.typed_generation = generation;
+        if lang_of(main) != Lang::Typst { return Ok(()) }
+        let input = DiagnosticInput { root: self.root()?.into(), main: self.path(main)?, text: self.typed_text.clone(), generation };
+        if let Some(tx) = &self.diagnostic_tx {
+            tx.send_replace(input);
+        } else {
+            let (tx, rx) = tokio::sync::watch::channel(input);
+            self.diagnostic_tx = Some(tx);
+            tokio::spawn(diagnose(rx));
+        }
+        Ok(())
+    }
+
     /// The live preview reads `rel` from the disk again.
     fn unshadow(&mut self, rel: &str) {
+        self.typed_text.remove(rel);
         if !self.shadowed.remove(rel) {
             return;
         }
@@ -946,11 +1771,21 @@ fn compile() {
     tokio::spawn(async move {
         loop {
             send(json!({"type": "build", "running": true}));
-            match convert(&file, &root, to, bib.clone(), &out).await {
-                Ok(()) => send(json!({"type": "build", "ok": true})),
-                Err(log) => send(json!({"type": "build", "ok": false, "log": log})),
-            }
+            let (generation, sources) = {
+                let w = ws();
+                (w.typed_generation, w.known.iter().filter(|(p, _)| p.ends_with(".tex")).map(|(p, s)| (p.clone(), s.clone())).collect::<BTreeMap<_, _>>())
+            };
+            let result = convert(&file, &root, to, bib.clone(), &out).await;
             let mut w = ws();
+            if w.built.as_ref().is_some_and(|b| b.id == id && !b.again) && w.typed_generation == generation {
+                let mut message = json!({"type": "build", "ok": result.is_ok(), "root": page(&root),
+                    "main": page(file.strip_prefix(&root).unwrap()), "generation": generation, "sources": sources});
+                if lang_of(&page(&file)) == Lang::Latex {
+                    message["diagnostics"] = json!(result.as_ref().err().map_or_else(Vec::new, |log| latex_diagnostics(log, &file, &root)));
+                }
+                if let Err(log) = result { message["log"] = log.into(); }
+                send(message);
+            }
             match &mut w.built {
                 Some(l) if l.id == id && l.again => l.again = false,
                 Some(l) if l.id == id => {
@@ -1430,6 +2265,52 @@ fn open_agent_setup(fix: &str) -> Result<(), String> {
     Ok(())
 }
 
+/// TeX is run from the main file's directory. Accept only locations inside the project.
+/// The `l.N` line TeX prints after an error shows the text it stopped at. It is read only between this
+/// location line and the next one, so a line number is never matched with another file's error.
+fn latex_diagnostics(log: &str, main: &Path, root: &Path) -> Vec<Value> {
+    static LOCATION: LazyLock<Regex> = LazyLock::new(|| re(r"(?m)^(?:error:\s*)?(.+?\.(?:tex|sty|cls)):(\d+):\s*(.+)$"));
+    static CONTEXT: LazyLock<Regex> = LazyLock::new(|| re(r"(?m)^l\.(\d+) ?(.*)$"));
+    static COMMAND: LazyLock<Regex> = LazyLock::new(|| re(r"(\\[A-Za-z@]+)\s*$"));
+    static MISSING: LazyLock<Regex> = LazyLock::new(|| re(r"File [`'](.+?)' not found"));
+    let mut seen = BTreeSet::new();
+    let found: Vec<_> = LOCATION.captures_iter(log).collect();
+    found.iter().enumerate().filter_map(|(i, c)| {
+        let file = resolve(&main.parent()?.join(c[1].trim()));
+        let path = page(file.strip_prefix(root).ok()?);
+        let line = c[2].parse::<usize>().ok()?.checked_sub(1)?;
+        if !seen.insert((path.clone(), line)) { return None }
+        let after = c.get(0)?.end();
+        let until = found.get(i + 1).and_then(|n| n.get(0)).map_or(log.len(), |m| m.start());
+        let context = CONTEXT.captures_iter(&log[after..until.max(after)]).find(|x| x[1].parse() == Ok(line + 1)).map(|x| x[2].to_string());
+        let raw = c[3].trim().trim_end_matches('.');
+        let mut extra = json!({});
+        let (message, hint) = if let Some(m) = MISSING.captures(raw) {
+            extra["file"] = json!(&m[1]);
+            (format!("The file {} was not found.", &m[1]), "Check the file name, or choose the file it should be.".to_string())
+        } else if raw == "Undefined control sequence" {
+            match context.as_deref().and_then(|t| COMMAND.captures(t)) {
+                Some(m) => {
+                    extra["command"] = json!(&m[1]);
+                    (format!("Unknown command {}.", &m[1]), "Check the command's spelling and whether its package is loaded.".to_string())
+                }
+                None => ("Unknown LaTeX command.".into(), "Check the command's spelling and whether its package is loaded.".to_string()),
+            }
+        } else {
+            let (m, h) = match raw {
+                "Missing $ inserted" => ("Math needs matching $ signs.", "Check that each math expression starts and ends with $."),
+                "Missing } inserted" => ("A closing brace is missing.", "Check the braces near this line."),
+                other => (other, "Check this line and the code just before it; Show log has the compiler's details."),
+            };
+            (m.to_string(), h.to_string())
+        };
+        let mut d = json!({"path": path, "line": line, "col": 0, "end_line": line, "end_col": usize::MAX,
+            "message": message, "hints": [hint]});
+        if let (Some(d), Some(extra)) = (d.as_object_mut(), extra.as_object()) { d.extend(extra.clone()) }
+        Some(d)
+    }).collect()
+}
+
 /// Compile with the writer's own TeX: latexmk (MacTeX, TeX Live) or else Tectonic. On failure,
 /// returns the lines of the log that say what went wrong.
 async fn run_latex(file: &Path, out: &Path) -> Result<(), String> {
@@ -1470,7 +2351,7 @@ async fn run_latex(file: &Path, out: &Path) -> Result<(), String> {
     }
     let log = String::from_utf8_lossy(&o.stdout).into_owned() + &String::from_utf8_lossy(&o.stderr);
     let lines: Vec<&str> = log.lines().collect();
-    let errors: Vec<&str> = lines.iter().copied().filter(|l| l.starts_with('!') || l.contains(".tex:") || l.starts_with("error")).take(8).collect();
+    let errors: Vec<&str> = lines.iter().copied().filter(|l| l.starts_with('!') || l.contains(".tex:") || l.starts_with("error") || l.starts_with("l.")).take(12).collect();
     Err(if errors.is_empty() { lines[lines.len().saturating_sub(8)..].join("\n") } else { errors.join("\n") })
 }
 
@@ -1862,8 +2743,37 @@ async fn save_dialog(dir: &Path, name: &str) -> Option<PathBuf> {
     }
 }
 
-/// Add the paper for a DOI or arXiv ID to the .bib file. Returns its key.
-async fn cite(ident: &str, from: &str) -> Result<Value, String> {
+/// The key a bib text already gives the paper with this DOI.
+fn doi_key(text: &str, doi: &str) -> Option<String> {
+    let dup = re(&format!(r#"(?i)\bdoi\s*=\s*[{{"]\s*{}\s*[}}"]"#, regex::escape(doi)));
+    let d = dup.find(text)?;
+    BIB_KEY.captures_iter(&text[..d.start()]).last().map(|k| k[1].to_string())
+}
+
+/// The bib text with `entry` added at its end, under `want` (the key a writer's text already
+/// uses) or else a fresh key. Returns the key and the new text.
+fn add_entry(text: &str, entry: &str, want: Option<&str>) -> Result<(String, String), String> {
+    let entry = entry.trim();
+    let m = BIB_KEY.captures(entry).filter(|m| m.get(0).unwrap().start() == 0).ok_or("doi.org has no BibTeX for this paper.")?;
+    let taken: HashSet<String> = BIB_KEY.captures_iter(text).map(|c| c[1].to_string()).collect();
+    let key = match want {
+        Some(k) if !re(r"^[A-Za-z0-9_:.+/-]+$").is_match(k) => {
+            return Err(format!("{k} cannot be a citation key. Use letters, digits and - _ : . only."));
+        }
+        Some(k) if taken.iter().any(|t| t.eq_ignore_ascii_case(k)) => return Err(format!("{k} is already used for a different paper in the bibliography.")),
+        Some(k) => k.to_string(),
+        None => cite_key(entry, &taken),
+    };
+    let at = m.get(1).unwrap();
+    let entry = format!("{}{key}{}", &entry[..at.start()], &entry[at.end()..]);
+    let new = if text.trim().is_empty() { String::new() } else { format!("{}\n\n", text.trim_end()) } + &entry + "\n";
+    Ok((key, new))
+}
+
+/// Add the paper for a DOI or arXiv ID to the .bib file. Returns its key. With `want`, the
+/// entry gets that key; if the paper is already there under another, that key comes back
+/// as "key" with the wanted one as "wanted".
+async fn cite(ident: &str, from: &str, want: Option<&str>) -> Result<Value, String> {
     let doi = doi_of(ident)?;
     let (rel, linked, p) = {
         let w = ws();
@@ -1873,31 +2783,27 @@ async fn cite(ident: &str, from: &str) -> Result<Value, String> {
     };
     let text = if p.exists() { read_text(&p)? } else { String::new() };
     // Already there: reuse its key.
-    let dup = re(&format!(r#"(?i)\bdoi\s*=\s*[{{"]\s*{}\s*[}}"]"#, regex::escape(&doi)));
-    if let Some(d) = dup.find(&text) {
-        if let Some(key) = BIB_KEY.captures_iter(&text[..d.start()]).last() {
-            return Ok(json!({"key": &key[1], "bib": rel, "linked": linked, "added": false}));
-        }
+    if let Some(key) = doi_key(&text, &doi) {
+        return Ok(json!({"key": key, "bib": rel, "linked": linked, "added": false, "wanted": want}));
     }
     let entry = fetch_bibtex(&doi).await?;
-    let entry = entry.trim();
-    let m = BIB_KEY.captures(entry).filter(|m| m.get(0).unwrap().start() == 0).ok_or_else(|| format!("doi.org has no BibTeX for {doi}."))?;
     let mut w = ws();
     // Read again: the agent or the writer may have changed it while doi.org answered.
     let text = if p.exists() { read_text(&p)? } else { String::new() };
-    let key = cite_key(entry, &BIB_KEY.captures_iter(&text).map(|c| c[1].to_string()).collect());
-    let at = m.get(1).unwrap();
-    let entry = format!("{}{key}{}", &entry[..at.start()], &entry[at.end()..]);
-    let new = if text.trim().is_empty() { String::new() } else { format!("{}\n\n", text.trim_end()) } + &entry + "\n";
+    let (key, new) = add_entry(&text, &entry, want).map_err(|e| e.replace("this paper", &doi))?;
     let tracked = w.known.contains_key(&rel) || !p.exists();
     if tracked {
         w.known.insert(rel.clone(), new.clone()); // the writer asked for it: not a change to review
     }
+    if p.exists() {
+        w.keep(&rel, &text, true);
+    }
     fs::write(&p, &new).map_err(err)?;
     if tracked {
         send(json!({"type": "file_changed", "path": rel, "content": new, "baseline": w.baseline.get(&rel)}));
+        send(w.state()); // the keys the project cites are judged again: a citation for the new entry no longer points nowhere
     }
-    Ok(json!({"key": key, "bib": rel, "linked": linked, "added": true}))
+    Ok(json!({"key": key, "bib": rel, "linked": linked, "added": true, "wanted": want}))
 }
 
 async fn start_agent(agent_id: &str) -> Result<(), String> {
@@ -1940,6 +2846,30 @@ async fn pick_folder(prompt: &str) -> Option<String> {
         use tauri_plugin_dialog::DialogExt;
         let app = APP.get()?;
         app.dialog().file().set_title(prompt).blocking_pick_folder().and_then(|f| f.into_path().ok().map(|p| page(&p)))
+    }
+}
+
+/// The Figure button's chooser. None is Cancel. On the Mac osascript's "User canceled" (-128)
+/// is the only quiet exit; any other failure is reported. Elsewhere the app's own dialog does.
+async fn pick_image() -> Result<Option<String>, String> {
+    #[cfg(target_os = "macos")]
+    {
+        let out = Command::new("osascript")
+            .args(["-e", r#"POSIX path of (choose file of type {"public.image", "com.adobe.pdf"} with prompt "Choose a picture to add")"#])
+            .output()
+            .await
+            .map_err(|e| format!("The picture chooser could not open. {}", err(e)))?;
+        if out.status.success() {
+            return Ok(Some(String::from_utf8_lossy(&out.stdout).trim().to_string()).filter(|p| !p.is_empty()));
+        }
+        let why = String::from_utf8_lossy(&out.stderr);
+        if why.contains("-128") { Ok(None) } else { Err("The picture chooser could not open. Drop the picture on the editor instead.".into()) }
+    }
+    #[cfg(not(target_os = "macos"))]
+    {
+        use tauri_plugin_dialog::DialogExt;
+        let app = APP.get().ok_or("The picture chooser could not open. Drop the picture on the editor instead.")?;
+        Ok(app.dialog().file().set_title("Choose a picture to add").add_filter("Pictures", &["png", "jpg", "jpeg", "gif", "svg", "webp", "pdf"]).blocking_pick_file().and_then(|f| f.into_path().ok().map(|p| page(&p))))
     }
 }
 
@@ -2036,7 +2966,7 @@ async fn send_apple() {
 
 // Messages that read or write files. Each carries the folder the page is showing, so a
 // page still showing another folder can never write into this one.
-const FILE_OPS: [&str; 11] = ["open_file", "save", "typed", "review", "create", "rename", "delete", "preview", "restore", "cite", "export"];
+const FILE_OPS: [&str; 19] = ["list_history", "snapshot", "pick_image", "import_image", "paste_image", "open_file", "save", "typed", "review", "create", "rename", "rename_label", "replace_in_project", "undo_operation", "delete", "preview", "restore", "cite", "export"];
 
 fn field<'a>(msg: &'a Value, key: &str) -> Result<&'a str, String> {
     msg[key].as_str().ok_or_else(|| format!("'{key}' is missing"))
@@ -2087,21 +3017,92 @@ async fn handle(msg: &Value) -> Result<(), String> {
             let content = w.read(rel).ok_or_else(|| format!("Cannot open {rel}"))?;
             send(json!({"type": "file", "path": rel, "content": content, "baseline": w.baseline.get(rel)}));
         }
-        "save" => ws().save(f("path")?, f("content")?, opt("baseline").map(String::from))?,
-        "typed" => ws().typed(f("path")?, f("content")?)?,
+        "search" => {
+            let (hits, more) = ws().find(f("query")?, msg["case"].as_bool().unwrap_or(false), msg["word"].as_bool().unwrap_or(false), 2000, opt("path").zip(opt("content")));
+            send(json!({"type": "search_result", "req": msg["req"], "hits": hits, "more": more}));
+        }
+        "save" => {
+            // Each save hears back by its `req`: the page keeps its text as unsaved until then.
+            let ok = ws().save(f("path")?, f("content")?, opt("baseline").map(String::from))?;
+            send(json!({"type": "saved", "path": f("path")?, "req": msg["req"], "ok": ok}));
+        }
+        "typed" => {
+            let mut w = ws();
+            w.typed(f("path")?, f("content")?)?;
+            if let Some(main) = opt("main") { w.queue_diagnostics(main, msg["generation"].as_u64().unwrap_or(0))?; }
+        },
         "review" => {
             // Review decisions (accept/reject) while the text itself is not saved yet.
             let mut w = ws();
             let rel = w.norm(f("path")?)?;
             w.set_baseline(&rel, None, opt("baseline").map(String::from));
         }
+        "snapshot" => {
+            // The text in the editor right before a restore replaces it: it must come back with one click.
+            let w = ws();
+            w.keep(&w.norm(f("path")?)?, f("content")?, true);
+        }
+        "list_history" => {
+            let w = ws();
+            let rel = w.norm(f("path")?)?;
+            send(json!({"type": "history", "req": msg["req"], "path": rel, "versions": w.versions(&rel)}));
+        }
         "create" => ws().create(f("path")?, msg["folder"].as_bool().unwrap_or(false))?,
-        "rename" => ws().rename(f("from")?, f("to")?)?,
+        "rename" => ws().rename(f("from")?, f("to")?, &msg["req"])?,
+        "import_image" => {
+            let mut w = ws();
+            let added = w.import_image(f("from")?);
+            send(w.image_reply(&msg["req"], f("path")?, added));
+        }
+        "pick_image" => {
+            // The chooser runs before the workspace is locked: it waits for the writer.
+            let choice = pick_image().await;
+            let mut w = ws();
+            let reply = match choice {
+                Ok(choice) => w.picked_image(&msg["req"], f("path")?, choice),
+                Err(error) => w.image_reply(&msg["req"], f("path")?, Err(error)),
+            };
+            send(reply);
+        }
+        "paste_image" => {
+            let mut w = ws();
+            let added = match unbase64(f("data")?) {
+                Some(bytes) => w.paste_image(f("name")?, f("mime")?, &bytes).map(|p| (p, true)),
+                None => Err("That picture could not be read.".into()),
+            };
+            send(w.image_reply(&msg["req"], f("path")?, added));
+        }
+        "rename_label" => {
+            // The answer carries the reason when it is refused: the page shows it by the name box.
+            let result = ws().rename_label(f("path")?, f("from")?, f("to")?);
+            let reply = match result {
+                Ok((files, places)) => json!({"ok": true, "files": files, "places": places, "op": ws().next_operation, "paths": ws().operations.last().map_or(vec![], |o| o.files.keys().cloned().collect::<Vec<_>>())}),
+                Err(error) => json!({"ok": false, "error": error}),
+            };
+            send(json!({"type": "label_renamed", "req": msg["req"], "from": f("from")?, "to": f("to")?, "result": reply}));
+        }
+        "replace_in_project" => {
+            let expected: Vec<(String, usize)> = msg["expected"].as_array().map_or(vec![], |a| a.iter().map(|e| (e["path"].as_str().unwrap_or("").to_string(), e["count"].as_u64().unwrap_or(0) as usize)).collect());
+            let result = ws().replace_in_project(f("query")?, msg["case"].as_bool().unwrap_or(false), msg["word"].as_bool().unwrap_or(false), f("replacement")?, &expected);
+            let reply = match result {
+                Ok((files, places)) => json!({"ok": true, "files": files, "places": places, "op": ws().next_operation, "paths": ws().operations.last().map_or(vec![], |o| o.files.keys().cloned().collect::<Vec<_>>())}),
+                Err(error) => json!({"ok": false, "error": error}),
+            };
+            send(json!({"type": "replace_result", "req": msg["req"], "result": reply}));
+        }
+        "undo_operation" => {
+            let result = ws().undo_operation(msg["op"].as_u64().unwrap_or(0));
+            let reply = match result {
+                Ok((restored, skipped)) => json!({"ok": true, "restored": restored, "skipped": skipped}),
+                Err(error) => json!({"ok": false, "error": error}),
+            };
+            send(json!({"type": "operation_undone", "req": msg["req"], "op": msg["op"], "result": reply}));
+        }
         "delete" => ws().delete(f("path")?)?,
         "preview" => preview(f("path")?, f("to")?, msg["asked"].as_u64().unwrap_or(0)).await?,
         "scroll_preview" => ws().scroll_preview(f("path")?, &msg["line"], &msg["col"])?,
         "cite" => {
-            let mut result = cite(f("id")?, opt("path").unwrap_or("")).await?;
+            let mut result = cite(f("id")?, opt("path").unwrap_or(""), opt("key")).await?;
             (result["type"], result["req"]) = ("cite_result".into(), msg["req"].clone());
             send(result);
         }
@@ -2189,10 +3190,17 @@ async fn handle(msg: &Value) -> Result<(), String> {
     Ok(())
 }
 
+// Requests that replace the page's open text. The page holds typing until one answers, with
+// "done" or an error: a closed folder chooser answers too.
+const REPLACING: [&str; 4] = ["open_file", "create", "open_folder", "new_project"];
+
 async fn safe(msg: Value) {
-    if let Err(e) = handle(&msg).await {
-        let t = msg["type"].as_str().unwrap_or("");
-        send(json!({"type": "error", "message": format!("{t}: {e}"), "req": msg["req"], "op": t, "kind": msg["kind"]}));
+    let t = msg["type"].as_str().unwrap_or("");
+    match handle(&msg).await {
+        // The message is for the writer: `op` says which request failed.
+        Err(e) => send(json!({"type": "error", "message": e, "req": msg["req"], "op": t, "kind": msg["kind"]})),
+        Ok(()) if REPLACING.contains(&t) && !msg["req"].is_null() => send(json!({"type": "done", "req": msg["req"]})),
+        Ok(()) => {}
     }
 }
 
@@ -2306,6 +3314,284 @@ mod tests {
         pairs.iter().map(|(k, v)| (k.to_string(), v.clone())).collect()
     }
 
+    fn sample() -> BTreeMap<String, String> {
+        let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("../sample");
+        let mut out = BTreeMap::new();
+        let mut todo = vec![root.clone()];
+        while let Some(d) = todo.pop() {
+            for e in fs::read_dir(d).unwrap().flatten() {
+                let p = e.path();
+                if p.is_dir() {
+                    todo.push(p);
+                } else if let Ok(t) = fs::read_to_string(&p) {
+                    out.insert(p.strip_prefix(&root).unwrap().to_string_lossy().into_owned(), t);
+                }
+            }
+        }
+        out
+    }
+
+    fn spots(found: &[Value]) -> Vec<(String, String, u64, u64)> {
+        found.iter().map(|f| (f["kind"].as_str().unwrap().into(), f["key"].as_str().unwrap().into(), f["line"].as_u64().unwrap(), f["col"].as_u64().unwrap())).collect()
+    }
+
+    /// Applies `rename_edits` to the texts, for the tests.
+    fn renamed(texts: &BTreeMap<String, String>, home: &str, from: &str, to: &str) -> BTreeMap<String, String> {
+        let mut out = texts.clone();
+        out.extend(apply_rename(texts, &rename_edits(texts, home, from, to).unwrap(), from, to));
+        out
+    }
+
+    fn planted() -> (BTreeMap<String, String>, Vec<String>) {
+        let texts = map(&[
+            ("main.typ", "#include \"chapters/one.typ\"\n#image(\"figures/plot.png\")\n#image(\"./figures/plot.png\")\n// #image(\"figures/plot.png\")\n```\n#image(\"figures/plot.png\")\n```\n#image(\"figures/plot2.png\")\n#image(\"/figures/plot.png\")".to_string()),
+            ("chapters/one.typ", "#image(\"../figures/plot.png\")\n#image(\"../figures/plot2.png\")".to_string()),
+            ("paper.tex", "\\documentclass{article}\n\\input{tex/two}\n\\includegraphics[width=3cm]{figures/plot}\n\\includegraphics{figures/plot2}\n% \\includegraphics{figures/plot}\n\\bibliography{lit/a,figures/plot}".to_string()),
+            ("tex/two.tex", "% !TEX root = ../paper.tex\n\\includegraphics{figures/plot.png}".to_string()),
+            ("notes.md", "![a](figures/plot.png)\n`![](figures/plot.png)`\n[site](https://x.org/figures/plot.png)\n{{< include chapters/one.typ >}}".to_string()),
+        ]);
+        let mut files: Vec<String> = texts.keys().cloned().collect();
+        files.extend(["figures/plot.png".into(), "figures/plot2.png".into(), "lit/a.bib".into()]);
+        (texts, files)
+    }
+
+    fn edits(old: &str, new: &str) -> Vec<(String, usize, String)> {
+        let (texts, files) = planted();
+        let main = |f: &str| if f == "tex/two.tex" { "paper.tex".into() } else { f.to_string() };
+        let found = link_edits(&texts, &files, main, old, new);
+        for e in &found {
+            assert_eq!(&texts[&e.file][e.range.0..e.range.1].is_empty(), &false);
+        }
+        found.into_iter().map(|e| (e.file, e.line, e.text)).collect()
+    }
+
+    #[test]
+    fn link_edits_for_a_renamed_file_and_a_moved_folder() {
+        let s = |f: &str, l: usize, t: &str| (f.to_string(), l, t.to_string());
+        assert_eq!(
+            edits("figures/plot.png", "figures/results.png"),
+            vec![s("chapters/one.typ", 0, "../figures/results.png"), s("main.typ", 1, "figures/results.png"), s("main.typ", 2, "./figures/results.png"),
+                 s("main.typ", 8, "/figures/results.png"), s("notes.md", 0, "figures/results.png"), s("paper.tex", 2, "figures/results"), s("tex/two.tex", 1, "figures/results.png")]
+        );
+        let tex = edits("figures/plot.png", "pics/plot.png");
+        assert!(tex.contains(&s("paper.tex", 2, "pics/plot")) && tex.contains(&s("tex/two.tex", 1, "pics/plot.png")), "{tex:?}");
+        // Moving a folder: references into it follow, and so do paths a moved document wrote.
+        let moved = edits("figures", "media/img");
+        assert!(moved.contains(&s("main.typ", 1, "media/img/plot.png")) && moved.contains(&s("paper.tex", 2, "media/img/plot")), "{moved:?}");
+        assert!(!moved.iter().any(|e| e.2.contains("plot2") && e.0 == "main.typ" && e.1 != 7), "{moved:?}");
+        let chapter = edits("chapters", "ch/deep");
+        assert_eq!(chapter, vec![s("chapters/one.typ", 0, "../../figures/plot.png"), s("chapters/one.typ", 1, "../../figures/plot2.png"), s("main.typ", 0, "ch/deep/one.typ"), s("notes.md", 3, "ch/deep/one.typ")]);
+    }
+
+    #[test]
+    fn rename_updates_links_as_one_undoable_operation() {
+        let dir = std::env::temp_dir().join(format!("quire-links-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&dir);
+        let (texts, _) = planted();
+        let mut texts = texts;
+        texts.insert("notes.md".into(), "![a](figures/plot.png)\n![b](my%20fig.png)".into());
+        for (rel, text) in &texts {
+            fs::create_dir_all(dir.join(rel).parent().unwrap()).unwrap();
+            fs::write(dir.join(rel), text).unwrap();
+        }
+        for pic in ["figures/plot.png", "figures/plot2.png", "my fig.png"] {
+            fs::create_dir_all(dir.join(pic).parent().unwrap()).unwrap();
+            fs::write(dir.join(pic), b"png").unwrap();
+        }
+        fs::create_dir_all(dir.join("lit")).unwrap();
+        fs::write(dir.join("lit/a.bib"), "").unwrap();
+        let mut w = Workspace { root: Some(dir.canonicalize().unwrap()), known: texts.clone(), ..Default::default() };
+        let disk = |f: &str| fs::read_to_string(dir.join(f)).unwrap();
+        let heard = |from: &str, to: &str| lock(&SENT).iter().rev().find(|m| m["type"] == "renamed" && m["from"] == from && m["to"] == to).cloned().unwrap();
+        // Unsaved typing in one referencing file: that file is left alone and listed with its line.
+        w.typed_text.insert("chapters/one.typ".into(), "typing".into());
+        w.rename("figures/plot.png", "figures/results.png", &json!(7)).unwrap();
+        let reply = heard("figures/plot.png", "figures/results.png");
+        assert_eq!((reply["req"].clone(), reply["links"].clone(), reply["files"].clone()), (json!(7), json!(6), json!(4)), "{reply}");
+        assert_eq!(reply["skipped"], json!(["chapters/one.typ:1"]));
+        assert_eq!(disk("chapters/one.typ"), texts["chapters/one.typ"], "nothing overwritten");
+        assert!(disk("main.typ").contains("figures/results.png") && disk("main.typ").contains("figures/plot2.png"));
+        assert!(!dir.join("figures/plot.png").exists() && dir.join("figures/results.png").exists());
+        assert_eq!(w.baseline["main.typ"], texts["main.typ"], "the change is there to review");
+        // One undo puts back the name and the links.
+        let op = reply["op"].as_u64().unwrap();
+        let after = w.known.clone();
+        let (back, _) = w.undo_operation(op).unwrap();
+        assert_eq!(back.len(), 4);
+        assert!(dir.join("figures/plot.png").exists() && !dir.join("figures/results.png").exists());
+        for f in ["main.typ", "paper.tex", "tex/two.tex", "notes.md"] {
+            assert_eq!((disk(f), &w.known[f]), (texts[f].clone(), &texts[f]), "{f}");
+        }
+        assert!(w.undo_operation(op).unwrap_err().contains("already undone"));
+        if let Ok(out) = std::env::var("QUIRE_DUMP") {
+            fs::write(format!("{out}/links-reply.json"), reply.to_string()).unwrap();
+            fs::write(format!("{out}/links-state.json"), w.state().to_string()).unwrap();
+            fs::write(format!("{out}/links-undo.json"), json!({"type": "operation_undone", "op": op, "result": {"ok": true, "restored": back, "skipped": Vec::<String>::new()}}).to_string()).unwrap();
+            fs::write(format!("{out}/links-before-files.json"), json!(texts).to_string()).unwrap();
+            fs::write(format!("{out}/links-after-files.json"), json!(after).to_string()).unwrap();
+        }
+        // A percent-encoded Markdown path is not guessed at: it is listed for the writer.
+        w.typed_text.clear();
+        w.rename("my fig.png", "fig.png", &json!(8)).unwrap();
+        let reply = heard("my fig.png", "fig.png");
+        assert_eq!((reply["links"].clone(), reply["op"].clone(), reply["skipped"].clone()), (json!(0), Value::Null, json!(["notes.md:2"])));
+        assert_eq!(disk("notes.md"), texts["notes.md"]);
+        // A LaTeX chapter moves: the root \input of it follows, its own paths (counted from the root) stay,
+        // and its "% !TEX root" line is counted from the chapter, so it follows.
+        w.rename("tex/two.tex", "tex/deep/two.tex", &json!(9)).unwrap();
+        assert!(disk("paper.tex").contains("\\input{tex/deep/two}"));
+        assert_eq!(disk("tex/deep/two.tex"), texts["tex/two.tex"].replace("../paper.tex", "../../paper.tex"));
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn rename_label_changes_definitions_and_uses_only() {
+        let mut t = BTreeMap::new();
+        t.insert("a.tex".to_string(), "\\label{sec:intro} \\label{sec:introduction}\n\\ref{sec:intro} \\cref{x,sec:intro,sec:introduction}\n% \\ref{sec:intro}\n\\cite{sec:intro} http://x/sec:intro".to_string());
+        t.insert("b.typ".to_string(), "= H <sec:intro>\nsee @sec:intro and #ref(<sec:intro>) and @sec:introduction\n`@sec:intro` // @sec:intro\n#link(\"http://e/sec:intro\")\n```\n<sec:intro>\n```".to_string());
+        t.insert("c.qmd".to_string(), "# H {#sec-a}\nSee @sec-a and @sec-ab.\n<!-- @sec-a -->".to_string());
+        t.insert("d.tex".to_string(), "\\label{a}".to_string());
+        let tex = renamed(&t, "a.tex", "sec:intro", "sec:start");
+        assert_eq!(tex["a.tex"], "\\label{sec:start} \\label{sec:introduction}\n\\ref{sec:start} \\cref{x,sec:start,sec:introduction}\n% \\ref{sec:intro}\n\\cite{sec:intro} http://x/sec:intro");
+        assert_eq!(tex["b.typ"], t["b.typ"], "a LaTeX rename does not touch Typst");
+        assert!(missing(&tex).iter().all(|m| m["key"] != "sec:start"), "no new reference points nowhere");
+        let typ = renamed(&t, "b.typ", "sec:intro", "sec:begin");
+        assert_eq!(typ["b.typ"], "= H <sec:begin>\nsee @sec:begin and #ref(<sec:begin>) and @sec:introduction\n`@sec:intro` // @sec:intro\n#link(\"http://e/sec:intro\")\n```\n<sec:intro>\n```");
+        let qmd = renamed(&t, "c.qmd", "sec-a", "sec-b");
+        assert_eq!(qmd["c.qmd"], "# H {#sec-b}\nSee @sec-b and @sec-ab.\n<!-- @sec-a -->");
+        // A one-letter label is found by name, not inside "label".
+        assert_eq!(renamed(&t, "d.tex", "a", "b")["d.tex"], "\\label{b}");
+        for (to, bad) in [("sec:introduction", "already exists"), ("", "not a valid"), ("two words", "not a valid"), ("sec:intro", "already its name")] {
+            assert!(rename_edits(&t, "a.tex", "sec:intro", to).unwrap_err().contains(bad), "{to}");
+        }
+        assert!(rename_edits(&t, "a.tex", "nope", "x").is_err());
+    }
+
+    #[test]
+    fn rename_label_writes_for_review_or_not_at_all() {
+        let dir = std::env::temp_dir().join(format!("quire-rename-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&dir);
+        let before = sample();
+        for (rel, text) in &before {
+            fs::create_dir_all(dir.join(rel).parent().unwrap()).unwrap();
+            fs::write(dir.join(rel), text).unwrap();
+        }
+        let mut w = Workspace { root: Some(dir.canonicalize().unwrap()), known: before.clone(), ..Default::default() };
+        // A file changed on disk since the editor read it: nothing is written anywhere.
+        fs::write(dir.join("main.typ"), format!("{}\nmore", before["main.typ"])).unwrap();
+        let refused = w.rename_label("main.typ", "timeline", "schedule").unwrap_err();
+        assert_eq!(refused, "main.typ changed on disk; open it and try again.");
+        fs::write(dir.join("main.typ"), &before["main.typ"]).unwrap();
+        // Unsaved typing in a file the rename would change: refused as well.
+        w.typed_text.insert("main.typ".into(), "typing".into());
+        assert!(w.rename_label("main.typ", "timeline", "schedule").unwrap_err().contains("not saved yet"));
+        w.typed_text.clear();
+        for f in before.keys() {
+            assert_eq!(fs::read_to_string(dir.join(f)).unwrap(), before[f], "{f} untouched after a refusal");
+        }
+        let (files, places) = w.rename_label("main.typ", "timeline", "schedule").unwrap();
+        assert_eq!((files, places), (1, 2), "the definition and its one use");
+        let after = fs::read_to_string(dir.join("main.typ")).unwrap();
+        assert_eq!(after, before["main.typ"].replace("<timeline>", "<schedule>").replace("@timeline", "@schedule"));
+        assert_eq!(w.known["main.typ"], after);
+        assert_eq!(w.baseline["main.typ"], before["main.typ"], "Reject all brings back the exact old text");
+        assert_eq!(fs::read_to_string(dir.join("latex/main.tex")).unwrap(), before["latex/main.tex"], "another language is left alone");
+        let (labels, nowhere, _) = references(&w.known);
+        let uses = |name: &str| labels.iter().find(|l| l["name"] == name).map(|l| l["refs"].as_u64().unwrap());
+        assert_eq!((uses("schedule"), uses("timeline")), (Some(1), None));
+        assert!(nowhere.is_empty());
+        if let Ok(out) = std::env::var("QUIRE_DUMP") {
+            let reply = json!({"type": "label_renamed", "from": "timeline", "to": "schedule", "result": {"ok": true, "files": files, "places": places, "op": w.next_operation, "paths": w.operations.last().map_or(vec![], |o| o.files.keys().cloned().collect::<Vec<_>>())}});
+            fs::write(format!("{out}/rename-reply.json"), reply.to_string()).unwrap();
+            fs::write(format!("{out}/rename-folder.json"), w.state().to_string()).unwrap();
+            fs::write(format!("{out}/rename-files.json"), json!(w.known).to_string()).unwrap();
+            fs::write(format!("{out}/rename-before-files.json"), json!(before).to_string()).unwrap();
+            let refused = json!({"type": "label_renamed", "from": "timeline", "to": "schedule", "result": {"ok": false, "error": refused}});
+            fs::write(format!("{out}/rename-refused.json"), refused.to_string()).unwrap();
+        }
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn references_that_point_nowhere() {
+        let mut texts = sample();
+        assert!(!texts.is_empty());
+        assert_eq!(missing(&texts), Vec::<Value>::new(), "the sample has no broken reference");
+
+        // Planted mistakes, with a linked .bib for the citations.
+        texts.insert("refs.bib".into(), "@article{known2020, title={T}}\n@book{other, title={U}}".into());
+        texts.get_mut("latex/main.tex").unwrap().push_str("\nSee \\ref{sec:nope}, \\cref{sec:starter,fig:lost} \\citep{nobody2020,known2020}.\n");
+        texts.get_mut("main.typ").unwrap().push_str("\nAlso @nowhere and @known2020 and #cite(<ghost>).\n");
+        texts.get_mut("quarto/report.qmd").unwrap().push_str("\nSee @fig-missing and [@known2020; @unknown].\n");
+        let found = spots(&missing(&texts));
+        let has = |k: &str, key: &str| found.iter().any(|f| f.0 == k && f.1 == key);
+        assert!(has("ref", "sec:nope") && has("ref", "fig:lost") && has("cite", "nobody2020"));
+        assert!(has("ref", "nowhere") && has("ref", "ghost") && has("ref", "fig-missing") && has("cite", "unknown"));
+        assert_eq!(found.len(), 7, "{found:?}");
+        let (_, _, cites) = references(&texts);
+        assert!(cites.contains(&"known2020".to_string()) && cites.contains(&"other".to_string()) && !cites.contains(&"unknown".to_string()), "{cites:?}");
+        assert!(cites.windows(2).all(|w| w[0] < w[1]), "sorted, no repeats");
+        if let Ok(dir) = std::env::var("QUIRE_DUMP") {
+            let state = |t: &BTreeMap<String, String>| {
+                let (labels, missing, cites) = references(t);
+                json!({"type": "folder", "labels": labels, "missing": missing, "cites": cites})
+            };
+            fs::write(format!("{dir}/planted.json"), state(&texts).to_string()).unwrap();
+            fs::write(format!("{dir}/planted-files.json"), json!(texts).to_string()).unwrap();
+            let mut fixed = texts.clone();
+            fixed.insert("main.typ".into(), texts["main.typ"].replace("@nowhere", "@timeline"));
+            fs::write(format!("{dir}/planted-fixed.json"), state(&fixed).to_string()).unwrap();
+            fs::write(format!("{dir}/intact.json"), state(&sample()).to_string()).unwrap();
+        }
+        // Column of the second key of a list, counted in characters.
+        let lost = found.iter().find(|f| f.1 == "fig:lost").unwrap();
+        let line = texts["latex/main.tex"].split('\n').nth(lost.2 as usize).unwrap();
+        assert_eq!(&line[lost.3 as usize..lost.3 as usize + 8], "fig:lost");
+    }
+
+    #[test]
+    fn missing_is_never_a_guess() {
+        let quiet = |pairs: &[(&str, &str)]| {
+            let texts: BTreeMap<String, String> = pairs.iter().map(|(k, v)| (k.to_string(), v.to_string())).collect();
+            missing(&texts)
+        };
+        // E-mails, strings, comments, raw text and math.
+        assert!(quiet(&[("a.typ", "mail me@site.org, #import \"@preview/x:1.0.0\": y\n// @gone\n`@raw` $@m$")]).is_empty());
+        // Citations with no bibliography to judge them by.
+        assert!(quiet(&[("a.tex", "\\cite{x} \\nocite{*}"), ("b.qmd", "As [@smith2020] said.")]).is_empty());
+        // A bibliography this cannot read: Typst @key may be a citation.
+        assert!(quiet(&[("a.typ", "@smith\n#bibliography(\"refs.yml\")")]).is_empty());
+        // \bibitem entries are keys; cleveref lists and cite options; Quarto cross-refs are judged.
+        assert!(quiet(&[("a.tex", "\\begin{thebibliography}{9}\\bibitem{k1} A\\end{thebibliography} \\cite[p.~3]{k1} \\label{a}\\label{b} \\cref{a, b}")]).is_empty());
+        assert_eq!(quiet(&[("a.qmd", "@fig-x and [@smith]")]).len(), 1);
+    }
+
+    #[test]
+    fn missing_time_on_200_files() {
+        let texts: BTreeMap<String, String> = (0..200)
+            .map(|i| (format!("ch{i}.typ"), format!("= Chapter {i} <c{i}>\n{}", "Text with @c1 and a #link(<c2>)[x] and $x < y$.\n".repeat(150))))
+            .collect();
+        let (mut with, mut without) = (vec![], vec![]);
+        for _ in 0..5 {
+            let t = Instant::now();
+            let (found, _) = scan(&texts);
+            without.push(t.elapsed());
+            let t = Instant::now();
+            let (l, m, _) = references(&texts);
+            with.push(t.elapsed());
+            assert!(m.is_empty() && !l.is_empty() && !found.is_empty());
+        }
+        eprintln!("200 files, {} bytes: scan alone {without:?}, labels+missing {with:?}", texts.values().map(String::len).sum::<usize>());
+    }
+
+    #[test]
+    fn file_errors_have_no_os_codes() {
+        let gone = std::io::Error::from_raw_os_error(2);
+        assert!(err(gone).contains("moved or deleted"));
+        let other = std::io::Error::from_raw_os_error(21); // is a directory
+        assert!(!err(other).contains("os error"));
+    }
+
     #[test]
     fn quarto_output() {
         let doc = Path::new("/q/report.qmd");
@@ -2339,6 +3625,230 @@ mod tests {
     }
 
     #[test]
+    fn replace_all_matches_what_search_finds() {
+        let text = "Yeast rises\r\nno yeasty here, yeast \u{1F600} yeast\n";
+        assert_eq!(replace_all(text, "yeast", false, false, "flour"), ("flour rises\r\nno floury here, flour \u{1F600} flour\n".to_string(), 4));
+        assert_eq!(replace_all(text, "yeast", true, true, "x$0"), ("Yeast rises\r\nno yeasty here, x$0 \u{1F600} x$0\n".to_string(), 2));
+        assert_eq!(replace_all(text, "", false, false, "x"), (text.to_string(), 0));
+        let w = Workspace { known: map(&[("a", text.to_string())]), ..Default::default() };
+        assert_eq!(w.find("yeast", false, true, 99, None).0.len(), replace_all(text, "yeast", false, true, "").1);
+    }
+
+    #[test]
+    fn every_write_keeps_the_text_it_replaces() {
+        let tmp = std::env::temp_dir().join(format!("quire-keep-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&tmp);
+        let (dir, store) = (tmp.join("project"), tmp.join("store"));
+        fs::create_dir_all(&dir).unwrap();
+        let before = map(&[("a.md", "yeast one".to_string()), ("b.md", "yeast two".to_string())]);
+        for (rel, text) in &before {
+            fs::write(dir.join(rel), text).unwrap();
+        }
+        let mut w = Workspace { root: Some(dir.canonicalize().unwrap()), known: before.clone(), history: Some(store), ..Default::default() };
+        let texts = |w: &Workspace, rel: &str| w.versions(rel).iter().map(|v| v["text"].as_str().unwrap().to_string()).collect::<Vec<_>>();
+        // The editor's save is routine typing: two saves inside the gap keep one version.
+        w.save("a.md", "yeast edit1", None).unwrap();
+        w.save("a.md", "yeast edit2", None).unwrap();
+        assert_eq!(texts(&w, "a.md"), ["yeast one"]);
+        // A replace across files keeps each file's text, even right after a routine version.
+        let ops = |w: &Workspace| w.operations.last().map(|o| o.id);
+        w.replace_in_project("yeast", true, true, "flour", &[("a.md".into(), 1), ("b.md".into(), 1)]).unwrap();
+        assert_eq!(texts(&w, "a.md"), ["yeast edit2", "yeast one"]);
+        assert_eq!(texts(&w, "b.md"), ["yeast two"]);
+        // Undoing it keeps what the undo replaces.
+        w.undo_operation(ops(&w).unwrap()).unwrap();
+        assert_eq!(texts(&w, "a.md")[0], "flour edit2");
+        // A change by the agent or another program.
+        w.external("b.md", "agent text".into());
+        assert_eq!(texts(&w, "b.md")[0], "yeast two");
+        // A label rename.
+        fs::write(dir.join("l.typ"), "= A <sec:a>\n@sec:a").unwrap();
+        w.known.insert("l.typ".into(), "= A <sec:a>\n@sec:a".into());
+        w.rename_label("l.typ", "sec:a", "sec:b").unwrap();
+        assert_eq!(texts(&w, "l.typ"), ["= A <sec:a>\n@sec:a"]);
+        // Restoring a turn keeps the agent's text it removes.
+        w.turn = 1;
+        w.external("b.md", "agent two".into());
+        w.restore(1).unwrap();
+        assert_eq!(texts(&w, "b.md")[0], "agent two");
+        // The editor's text right before a restore, as the page sends it.
+        w.keep("a.md", "typed but not saved", true);
+        assert_eq!(texts(&w, "a.md")[0], "typed but not saved");
+        if let Ok(out) = std::env::var("QUIRE_DUMP") {
+            // What the page hears for "File history" on a.md (with these versions), and on a file with none.
+            fs::write(format!("{out}/history-reply.json"), json!({"type": "history", "req": 1, "path": "a.md", "versions": w.versions("a.md")}).to_string()).unwrap();
+            fs::write(format!("{out}/history-empty.json"), json!({"type": "history", "req": 1, "path": "a.md", "versions": w.versions("none.md")}).to_string()).unwrap();
+        }
+        // A renamed file takes its history along.
+        let old = texts(&w, "a.md");
+        w.rename("a.md", "c.md", &json!(1)).unwrap();
+        assert_eq!((texts(&w, "c.md"), texts(&w, "a.md")), (old, Vec::<String>::new()));
+        // Nothing in the project folder but the writer's files.
+        let mut names: Vec<_> = fs::read_dir(&dir).unwrap().map(|e| e.unwrap().file_name().into_string().unwrap()).collect();
+        names.sort();
+        assert_eq!(names, ["b.md", "c.md", "l.typ"]);
+        let _ = fs::remove_dir_all(&tmp);
+    }
+
+    #[test]
+    fn undo_operation_restores_untouched_files_once() {
+        let dir = std::env::temp_dir().join(format!("quire-undo-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&dir);
+        let before = map(&[("a.md", "yeast and yeast".to_string()), ("b.md", "yeast".to_string()), ("c.md", "yeast\nlate".to_string()), ("d.md", "bread".to_string())]);
+        for (rel, text) in &before {
+            fs::write(dir.join(rel), text).unwrap_or_else(|_| {
+                fs::create_dir_all(&dir).unwrap();
+                fs::write(dir.join(rel), text).unwrap()
+            });
+        }
+        let mut w = Workspace { root: Some(dir.canonicalize().unwrap()), known: before.clone(), ..Default::default() };
+        let all = |w: &mut Workspace| w.replace_in_project("yeast", true, true, "flour", &[("a.md".into(), 2), ("b.md".into(), 1), ("c.md".into(), 1)]).unwrap();
+        let disk = |f: &str| fs::read_to_string(dir.join(f)).unwrap();
+        // Everything untouched: byte for byte back, no review marks left, a second undo refused.
+        all(&mut w);
+        let id = w.next_operation;
+        let after_all = w.known.clone();
+        let result = w.undo_operation(id);
+        let dump = std::env::var("QUIRE_DUMP").ok();
+        let reply = |r: &Result<(Vec<String>, Vec<String>), String>| match r {
+            Ok((restored, skipped)) => json!({"type": "operation_undone", "op": id, "result": {"ok": true, "restored": restored, "skipped": skipped}}),
+            Err(error) => json!({"type": "operation_undone", "op": id, "result": {"ok": false, "error": error}}),
+        };
+        if let Some(out) = &dump {
+            fs::write(format!("{out}/undo-ok.json"), reply(&result).to_string()).unwrap();
+            fs::write(format!("{out}/undo-before-files.json"), json!(before).to_string()).unwrap();
+            fs::write(format!("{out}/undo-after-files.json"), json!(after_all).to_string()).unwrap();
+        }
+        let (back, skipped) = result.unwrap();
+        assert_eq!((back.len(), skipped.len()), (3, 0));
+        for f in before.keys() {
+            assert_eq!((disk(f), &w.known[f]), (before[f].clone(), &before[f]), "{f}");
+        }
+        assert!(w.baseline.is_empty(), "restored files are no longer for review");
+        let twice = w.undo_operation(id);
+        if let Some(out) = &dump {
+            fs::write(format!("{out}/undo-twice.json"), reply(&twice).to_string()).unwrap();
+        }
+        assert!(twice.unwrap_err().contains("already undone"));
+        // A file edited since is left as it is and named; the others come back.
+        all(&mut w);
+        let id = w.next_operation;
+        fs::write(dir.join("c.md"), "flour\nlate!").unwrap();
+        w.known.insert("c.md".into(), "flour\nlate!".into());
+        w.typed_text.insert("b.md".into(), "flour, typing".into());
+        let result = w.undo_operation(id);
+        if let Some(out) = &dump {
+            fs::write(format!("{out}/undo-skip.json"), reply(&result).to_string()).unwrap();
+        }
+        let (back, skipped) = result.unwrap();
+        assert_eq!((back, skipped), (vec!["a.md".to_string()], vec!["b.md".to_string(), "c.md".to_string()]), "typing in b.md counts as a change");
+        assert_eq!((disk("a.md"), disk("b.md"), disk("c.md")), (before["a.md"].clone(), "flour".to_string(), "flour\nlate!".to_string()));
+        assert!(w.baseline.get("a.md").is_none() && w.baseline.contains_key("b.md"));
+        // None can be restored: nothing is written and the operation is kept for retry.
+        for (f, text) in &before {
+            fs::write(dir.join(f), text).unwrap();
+        }
+        (w.known, w.baseline) = (before.clone(), BTreeMap::new());
+        w.typed_text.clear();
+        all(&mut w);
+        for f in ["a.md", "b.md", "c.md"] {
+            fs::write(dir.join(f), "other").unwrap();
+        }
+        let id = w.next_operation;
+        let result = w.undo_operation(id);
+        if let Some(out) = &dump {
+            fs::write(format!("{out}/undo-refused.json"), reply(&result).to_string()).unwrap();
+        }
+        let refused = result.unwrap_err();
+        assert!(refused.starts_with("Nothing was undone: a.md, b.md, c.md"), "{refused}");
+        assert_eq!(disk("a.md"), "other");
+        // An earlier review baseline survives the undo; a partial Accept does not block it.
+        fs::write(dir.join("d.md"), "bread").unwrap();
+        let mut w = Workspace { root: Some(dir.canonicalize().unwrap()), known: map(&[("d.md", "bread".to_string())]), ..Default::default() };
+        w.external("d.md", "bread bread".into()); // an agent change, base "bread"
+        fs::write(dir.join("d.md"), "bread bread").unwrap();
+        w.replace_in_project("bread", true, true, "toast", &[("d.md".into(), 2)]).unwrap();
+        w.baseline.insert("d.md".into(), "toast bread".into()); // the writer accepted part of it
+        w.undo_operation(w.next_operation).unwrap();
+        assert_eq!((disk("d.md"), w.baseline["d.md"].as_str()), ("bread bread".to_string(), "bread"), "back to the agent change, still for review");
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn replace_in_project_writes_for_review_or_not_at_all() {
+        let dir = std::env::temp_dir().join(format!("quire-replace-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&dir);
+        let before = map(&[("a.typ", "Yeast rises\nyeast yeasty caf\u{e9} \u{1F600} yeast".to_string()), ("b/c.tex", "yeast".to_string()), ("d.md", "bread".to_string())]);
+        for (rel, text) in &before {
+            fs::create_dir_all(dir.join(rel).parent().unwrap()).unwrap();
+            fs::write(dir.join(rel), text).unwrap();
+        }
+        let mut w = Workspace { root: Some(dir.canonicalize().unwrap()), known: before.clone(), ..Default::default() };
+        let shown = vec![("a.typ".to_string(), 2), ("b/c.tex".to_string(), 1)]; // match case, whole word
+        let untouched = |w: &Workspace, why: &str| {
+            for f in before.keys() {
+                assert_eq!(fs::read_to_string(dir.join(f)).unwrap(), before[f], "{f}: {why}");
+                assert_eq!(w.known[f], before[f], "{f}: {why}");
+            }
+            assert!(w.baseline.is_empty(), "{why}");
+        };
+        let stale = [("a.typ".to_string(), 3), ("b/c.tex".to_string(), 1)];
+        assert!(w.replace_in_project("yeast", true, true, "flour", &stale).unwrap_err().contains("a.typ changed since you searched"));
+        assert!(w.replace_in_project("yeast", true, true, "flour", &[("d.md".to_string(), 1)]).unwrap_err().contains("d.md changed since"));
+        assert!(w.replace_in_project("yeast", true, true, "flour", &[("gone.md".to_string(), 1)]).unwrap_err().contains("gone.md changed since"));
+        assert!(w.replace_in_project("zzz", true, true, "x", &[]).unwrap_err().contains("not found"));
+        untouched(&w, "stale counts");
+        fs::write(dir.join("b/c.tex"), "yeast!").unwrap();
+        assert_eq!(w.replace_in_project("yeast", true, true, "flour", &shown).unwrap_err(), "b/c.tex changed on disk; open it and try again. Nothing was replaced.");
+        fs::write(dir.join("b/c.tex"), "yeast").unwrap();
+        w.typed_text.insert("a.typ".into(), "typing".into());
+        assert!(w.replace_in_project("yeast", true, true, "flour", &shown).unwrap_err().contains("not saved yet"));
+        w.typed_text.clear();
+        untouched(&w, "disk change and typing");
+        // The second file cannot be written: the first goes back to how it was.
+        let mut read_only = fs::metadata(dir.join("b/c.tex")).unwrap().permissions();
+        read_only.set_readonly(true);
+        fs::set_permissions(dir.join("b/c.tex"), read_only.clone()).unwrap();
+        let failed = w.replace_in_project("yeast", true, true, "flour", &shown).unwrap_err();
+        assert!(failed.starts_with("b/c.tex was not changed") && failed.ends_with("Nothing was replaced."), "{failed}");
+        untouched(&w, "a failed write");
+        #[allow(clippy::permissions_set_readonly_false)]
+        read_only.set_readonly(false);
+        fs::set_permissions(dir.join("b/c.tex"), read_only).unwrap();
+        // One file's Replace leaves the others alone.
+        assert_eq!(w.replace_in_project("yeast", true, true, "flour", &shown[1..]), Ok((1, 1)));
+        assert_eq!((fs::read_to_string(dir.join("a.typ")).unwrap(), fs::read_to_string(dir.join("b/c.tex")).unwrap()), (before["a.typ"].clone(), "flour".to_string()));
+        assert_eq!(w.replace_in_project("yeast", true, true, "flour", &shown[..1]), Ok((1, 2)));
+        assert_eq!(fs::read_to_string(dir.join("a.typ")).unwrap(), "Yeast rises\nflour yeasty caf\u{e9} \u{1F600} flour");
+        assert_eq!(w.known["a.typ"], fs::read_to_string(dir.join("a.typ")).unwrap());
+        assert_eq!((&w.baseline["a.typ"], &w.baseline["b/c.tex"]), (&before["a.typ"], &before["b/c.tex"]), "Reject all brings back the exact old text");
+        assert!(!w.baseline.contains_key("d.md"));
+        if let Ok(out) = std::env::var("QUIRE_DUMP") {
+            let reply = |result: Value| json!({"type": "replace_result", "result": result}).to_string();
+            fs::write(format!("{out}/replace-ok.json"), reply(json!({"ok": true, "files": 2, "places": 3}))).unwrap();
+            fs::write(format!("{out}/replace-refused.json"), reply(json!({"ok": false, "error": "b/c.tex changed on disk; open it and try again. Nothing was replaced."}))).unwrap();
+            fs::write(format!("{out}/replace-before-files.json"), json!(before).to_string()).unwrap();
+            fs::write(format!("{out}/replace-after-files.json"), json!(w.known).to_string()).unwrap();
+        }
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn search_finds_text_across_files() {
+        let mut w = Workspace { known: map(&[("a.typ", "Yeast rises\r\nno yeasty here, yeast".to_string()), ("b/c.tex", "caf\u{e9} \u{1F600} yeast".to_string()), ("d.md", "bread".to_string())]), ..Default::default() };
+        let cols = |(h, _): (Vec<Value>, bool)| h.iter().map(|x| (x["path"].as_str().unwrap().to_string(), x["line"].as_u64().unwrap(), x["col"].as_u64().unwrap())).collect::<Vec<_>>();
+        let all = cols(w.find("yeast", false, false, 99, None));
+        assert_eq!(all, [("a.typ".into(), 0, 0), ("a.typ".into(), 1, 3), ("a.typ".into(), 1, 16), ("b/c.tex".into(), 0, 8)]); // emoji counts 2 in UTF-16
+        assert_eq!(cols(w.find("yeast", true, false, 99, None)).len(), 3); // match case drops "Yeast"
+        assert_eq!(cols(w.find("yeast", false, true, 99, None)).len(), 3); // whole word drops "yeasty"
+        assert_eq!(w.find("yeast", false, false, 2, None), (w.find("yeast", false, false, 2, None).0, true)); // capped
+        assert!(w.find("", false, false, 9, None).0.is_empty() && w.find("zzz", false, false, 9, None).0.is_empty());
+        w.typed_text.insert("d.md".into(), "unsaved yeast".into()); // typed text wins over disk
+        assert_eq!(cols(w.find("yeast", false, false, 99, None)).last().unwrap(), &("d.md".to_string(), 0, 8));
+        assert_eq!(cols(w.find("fresh", false, false, 99, Some(("d.md", "x fresh")))), [("d.md".to_string(), 0, 2)]); // the open buffer wins over typed text
+    }
+
+    #[test]
     fn typed() {
         let root = std::env::temp_dir().canonicalize().unwrap();
         let (tx, mut rx) = unbounded_channel();
@@ -2352,6 +3862,101 @@ mod tests {
         assert_eq!(rx.try_recv().unwrap(), json!({"event": "removeMemoryFiles", "files": [&file]}).to_string());
         w.external("a.typ", "agent again".into());
         assert!(rx.try_recv().is_err()); // it already does
+        w.control = None; // Word/HTML previews still have a diagnostic overlay.
+        w.typed("a.typ", "unsaved").unwrap();
+        w.forget("a.typ", Some("renamed.typ"));
+        assert!(!w.typed_text.contains_key("a.typ"), "a renamed file must not survive in the diagnostic overlay");
+    }
+
+    #[test]
+    fn pictures_go_to_figures_safely() {
+        let dir = std::env::temp_dir().join(format!("quire-img-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&dir);
+        let (root, out) = (dir.join("proj"), dir.join("outside"));
+        fs::create_dir_all(&root).unwrap();
+        fs::create_dir_all(&out).unwrap();
+        let root = root.canonicalize().unwrap();
+        let out = out.canonicalize().unwrap();
+        let mut w = Workspace { root: Some(root.clone()), ..Default::default() };
+        let png = [0x89, b'P', b'N', b'G'];
+        // A name that is taken gets -2, -3; the first file is untouched.
+        assert_eq!(w.paste_image("results.png", "image/png", &png).unwrap(), "figures/results.png");
+        fs::write(root.join("figures/results.png"), "mine").unwrap();
+        assert_eq!(w.paste_image("results.png", "image/png", &png).unwrap(), "figures/results-2.png");
+        assert_eq!(w.paste_image("results.png", "image/png", &png).unwrap(), "figures/results-3.png");
+        assert_eq!(fs::read_to_string(root.join("figures/results.png")).unwrap(), "mine");
+        // Spaces, accents and symbols; a pasted screenshot with no usable name.
+        assert_eq!(w.paste_image("Gráfico final (v2).PNG", "image/png", &png).unwrap(), "figures/grafico-final-v2.png");
+        assert_eq!(w.paste_image("日本語.png", "image/png", &png).unwrap(), "figures/image.png");
+        assert_eq!(w.paste_image("", "image/jpeg", &png).unwrap(), "figures/image.jpg");
+        // Not a picture, and too big: refused in plain words, nothing written.
+        let before = fs::read_dir(root.join("figures")).unwrap().count();
+        assert!(w.paste_image("a.zip", "application/zip", &png).unwrap_err().contains("not a picture"));
+        let big = vec![0u8; MAX_IMAGE as usize + 1];
+        assert!(w.paste_image("big.png", "image/png", &big).unwrap_err().contains("20 MB"));
+        assert_eq!(fs::read_dir(root.join("figures")).unwrap().count(), before);
+        // A dropped file from outside is copied; a second drop of the same name does not overwrite.
+        fs::write(out.join("Plot 1.jpeg"), "x").unwrap();
+        fs::write(out.join("notes.txt"), "x").unwrap();
+        assert_eq!(w.import_image(out.join("Plot 1.jpeg").to_str().unwrap()).unwrap(), ("figures/plot-1.jpeg".into(), true));
+        assert_eq!(w.import_image(out.join("Plot 1.jpeg").to_str().unwrap()).unwrap(), ("figures/plot-1-2.jpeg".into(), true));
+        assert!(w.import_image(out.join("notes.txt").to_str().unwrap()).unwrap_err().contains("not a picture"));
+        assert!(w.import_image(out.join("missing.png").to_str().unwrap()).unwrap_err().contains("not found"));
+        // A picture already in the project is only referenced, even through a ..
+        fs::create_dir_all(root.join("img")).unwrap();
+        fs::write(root.join("img/a.png"), "x").unwrap();
+        let inside = format!("{}/img/../img/a.png", root.display());
+        assert_eq!(w.import_image(&inside).unwrap(), ("img/a.png".into(), false));
+        assert!(!root.join("figures/a.png").exists());
+        // A figures folder that is a link out of the project is never written through.
+        #[cfg(unix)]
+        {
+            fs::remove_dir_all(root.join("figures")).unwrap();
+            std::os::unix::fs::symlink(&out, root.join("figures")).unwrap();
+            assert!(w.paste_image("x.png", "image/png", &png).is_err());
+            assert!(!out.join("x.png").exists());
+        }
+        // The reply names the picture as the open document writes it.
+        let w = Workspace { root: Some(root.clone()), known: map(&[("latex/main.tex", "\\documentclass{article}".to_string()), ("latex/ch/one.tex", "% !TEX root = ../main.tex\nHi".to_string()), ("chap/a.typ", String::new())]), ..Default::default() };
+        let r = |w: &Workspace, open: &str, added: Result<(String, bool), String>| w.image_reply(&json!(7), open, added);
+        let ok = |p: &str| Ok((p.to_string(), true));
+        assert_eq!(r(&w, "main.typ", ok("figures/a.png"))["rel"], "figures/a.png");
+        assert_eq!(r(&w, "chap/a.typ", ok("figures/a.png"))["rel"], "../figures/a.png");
+        assert_eq!(r(&w, "latex/ch/one.tex", ok("latex/figures/a.png"))["rel"], "figures/a.png"); // from main.tex, not one.tex
+        assert_eq!(r(&w, "latex/main.tex", ok("figures/a.png"))["rel"], "../figures/a.png");
+        assert_eq!(r(&w, "main.typ", Err("nope".into()))["error"], "nope");
+        // The Figure button: a choice outside the project is copied, inside it is referenced,
+        // Cancel writes nothing and is not an error.
+        #[cfg(unix)]
+        fs::remove_file(root.join("figures")).unwrap(); // the link from above
+        fs::write(out.join("pick.png"), "x").unwrap();
+        let mut pw = Workspace { root: Some(root.clone()), ..Default::default() };
+        let picked = pw.picked_image(&json!(3), "chap/a.typ", Some(out.join("pick.png").to_str().unwrap().to_string()));
+        assert_eq!((picked["path"].as_str(), picked["rel"].as_str(), picked["copied"].as_bool()), (Some("figures/pick.png"), Some("../figures/pick.png"), Some(true)));
+        assert!(root.join("figures/pick.png").exists());
+        let picked = pw.picked_image(&json!(4), "main.typ", Some(inside.clone()));
+        assert_eq!((picked["path"].as_str(), picked["copied"].as_bool()), (Some("img/a.png"), Some(false)));
+        let before = fs::read_dir(root.join("figures")).unwrap().count();
+        let cancelled = pw.picked_image(&json!(5), "main.typ", None);
+        assert_eq!(cancelled, json!({"type": "image_added", "req": 5, "cancelled": true}));
+        assert_eq!(fs::read_dir(root.join("figures")).unwrap().count(), before);
+        assert!(pw.picked_image(&json!(6), "main.typ", Some("/tmp/notes.txt".into()))["error"].is_string());
+        if let Ok(dump) = std::env::var("QUIRE_DUMP") {
+            let replies = json!({
+                "typst": r(&w, "main.typ", ok("figures/results.png")),
+                "typst_sub": r(&w, "chap/a.typ", ok("figures/results.png")),
+                "latex_chapter": r(&w, "latex/ch/one.tex", ok("latex/figures/results.png")),
+                "markdown": r(&w, "markdown/notes.md", ok("figures/my-plot.png")),
+                "quarto": r(&w, "quarto/report.qmd", ok("figures/my-plot.png")),
+                "pick_cancelled": pw.picked_image(&json!(7), "main.typ", None),
+                "pick_outside": pw.picked_image(&json!(7), "main.typ", Some(out.join("pick.png").to_str().unwrap().to_string())),
+                "inside": r(&w, "main.typ", Ok(("img/a.png".into(), false))),
+                "unsupported": r(&w, "main.typ", Workspace { root: Some(root.clone()), ..Default::default() }.import_image("/tmp/notes.txt")),
+                "oversized": r(&w, "main.typ", Err(Workspace::default().paste_image("big.png", "image/png", &big).unwrap_err())),
+            });
+            fs::write(format!("{dump}/image-replies.json"), replies.to_string()).unwrap();
+        }
+        let _ = fs::remove_dir_all(&dir);
     }
 
     #[test]
@@ -2412,14 +4017,30 @@ mod tests {
             let before = map(&[("main.typ", Some("old".to_string())), ("new.typ", None)]);
             assert_eq!(w.checkpoints, BTreeMap::from([(1, before)]));
 
-            // A save from a stale editor must not overwrite a newer disk version.
+            // A save from a stale editor must not overwrite a newer disk version, and says it wrote nothing.
             fs::write(root.join("main.typ"), "agent again").unwrap();
-            w.save("main.typ", "stale editor text", Some("old".into())).unwrap();
+            assert_eq!(w.save("main.typ", "stale editor text", Some("old".into())), Ok(false));
             assert_eq!(text("main.typ"), "agent again");
 
             // Accepting everything clears the baseline.
-            w.save("main.typ", "agent again", None).unwrap();
+            assert_eq!(w.save("main.typ", "agent again", None), Ok(true));
             assert!(!w.baseline.contains_key("main.typ"));
+
+            // A read-only file: the save fails in plain words and the disk keeps its text.
+            let locked = root.join("locked.typ");
+            fs::write(&locked, "kept").unwrap();
+            w.known.insert("locked.typ".into(), "kept".into());
+            let mut perms = fs::metadata(&locked).unwrap().permissions();
+            perms.set_readonly(true);
+            fs::set_permissions(&locked, perms.clone()).unwrap();
+            let e = w.save("locked.typ", "new words", None).unwrap_err();
+            assert!(e.contains("read-only") && !e.contains("os error"), "{e}");
+            assert_eq!(text("locked.typ"), "kept");
+            #[allow(clippy::permissions_set_readonly_false)]
+            perms.set_readonly(false);
+            fs::set_permissions(&locked, perms).unwrap();
+            fs::remove_file(&locked).unwrap();
+            w.known.remove("locked.typ");
 
             // Restore puts files back to before turn 1 and removes created ones.
             fs::write(root.join("new.typ"), "created").unwrap();
@@ -2455,11 +4076,11 @@ mod tests {
             w.create("figures", true).unwrap();
             assert!(root.join("figures").is_dir());
             w.baseline.insert("notes/ch1.typ".into(), "old text".into());
-            w.rename("notes", "chapters").unwrap();
+            w.rename("notes", "chapters", &Value::Null).unwrap();
             assert!(root.join("chapters/ch1.typ").exists() && !root.join("notes").exists());
             assert_eq!(w.baseline, map(&[("chapters/ch1.typ", "old text".to_string())]));
             assert!(w.create("chapters/ch1.typ", false).is_err());
-            assert!(w.rename("chapters", "chapters/in").is_err());
+            assert!(w.rename("chapters", "chapters/in", &Value::Null).is_err());
             assert!(w.delete("").is_err());
             w.delete("chapters").unwrap();
             assert_eq!(*lock(&TRASHED), [root.join("chapters")]);
@@ -2473,6 +4094,18 @@ mod tests {
         let save = json!({"type": "save", "root": "/some/other/folder", "path": "main.typ", "content": "x"});
         assert!(handle(&save).await.is_err());
         assert_eq!(text("main.typ"), "old");
+
+        // Each save, and each request that replaces the page's text, hears back by its `req`;
+        // a failure is in the writer's words, without the request's name.
+        let here = page(&root);
+        let answers = |req: u64| lock(&SENT).iter().filter(|m| m["req"] == req).cloned().collect::<Vec<_>>();
+        safe(json!({"type": "save", "root": here, "req": 101, "path": "main.typ", "content": "saved"})).await;
+        assert_eq!(answers(101), [json!({"type": "saved", "path": "main.typ", "req": 101, "ok": true})]);
+        assert_eq!(text("main.typ"), "saved");
+        safe(json!({"type": "open_file", "root": here, "req": 102, "path": "main.typ"})).await;
+        assert_eq!(answers(102), [json!({"type": "done", "req": 102})]);
+        safe(json!({"type": "open_file", "root": here, "req": 103, "path": "gone.typ"})).await;
+        assert_eq!(answers(103), [json!({"type": "error", "message": "Cannot open gone.typ", "req": 103, "op": "open_file", "kind": null})]);
 
         // Labels: definitions, uses, and look-alikes in comments, raw text, math and e-mails.
         let found = labels(&map(&[
@@ -2515,8 +4148,8 @@ mod tests {
         // A citation already in the .bib file is not fetched again.
         fs::write(root.join("refs.bib"), "@article{lecun2015, title={Deep learning}, doi={10.1038/Nature14539}}\n").unwrap();
         ws().known = map(&[("main.typ", r#"#bibliography("refs.bib")"#.to_string())]);
-        let r = cite("10.1038/nature14539", "main.typ").await.unwrap();
-        assert_eq!(r, json!({"key": "lecun2015", "bib": "refs.bib", "linked": true, "added": false}));
+        let r = cite("10.1038/nature14539", "main.typ", Some("deep")).await.unwrap();
+        assert_eq!(r, json!({"key": "lecun2015", "bib": "refs.bib", "linked": true, "added": false, "wanted": "deep"}));
 
         // Each language finds its .bib file its own way, and the LaTeX main file.
         {
@@ -2536,6 +4169,89 @@ mod tests {
         }
         let _ = fs::remove_dir_all(&dir);
     }
+
+    #[test]
+    fn citation_entry_goes_under_the_writers_key() {
+        let entry = "@article{https://doi.org/10.1/x, author = {Knuth, Donald}, year = {1984}}\n";
+        // Empty bib: the wanted key is used, the made-up one is not.
+        let (key, text) = add_entry("", entry, Some("knuth1984")).unwrap();
+        assert_eq!((key.as_str(), text.starts_with("@article{knuth1984,")), ("knuth1984", true));
+        assert!(!text.contains("doi.org/10.1/x,"));
+        // No wanted key: made from author and year, as before; existing entries are kept.
+        let bib = "@book{a, title={A}}\n";
+        let (key, text) = add_entry(bib, entry, None).unwrap();
+        assert_eq!(key, "knuth1984");
+        assert!(text.starts_with("@book{a, title={A}}\n\n@article{knuth1984,"));
+        // The paper is already there under another key: reported, not added twice.
+        let bib = "@article{knuth1984a, title={T}, doi={10.1/X}}\n";
+        assert_eq!(doi_key(bib, "10.1/x").as_deref(), Some("knuth1984a"));
+        assert_eq!(doi_key(bib, "10.2/y"), None);
+        // The key belongs to a different paper: refused, bib untouched.
+        let err = add_entry("@book{knuth1984, title={Other}}", entry, Some("knuth1984")).unwrap_err();
+        assert!(err.contains("already used for a different paper"), "{err}");
+        // Keys BibTeX cannot read are refused; common punctuation is fine.
+        for bad in ["a b", "a,b", "a{b", "", "a=b", "é"] {
+            assert!(add_entry("", entry, Some(bad)).unwrap_err().contains("cannot be a citation key"), "{bad}");
+        }
+        assert!(add_entry("", entry, Some("fig:a-b_c.1+2")).is_ok());
+        // BibTeX compares keys without case.
+        assert!(add_entry("@book{Knuth1984, title={Other}}", entry, Some("knuth1984")).is_err());
+        // doi.org sent something that is not BibTeX.
+        assert!(add_entry("", "<html>", Some("k")).is_err());
+    }
+
+    #[test]
+    fn latex_diagnostics_find_project_files_and_lines() {
+        let root = resolve(&std::env::temp_dir().join("quire-latex-diagnostic-root"));
+        let main = root.join("latex/main.tex");
+        let errors = latex_diagnostics("error: main.tex:7: Undefined control sequence\nmain.tex:7: Undefined control sequence", &main, &root);
+        assert_eq!(errors.len(), 1, "duplicate log lines collapse");
+        assert_eq!(errors[0]["path"], "latex/main.tex");
+        assert_eq!(errors[0]["line"], 6);
+        assert!(errors[0]["message"].as_str().unwrap().contains("Unknown LaTeX command"));
+        let errors = latex_diagnostics("./chapters/intro.tex:12: Missing $ inserted.", &main, &root);
+        assert_eq!(errors[0]["path"], "latex/chapters/intro.tex");
+        assert_eq!(errors[0]["line"], 11);
+        assert!(latex_diagnostics("../../outside.tex:3: Error", &main, &root).is_empty(), "never jump outside the project");
+        assert!(latex_diagnostics("main.tex:0: Error", &main, &root).is_empty());
+    }
+
+    #[test]
+    fn latex_diagnostics_name_the_command_or_file_from_real_logs() {
+        let root = resolve(&std::env::temp_dir().join("quire-latex-cause-root"));
+        let main = root.join("main.tex");
+        // tectonic: the summary line first, the raw log after it
+        let d = latex_diagnostics(include_str!("../../web/fixtures/tectonic-a.log"), &main, &root);
+        assert_eq!(d[0]["command"], "\\includegraphics");
+        assert_eq!(d[0]["message"], "Unknown command \\includegraphics.");
+        let d = latex_diagnostics(include_str!("../../web/fixtures/tectonic-e.log"), &main, &root);
+        assert_eq!(d[0]["file"], "missing.tex");
+        assert!(d[0].get("command").is_none());
+        // latexmk -file-line-error: each error is followed by its own l.N line
+        let log = "./chapter.tex:3: Undefined control sequence.\nl.3 \\foo\n\n./main.tex:3: Undefined control sequence.\nl.3 Hello \\textbff\n {x}";
+        let d = latex_diagnostics(log, &main, &root);
+        assert_eq!((d[0]["path"].as_str(), d[0]["command"].as_str()), (Some("chapter.tex"), Some("\\foo")));
+        assert_eq!((d[1]["path"].as_str(), d[1]["command"].as_str()), (Some("main.tex"), Some("\\textbff")));
+        // a context line with another number belongs to no one
+        let d = latex_diagnostics("main.tex:3: Undefined control sequence.\nl.9 \\foo", &main, &root);
+        assert!(d[0].get("command").is_none());
+        if let Ok(out) = std::env::var("QUIRE_DUMP") {
+            // What the page hears for the 0035 driver: real parsed logs and a real Typst diagnostic.
+            let fixture = |log: &str| latex_diagnostics(log, &main, &root);
+            let multi = "./ch/intro.tex:2: Undefined control sequence.\nl.2 \\SI\n{5}{m}\n\n./main.tex:3: LaTeX Error: File `figs/pik.png' not found.\nl.3 \\includegraphics{figs/pik.png}";
+            let dir = std::env::temp_dir().join(format!("quire-0035-{}", std::process::id()));
+            fs::create_dir_all(&dir).unwrap();
+            fs::write(dir.join("main.typ"), "#image(\"figs/pik.png\")\n").unwrap();
+            let typst = crate::engine::diagnostics(&dir.join("main.typ"), &dir, &BTreeMap::new()).unwrap();
+            let dump = json!({
+                "tex_a": fixture(include_str!("../../web/fixtures/tectonic-a.log")), "tex_d": fixture(include_str!("../../web/fixtures/tectonic-d.log")),
+                "tex_e": fixture(include_str!("../../web/fixtures/tectonic-e.log")), "tex_multi": fixture(multi), "typst_pic": typst,
+            });
+            fs::write(format!("{out}/error-fix-diagnostics.json"), dump.to_string()).unwrap();
+            let _ = fs::remove_dir_all(&dir);
+        }
+    }
+
 }
 
 #[cfg(all(test, windows))]

@@ -83,6 +83,7 @@
 [data-theme="quire-series"] .row { height: 24px; }
 [data-theme="quire-series"] .row.active, [data-theme="quire-series"] .row.active :is(.name, .codicon[class]) { color: #fff; }
 [data-theme="quire-series"] .row.active { font-weight: 600; }
+[data-theme="quire-series"] .row.outline.here { color: #fff; }
 [data-theme="quire-series"] .tabs { background: #fff; }
 [data-theme="quire-series"] .tab { border-right: 0; }
 [data-theme="quire-series"] .tab.active::before { height: 3px; background: var(--series); }
