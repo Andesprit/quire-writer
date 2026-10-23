@@ -176,7 +176,7 @@ private struct Line {
     checking = true
     Task {
       do {
-        checked[line.text] = try await Ask.check(line.text)
+        checked[line.text] = try await Ask.check(line.text, newerWins: false)
         problem = nil
       } catch {
         checked[line.text] = []  // not asked again until the line changes

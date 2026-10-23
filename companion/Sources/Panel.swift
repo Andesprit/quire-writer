@@ -286,9 +286,18 @@ final class Panel: NSPanel {
   static func replace() {
     guard let selection = draft.selection else { return }
     let text = draft.text
-    close()
+    panel.orderOut(nil)  // hidden, not closed: the keys sent next go to the app, not to the panel
     selection.app.activate()
-    DispatchQueue.main.asyncAfter(deadline: .now() + 0.3) { Selections.write(text, to: selection) }
+    DispatchQueue.main.asyncAfter(deadline: .now() + 0.3) {
+      // The panel comes back with the new text, so nothing is lost when the selection moved.
+      guard Selections.unchanged(selection) else {
+        (draft.failed, draft.status) = (true, "The selection in \(selection.app.localizedName ?? "the app") changed. Select the same text again, then press Replace.")
+        panel.orderFrontRegardless()
+        return
+      }
+      close()
+      Selections.write(text, to: selection)
+    }
   }
 
   /// Under the selection when the app says where it is (`text`, top-left origin), else under

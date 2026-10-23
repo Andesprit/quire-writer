@@ -117,7 +117,8 @@ enum Ask {
   ]
   static let keep = " Keep its meaning and its language."
 
-  static func check(_ text: String) async throws -> [Fix] {
+  /// `newerWins`: false for live underlines, so they never cancel the panel's request.
+  static func check(_ text: String, newerWins: Bool = true) async throws -> [Fix] {
     let prompt = """
       You proofread text the writer selected in another app: an email, a message or a document. \
       Find spelling, grammar and punctuation mistakes, and wrong words.
@@ -134,7 +135,7 @@ enum Ask {
       """
     let reply: String
     switch Engine.current {
-    case .acp: reply = try await Agent.shared.ask(prompt, kind: "check", agent: Prefs.agent)
+    case .acp: reply = try await Agent.shared.ask(prompt, kind: "check", agent: Prefs.agent, newerWins: newerWins)
     case .apple: reply = try await AppleModel.fixes(prompt)
     case .api: reply = try await API.ask(prompt)
     }

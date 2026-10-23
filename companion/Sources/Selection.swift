@@ -64,6 +64,15 @@ enum Selections {
     return Selection(app: app, element: nil, text: text, bounds: bounds(focused(ax)))
   }
 
+  /// Whether the writer still has the same text selected: they may click in their app while the
+  /// panel is open. Its app must be in front again.
+  static func unchanged(_ selection: Selection) -> Bool {
+    if let el = selection.element { return attr(el, kAXSelectedTextAttribute) as? String == selection.text }
+    let saved = Clipboard.save()
+    defer { Clipboard.restore(saved) }
+    return Clipboard.copy() == selection.text
+  }
+
   /// Puts `text` in place of the selection. Its app must be in front again.
   static func write(_ text: String, to selection: Selection) {
     if let el = selection.element {

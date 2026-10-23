@@ -94,7 +94,7 @@ final class Agent: @unchecked Sendable {
   private var waiting: [Int: CheckedContinuation<[String: Any], Error>] = [:]
   private var replies: [String: String] = [:]  // session id: the reply so far
   private var sessions: [String: (id: String, uses: Int)] = [:]  // "check" and "rewrite"
-  private var prompting: String?  // the session a prompt runs in
+  private var prompting: (sid: String, newerWins: Bool)?  // the session a prompt runs in
   private var buffer = Data()
   private var said: [String] = []  // its last lines of error output: why it stopped
   private let turn = Turn()
@@ -102,13 +102,15 @@ final class Agent: @unchecked Sendable {
   var isRunning: Bool { q.sync { process?.isRunning == true } }
 
   /// The agent's answer to `text`, asked in its `kind` session: "check" or "rewrite".
-  func ask(_ text: String, kind: String, agent id: String) async throws -> String {
-    if let sid = q.sync(execute: { prompting }) {
-      notify("session/cancel", ["sessionId": sid])  // the newer request wins
+  /// A `newerWins` request cancels a running one that is also `newerWins` (the panel's), never
+  /// a live underline check, and a live check cancels nothing: it waits its turn.
+  func ask(_ text: String, kind: String, agent id: String, newerWins: Bool = true) async throws -> String {
+    if newerWins, let p = q.sync(execute: { prompting }), p.newerWins {
+      notify("session/cancel", ["sessionId": p.sid])
     }
     await turn.begin()
     do {
-      let reply = try await prompt(text, kind: kind, agent: id)
+      let reply = try await prompt(text, kind: kind, agent: id, newerWins: newerWins)
       await turn.end()
       return reply
     } catch {
@@ -124,16 +126,19 @@ final class Agent: @unchecked Sendable {
     }
   }
 
-  private func prompt(_ text: String, kind: String, agent id: String) async throws -> String {
+  private func prompt(_ text: String, kind: String, agent id: String, newerWins: Bool) async throws -> String {
     try await start(id)
     let sid = try await session(kind)
     q.sync {
       replies[sid] = ""
-      prompting = sid
+      prompting = (sid, newerWins)
     }
     defer { q.sync { prompting = nil } }
-    _ = try await request("session/prompt", ["sessionId": sid, "prompt": [["type": "text", "text": text]]])
-    return q.sync { replies.removeValue(forKey: sid) ?? "" }
+    let r = try await request("session/prompt", ["sessionId": sid, "prompt": [["type": "text", "text": text]]])
+    let reply = q.sync { replies.removeValue(forKey: sid) ?? "" }
+    // A cancelled prompt still answers with the part of the reply that arrived: never use it.
+    guard r["stopReason"] as? String != "cancelled" else { throw Failure("The request was cancelled.") }
+    return reply
   }
 
   private func start(_ id: String) async throws {
